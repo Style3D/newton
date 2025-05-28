@@ -16,9 +16,10 @@
 from .solver import SolverBase
 from .solver_euler import SemiImplicitSolver
 from .solver_featherstone import FeatherstoneSolver
+from .solver_style3d import Style3DSolver
 from .solver_mujoco import MuJoCoSolver
-from .solver_vbd import VBDSolver
 from .solver_xpbd import XPBDSolver
+from .solver_vbd import VBDSolver
 
 __all__ = [
     "FeatherstoneSolver",
@@ -27,4 +28,5 @@ __all__ = [
     "SolverBase",
     "VBDSolver",
     "XPBDSolver",
+    "Style3DSolver",
 ]
