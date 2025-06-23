@@ -23,7 +23,7 @@ import newton
 import newton.examples
 import newton.utils
 from newton.geometry import PARTICLE_FLAG_ACTIVE, Mesh
-from newton.utils.renderer.ursina_renderer import UrsinaRenderer
+from newton.utils.renderer.polyscope_renderer import PolyscopeRenderer
 
 
 class Example:
@@ -105,8 +105,8 @@ class Example:
         self.model.particle_radius = wp.array([0.002] * self.model.particle_count, dtype=float)
         self.t = wp.zeros((1,), dtype=float)
 
-        self.paused = True
-        self.renderer = UrsinaRenderer(model=self.model)
+        self.renderer = PolyscopeRenderer(self.model)
+        self.renderer.set_user_update(self.update)
         self.cuda_graph = None
         if self.use_cuda_graph:
             with wp.ScopedCapture() as capture:
@@ -127,16 +127,9 @@ class Example:
             self.sim_time += self.dt
 
     def update(self):
-        self.renderer.update()
-        if not self.paused:
-            self.advance_frame()
-            self.advance_frame()
-            self.renderer.render(self.state0)
-
-    def input(self, key):
-        if not self.renderer.default_input(key):
-            if key == "space":
-                self.paused = not self.paused
+        self.advance_frame()
+        self.advance_frame()
+        self.renderer.update_state(self.state0)
 
     def run(self):
         self.renderer.run()
@@ -146,11 +139,4 @@ if __name__ == "__main__":
     wp.init()
     with wp.ScopedDevice("cuda:0"):
         example = Example()
-
-        def update():
-            example.update()
-
-        def input(key):
-            example.input(key)
-
         example.run()
