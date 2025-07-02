@@ -111,7 +111,7 @@ def eval_drag_kernel(
     vert_pos: wp.array(dtype=wp.vec3),
     # outputs
     forces: wp.array(dtype=wp.vec3),
-    # pd_diags: wp.array(dtype=float),
+    hessian_diags: wp.array(dtype=wp.mat33),
 ):
     fid = face_index[0]
     if fid != -1:
@@ -123,15 +123,18 @@ def eval_drag_kernel(
         p = x0 * coord[0] + x1 * coord[1] + x2 * coord[2]
         dir = drag_pos[0] - p
 
-        # spring_stiff = 1e2
+        # add force
         force = spring_stiff * dir
         wp.atomic_add(forces, face[0], force * coord[0])
         wp.atomic_add(forces, face[1], force * coord[1])
         wp.atomic_add(forces, face[2], force * coord[2])
 
-        # pd_diags[face[0]] += spring_k * coord[0]
-        # pd_diags[face[1]] += spring_k * coord[1]
-        # pd_diags[face[2]] += spring_k * coord[2]
+        # add hessian
+        dir = wp.normalize(dir)
+        hessian = wp.outer(dir, dir) * spring_stiff
+        hessian_diags[face[0]] += hessian * coord[0]
+        hessian_diags[face[1]] += hessian * coord[1]
+        hessian_diags[face[2]] += hessian * coord[2]
 
 
 @wp.kernel
