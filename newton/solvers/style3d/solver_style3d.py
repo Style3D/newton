@@ -15,7 +15,7 @@
 
 import warp as wp
 
-from newton.sim import Contacts, Control, State, Style3DModel, Style3DModelBuilder
+from newton.sim import Contacts, Control, EdgeBvh, State, Style3DModel, Style3DModelBuilder, TriBvh
 
 from ..solver import SolverBase
 from .builder import PDMatrixBuilder
@@ -85,6 +85,14 @@ class Style3DSolver(SolverBase):
         self.pd_matrix_builder = PDMatrixBuilder(model.particle_count)
         self.linear_solver = PcgSolver(model.particle_count, self.device)
 
+        # Collision
+        self.tri_bvh = TriBvh(model.tri_count, self.device)
+        self.edge_bvh = EdgeBvh(model.edge_count, self.device)
+        self.tri_bvh.build(model.particle_q, self.model.tri_indices)
+        self.edge_bvh.build(model.particle_q, self.model.edge_indices)
+        self.broad_phase_ee = wp.array(shape=(64, model.edge_count), dtype=int)
+        self.broad_phase_vf = wp.array(shape=(64, model.particle_count), dtype=int)
+
         # Fixed PD matrix
         self.pd_non_diags = SparseMatrixELL()
         self.pd_diags = wp.zeros(model.particle_count, dtype=float, device=self.device)
@@ -113,6 +121,29 @@ class Style3DSolver(SolverBase):
         self.drag_bary_coord = wp.zeros(1, dtype=wp.vec3, device=self.device)
 
     def step(self, state_in: State, state_out: State, control: Control, contacts: Contacts, dt: float):
+        self.tri_bvh.refit(state_in.particle_q, self.model.tri_indices)
+        self.edge_bvh.refit(state_in.particle_q, self.model.edge_indices)
+
+        self.tri_bvh.query_points(
+            state_in.particle_q,
+            state_in.particle_q,
+            self.model.tri_indices,
+            self.broad_phase_vf,
+            True,
+            5e-3,
+            5e-3,
+        )
+
+        self.edge_bvh.query_edges(
+            state_in.particle_q,
+            self.model.edge_indices,
+            state_in.particle_q,
+            self.model.edge_indices,
+            self.broad_phase_ee,
+            5e-3,
+            5e-3,
+        )
+
         wp.launch(
             kernel=init_step_kernel,
             dim=self.model.particle_count,
@@ -254,6 +285,10 @@ class Style3DSolver(SolverBase):
             outputs=[state_out.particle_qd],
             device=self.device,
         )
+
+    def rebuild_bvh(self, state: State):
+        self.tri_bvh.build(state.particle_q, self.model.tri_indices)
+        self.edge_bvh.build(state.particle_q, self.model.edge_indices)
 
     def precompute(self, builder: Style3DModelBuilder):
         with wp.ScopedTimer("Style3DSolver::precompute()"):
