@@ -17,6 +17,7 @@
 import warp as wp
 
 from newton.geometry import PARTICLE_FLAG_ACTIVE
+from newton.geometry.kernels import triangle_barycentric, triangle_normal
 from newton.sim.model import ShapeMaterials
 
 from ..vbd.solver_vbd import evaluate_body_particle_contact
@@ -256,7 +257,8 @@ def prepare_jacobi_preconditioner_kernel(
 ):
     tid = wp.tid()
     diag = wp.identity(3, float) * static_A_diags[tid]
-    diag += contact_hessian_diags[tid]
+    if static_A_diags[tid] > 0.0:
+        diag += contact_hessian_diags[tid]
     inv_A_diags[tid] = wp.inverse(diag)
     A_diags[tid] = diag
 
@@ -275,14 +277,16 @@ def PD_jacobi_step_kernel(
 
 @wp.kernel
 def nonlinear_step_kernel(
+    step_size: float,
     x_in: wp.array(dtype=wp.vec3),
     # outputs
     x_out: wp.array(dtype=wp.vec3),
     dx: wp.array(dtype=wp.vec3),
 ):
     tid = wp.tid()
-    x_out[tid] = x_in[tid] + dx[tid]
-    dx[tid] = wp.vec3(0.0)
+    delta_x = dx[tid]
+    x_out[tid] = x_in[tid] + delta_x * step_size
+    dx[tid] = delta_x * (1.0 - step_size)
 
 
 @wp.kernel
@@ -294,3 +298,202 @@ def update_velocity(
 ):
     particle = wp.tid()
     vel[particle] = 0.998 * (pos[particle] - prev_pos[particle]) / dt
+
+
+# region Collision
+
+
+@wp.kernel
+def handle_vertex_triangle_contacts_kernel(
+    radius: float,
+    stiff_factor: float,
+    pos: wp.array(dtype=wp.vec3),
+    tri_indices: wp.array(dtype=int, ndim=2),
+    broad_phase_vf: wp.array(dtype=int, ndim=2),
+    static_diags: wp.array(dtype=float),
+    # outputs
+    forces: wp.array(dtype=wp.vec3),
+    hessian_diags: wp.array(dtype=wp.mat33),
+):
+    vid = wp.tid()
+
+    x0 = pos[vid]
+    force0 = wp.vec3(0.0)
+    hess0 = wp.identity(n=3, dtype=float) * 0.0
+    vert_stiff = static_diags[vid]
+    is_collided = wp.int32(0)
+
+    count = broad_phase_vf[0, vid]
+    for i in range(count):
+        fid = broad_phase_vf[i + 1, vid]
+        face = wp.vec3i(tri_indices[fid, 0], tri_indices[fid, 1], tri_indices[fid, 2])
+        x1 = pos[face[0]]
+        x2 = pos[face[1]]
+        x3 = pos[face[2]]
+        tri_normal = triangle_normal(x1, x2, x3)
+        dist = wp.dot(x0 - x1, tri_normal)
+        p = x0 - tri_normal * dist
+        bary_coord = triangle_barycentric(x1, x2, x3, p)
+
+        if wp.abs(dist) > radius:
+            continue
+        if bary_coord[0] < 0.0 or bary_coord[1] < 0.0 or bary_coord[2] < 0.0:
+            continue  # is outside triangle
+
+        face_stiff = (static_diags[face[0]] + static_diags[face[1]] + static_diags[face[2]]) / 3.0
+        stiff = stiff_factor * (vert_stiff * face_stiff) / (vert_stiff + face_stiff)
+
+        force = stiff * tri_normal * (radius - wp.abs(dist)) * wp.sign(dist)
+        hess = stiff * wp.outer(tri_normal, tri_normal)
+
+        force0 += force
+        wp.atomic_add(forces, face[0], -force * bary_coord[0])
+        wp.atomic_add(forces, face[1], -force * bary_coord[1])
+        wp.atomic_add(forces, face[2], -force * bary_coord[2])
+
+        hess0 += hess
+        wp.atomic_add(hessian_diags, face[0], hess * bary_coord[0] * bary_coord[0])
+        wp.atomic_add(hessian_diags, face[1], hess * bary_coord[1] * bary_coord[1])
+        wp.atomic_add(hessian_diags, face[2], hess * bary_coord[2] * bary_coord[2])
+        is_collided = 1
+
+    if is_collided != 0:
+        wp.atomic_add(forces, vid, force0)
+        wp.atomic_add(hessian_diags, vid, hess0)
+
+
+@wp.kernel
+def handle_edge_edge_contacts_kernel(
+    radius: float,
+    stiff_factor: float,
+    pos: wp.array(dtype=wp.vec3),
+    edge_indices: wp.array(dtype=int, ndim=2),
+    broad_phase_ee: wp.array(dtype=int, ndim=2),
+    static_diags: wp.array(dtype=float),
+    # outputs
+    forces: wp.array(dtype=wp.vec3),
+    hessian_diags: wp.array(dtype=wp.mat33),
+):
+    eid = wp.tid()
+    edge0 = wp.vec2i(edge_indices[eid, 2], edge_indices[eid, 3])
+
+    x0 = pos[edge0[0]]
+    x1 = pos[edge0[1]]
+
+    force0 = wp.vec3(0.0)
+    force1 = wp.vec3(0.0)
+    hess0 = wp.identity(n=3, dtype=float) * 0.0
+    hess1 = wp.identity(n=3, dtype=float) * 0.0
+    stiff_0 = (static_diags[edge0[0]] + static_diags[edge0[1]]) / 2.0
+    is_collided = wp.int32(0)
+
+    count = broad_phase_ee[0, eid]
+    for i in range(count):
+        idx = broad_phase_ee[i + 1, eid]
+        edge1 = wp.vec2i(edge_indices[idx, 2], edge_indices[idx, 3])
+        x2, x3 = pos[edge1[0]], pos[edge1[1]]
+        edge_edge_parallel_epsilon = wp.float32(1e-5)
+
+        st = wp.closest_point_edge_edge(x0, x1, x2, x3, edge_edge_parallel_epsilon)
+        s, t = st[0], st[1]
+
+        if (s < 0) or (s > 1) or (t < 0) or (t > 1):
+            continue
+
+        c1 = wp.lerp(x0, x1, s)
+        c2 = wp.lerp(x2, x3, t)
+        dir = c1 - c2
+        dist = wp.length(dir)
+
+        if 1e-6 < dist < radius:
+            stiff_1 = (static_diags[edge1[0]] + static_diags[edge1[1]]) / 2.0
+            stiff = stiff_factor * (stiff_0 * stiff_1) / (stiff_0 + stiff_1)
+
+            dir = wp.normalize(dir)
+            force = stiff * dir * (radius - dist)
+            hess = stiff * wp.outer(dir, dir)
+
+            force0 += force * (1.0 - s)
+            force1 += force * s
+            wp.atomic_add(forces, edge1[0], -force * (1.0 - t))
+            wp.atomic_add(forces, edge1[1], -force * t)
+
+            hess0 += hess * (1.0 - s) * (1.0 - s)
+            hess1 += hess * s * s
+            wp.atomic_add(hessian_diags, edge1[0], hess * (1.0 - t) * (1.0 - t))
+            wp.atomic_add(hessian_diags, edge1[1], hess * t * t)
+            is_collided = 1
+
+    if is_collided != 0:
+        wp.atomic_add(forces, edge0[0], force0)
+        wp.atomic_add(forces, edge0[1], force1)
+        wp.atomic_add(hessian_diags, edge0[0], hess0)
+        wp.atomic_add(hessian_diags, edge0[1], hess1)
+
+
+# @wp.func
+# def intersection_gradient(
+#
+# ):
+#     pass
+#
+#
+# @wp.kernel
+# def untangling_kernel(
+#     radius: float,
+#     stiff: float,
+#     pos: wp.array(dtype = wp.vec3),
+#     tri_indices: wp.array(dtype = int, ndim = 2),
+#     edge_indices: wp.array(dtype = int, ndim = 2),
+#     broad_phase_ef: wp.array(dtype = int, ndim = 2),
+#     # outputs
+#     forces: wp.array(dtype = wp.vec3),
+#     hessian_diags: wp.array(dtype = wp.mat33),
+# ):
+#     eid = wp.tid()
+#     edge0 = wp.vec2i(edge_indices[eid, 2],
+#                      edge_indices[eid, 3],
+#                      edge_indices[eid, 0],
+#                      edge_indices[eid, 1])
+#
+#     ex0 = pos[edge0[0]]
+#     ex1 = pos[edge0[1]]
+#     force0 = wp.vec3(0.0)
+#     force1 = wp.vec3(0.0)
+#     hess0 = wp.identity(n=3, dtype=float) * 0.0
+#     hess1 = wp.identity(n=3, dtype=float) * 0.0
+#     is_collided = wp.int32(0)
+#
+#     count = broad_phase_ef[0, eid]
+#     for i in range(count):
+#         fid = broad_phase_ef[i + 1, eid]
+#         edge1 = wp.vec3i(tri_indices[fid, 0],
+#                          tri_indices[fid, 1],
+#                          tri_indices[fid, 2])
+#         fx0 = pos[edge1[0]]
+#         fx1 = pos[edge1[1]]
+#         fx2 = pos[edge1[2]]
+#         face_normal = wp.cross(fx1 - fx0, fx2 - fx1)
+#         normal_len = wp.length(face_normal)
+#         if normal_len < 1e-8:
+#             continue # invalid triangle
+#
+#         face_normal = wp.normalize(face_normal)
+#         d1 = wp.dot(face_normal, ex0 - fx0)
+#         d2 = wp.dot(face_normal, ex1 - fx0)
+#         if d1 * d2 >= 0.0:
+#             continue # on same side
+#
+#         hit_point = (ex0 * wp.abs(d2) + ex1 * wp.abs(d1)) / (wp.abs(d2) + wp.abs(d1))
+#         bary_coord = triangle_closest_point_barycentric(fx0, fx1, fx2, hit_point)
+#
+#         if (bary_coord[0] < 1e-2) or (bary_coord[1] < 1e-2) or (bary_coord[2] < 1e-2):
+#             continue # hit outside
+#
+#         G = wp.vec3(0.0)
+#
+#
+#
+#
+
+# endregion
