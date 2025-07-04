@@ -19,6 +19,7 @@ from newton.sim import Contacts, Control, State, Style3DModel, Style3DModelBuild
 
 from ..solver import SolverBase
 from .builder import PDMatrixBuilder
+from .collision import Collision
 from .kernels import (
     eval_bend_kernel,
     eval_body_contact_kernel,
@@ -63,27 +64,35 @@ class Style3DSolver(SolverBase):
     def __init__(
         self,
         model: Style3DModel,
-        iterations=10,
-        drag_spring_stiff: float = 1e2,
-        enable_mouse_dragging: bool = False,
-        integrate_with_external_rigid_solver: bool = False,
-        friction_epsilon: float = 1e-2,
+        iterations: int = 20,  # Number of iterations for solving nonlinear equation
+        internal_damping: float = 0.0,  # Internal damping factor (for stability, often between 0.0 and 1.0)
+        friction_epsilon: float = 1e-2,  # Friction epsilon for cloth-body
+        air_damping: float = 0.1,  # Air damping factor (often between 0.0 and 2.0)
+        # Collision
+        stiff_vf: float = 0.1,  # Stiffness coefficient for vertex-face (VF) collision constraints
+        stiff_ee: float = 0.1,  # Stiffness coefficient for edge-edge (EE) collision constraints
+        stiff_ef: float = 1.0,  # Stiffness coefficient for edge-face (EF) collision constraints
+        # Dragging
+        dragging_stiff=1e2,  # Stiffness coefficient for dragging spring
+        enable_mouse_dragging=True,  # Enable mouse dragging for development
     ):
-        """
-        Args:
-            model: The `Style3DModel` to integrate.
-            iterations: Number of non-linear iterations per step.
-            drag_spring_stiff: The stiffness of spring connecting barycentric-weighted drag-point and target-point.
-            enable_mouse_dragging: Enable/disable dragging kernel.
-        """
-
         super().__init__(model)
         self.style3d_model = model
+        self.air_damping = air_damping
+        self.dragging_stiff = dragging_stiff
         self.nonlinear_iterations = iterations
-        self.drag_spring_stiff = drag_spring_stiff
-        self.enable_mouse_dragging = enable_mouse_dragging
+        self.internal_damping = internal_damping
+        self.friction_epsilon = friction_epsilon
+        self.enable_dragging = enable_mouse_dragging
         self.pd_matrix_builder = PDMatrixBuilder(model.particle_count)
         self.linear_solver = PcgSolver(model.particle_count, self.device)
+
+        # Collision
+        self.collision = Collision(self.device, model.particle_count, model.edge_count, model.tri_count)
+        self.collision.rebuild_bvh(model.particle_q, model.tri_indices, model.edge_indices)
+        self.collision.stiff_vf = stiff_vf
+        self.collision.stiff_ee = stiff_ee
+        self.collision.stiff_ef = stiff_ef
 
         # Fixed PD matrix
         self.pd_non_diags = SparseMatrixELL()
@@ -104,8 +113,7 @@ class Style3DSolver(SolverBase):
         self.contact_hessian_diags = wp.zeros(self.model.particle_count, dtype=wp.mat33, device=self.device)
         self.body_particle_contact_count = wp.zeros((model.particle_count,), dtype=wp.int32, device=self.device)
         self.body_contact_max = model.shape_count * model.particle_count
-        self.integrate_with_external_rigid_solver = integrate_with_external_rigid_solver
-        self.friction_epsilon = friction_epsilon
+        self.integrate_with_external_rigid_solver = True
 
         # Drag info
         self.drag_pos = wp.zeros(1, dtype=wp.vec3, device=self.device)
@@ -113,6 +121,9 @@ class Style3DSolver(SolverBase):
         self.drag_bary_coord = wp.zeros(1, dtype=wp.vec3, device=self.device)
 
     def step(self, state_in: State, state_out: State, control: Control, contacts: Contacts, dt: float):
+        self.collision.refit_bvh(state_in.particle_q, self.model.tri_indices, self.model.edge_indices)
+        self.collision.broad_phase(state_in.particle_q, self.model.tri_indices, self.model.edge_indices)
+
         wp.launch(
             kernel=init_step_kernel,
             dim=self.model.particle_count,
@@ -151,6 +162,18 @@ class Style3DSolver(SolverBase):
 
             # contact
             self.contact_hessian_diags.zero_()
+
+            if _iter > 0:
+                self.collision.refit_bvh(state_in.particle_q, self.model.tri_indices, self.model.edge_indices)
+
+            self.collision.narrow_phase(
+                state_in.particle_q,
+                self.model.tri_indices,
+                self.model.edge_indices,
+                self.static_A_diags,
+                self.rhs,
+                self.contact_hessian_diags,
+            )
 
             wp.launch(
                 kernel=eval_body_contact_kernel,
@@ -211,12 +234,12 @@ class Style3DSolver(SolverBase):
                 device=self.device,
             )
 
-            if self.enable_mouse_dragging:
+            if self.enable_dragging:
                 wp.launch(
                     eval_drag_kernel,
                     dim=1,
                     inputs=[
-                        self.drag_spring_stiff,
+                        self.dragging_stiff,
                         self.drag_index,
                         self.drag_pos,
                         self.drag_bary_coord,
@@ -254,6 +277,9 @@ class Style3DSolver(SolverBase):
             outputs=[state_out.particle_qd],
             device=self.device,
         )
+
+    def rebuild_bvh(self, state: State):
+        self.collision.rebuild_bvh(state.particle_q, self.model.tri_indices, self.model.edge_indices)
 
     def precompute(self, builder: Style3DModelBuilder):
         with wp.ScopedTimer("Style3DSolver::precompute()"):

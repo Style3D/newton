@@ -182,6 +182,28 @@ def triangle_closest_point(a: wp.vec3, b: wp.vec3, c: wp.vec3, p: wp.vec3):
 
 
 @wp.func
+def triangle_normal(A: wp.vec3, B: wp.vec3, C: wp.vec3):
+    return wp.normalize(wp.cross(B - A, C - B))
+
+
+@wp.func
+def triangle_barycentric(A: wp.vec3, B: wp.vec3, C: wp.vec3, P: wp.vec3):
+    v0 = A - C
+    v1 = B - C
+    v2 = P - C
+    dot00 = wp.dot(v0, v0)
+    dot01 = wp.dot(v0, v1)
+    dot02 = wp.dot(v0, v2)
+    dot11 = wp.dot(v1, v1)
+    dot12 = wp.dot(v1, v2)
+    denom = dot00 * dot11 - dot01 * dot01
+    invDenom = 0.0 if denom == 0.0 else 1.0 / denom
+    u = (dot11 * dot02 - dot01 * dot12) * invDenom
+    v = (dot00 * dot12 - dot01 * dot02) * invDenom
+    return wp.vec3(u, v, 1.0 - u - v)
+
+
+@wp.func
 def sphere_sdf(center: wp.vec3, radius: float, p: wp.vec3):
     return wp.length(p - center) - radius
 
