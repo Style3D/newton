@@ -20,6 +20,7 @@ from newton.sim import EdgeBvh, TriBvh
 from .kernels import (
     handle_edge_edge_contacts_kernel,
     handle_vertex_triangle_contacts_kernel,
+    solve_untangling_kernel,
 )
 
 ########################################################################################################################
@@ -103,6 +104,9 @@ class Collision:
             tri_indices: Triangle connectivity.
             edge_indices: Edge connectivity.
         """
+        max_dist = self.radius * 3.0
+        query_radius = self.radius * 2.0
+
         # Vertex-face collision candidates
         self.tri_bvh.triangle_vs_point(
             pos,
@@ -110,8 +114,8 @@ class Collision:
             tri_indices,
             self.broad_phase_vf,
             True,
-            5e-3,
-            3e-3,
+            max_dist,
+            query_radius,
         )
 
         # Edge-edge collision candidates
@@ -122,8 +126,16 @@ class Collision:
             edge_indices,
             self.broad_phase_ee,
             True,
-            5e-3,
-            3e-3,
+            max_dist,
+            query_radius,
+        )
+
+        self.tri_bvh.aabb_vs_aabb(
+            self.edge_bvh.lower_bounds,
+            self.edge_bvh.upper_bounds,
+            self.broad_phase_ef,
+            query_radius,
+            False,
         )
 
     def narrow_phase(
@@ -147,12 +159,14 @@ class Collision:
             forces: Output force array (accumulated).
             hessian_diags: Output diagonal blocks of the collision Hessian.
         """
+        thickness = 2.0 * self.radius
+
         if self.stiff_vf > 0:
             wp.launch(
                 handle_vertex_triangle_contacts_kernel,
                 dim=len(pos),
                 inputs=[
-                    3e-3,
+                    thickness,
                     self.stiff_vf,
                     pos,
                     tri_indices,
@@ -168,11 +182,28 @@ class Collision:
                 handle_edge_edge_contacts_kernel,
                 dim=edge_indices.shape[0],
                 inputs=[
-                    3e-3,
+                    thickness,
                     self.stiff_ee,
                     pos,
                     edge_indices,
                     self.broad_phase_ee,
+                    vert_stiff,
+                ],
+                outputs=[forces, hessian_diags],
+                device=self.device,
+            )
+
+        if self.stiff_ef > 0:
+            wp.launch(
+                solve_untangling_kernel,
+                dim=edge_indices.shape[0],
+                inputs=[
+                    thickness,
+                    self.stiff_ef,
+                    pos,
+                    tri_indices,
+                    edge_indices,
+                    self.broad_phase_ef,
                     vert_stiff,
                 ],
                 outputs=[forces, hessian_diags],

@@ -69,12 +69,12 @@ class Style3DSolver(SolverBase):
         friction_epsilon: float = 1e-2,  # Friction epsilon for cloth-body
         air_damping: float = 0.1,  # Air damping factor (often between 0.0 and 2.0)
         # Collision
-        stiff_vf: float = 0.1,  # Stiffness coefficient for vertex-face (VF) collision constraints
+        stiff_vf: float = 0.5,  # Stiffness coefficient for vertex-face (VF) collision constraints
         stiff_ee: float = 0.1,  # Stiffness coefficient for edge-edge (EE) collision constraints
         stiff_ef: float = 1.0,  # Stiffness coefficient for edge-face (EF) collision constraints
         # Dragging
-        dragging_stiff=1e2,  # Stiffness coefficient for dragging spring
-        enable_mouse_dragging=True,  # Enable mouse dragging for development
+        dragging_stiff: float = 1e2,  # Stiffness coefficient for dragging spring
+        enable_mouse_dragging: bool = True,  # Enable mouse dragging for development
     ):
         super().__init__(model)
         self.style3d_model = model
