@@ -21,6 +21,7 @@ import polyscope as ps
 import polyscope.imgui as psim
 import warp as wp
 
+from newton.geometry.types import Mesh
 from newton.sim import Model, State
 
 ########################################################################################################################
@@ -33,6 +34,7 @@ class PolyscopeRenderer:
         self,
         model: Model = None,
         window_size: tuple[int, int] = (1920, 1080),
+        scale: float = 1.0,
         vsync=False,
     ):
         """Initialize a 3D renderer with customizable window properties.
@@ -44,15 +46,23 @@ class PolyscopeRenderer:
         self.vsync = vsync
         self.model = model
         self.paused = True
+        self.scale = scale
         self.sim_time = 0.0
         self.sim_frames = 0
-        self._tri_mesh = None
-        self._tri_indices = None
+        self.tri_indices = None
         self._coord_axes = None
         self.user_update = None
         self._pick_result = None
-        self._body_meshes = None
         self.ground_plane_mode = "tile_reflection"
+
+        # Cache variables
+        self.shape_flags = model.shape_flags.numpy()
+        self._body_transform_mat4x4 = wp.zeros(model.body_count, dtype=wp.mat44)
+
+        # Render entities
+        self.tri_entity = None
+        self.particle_entity = None
+        self.body_entities = {}
 
         # FPS counting
         self._sim_fps = 0.0
@@ -79,7 +89,7 @@ class PolyscopeRenderer:
         ps.init()
         ps.set_SSAA_factor(4)
         ps.set_enable_vsync(vsync)
-        ps.set_ground_plane_height(0)
+        ps.set_ground_plane_height(0.1)
         ps.set_ground_plane_mode(self.ground_plane_mode)
         ps.set_automatically_compute_scene_extents(False)
         ps.set_window_size(window_size[0], window_size[1])
@@ -121,53 +131,137 @@ class PolyscopeRenderer:
 
         # Add meshes
         if model is not None:
-            self._tri_indices = model.tri_indices.numpy()
-            self._tri_mesh = ps.register_surface_mesh(
-                name="Triangles",
-                vertices=model.particle_q.numpy().reshape(model.particle_count, 3),
-                faces=model.tri_indices.numpy().reshape(model.tri_count, 3),
-                color=(184 / 255.0, 67 / 255.0, 1),
-                back_face_policy="custom",
-                edge_color=(0, 0, 0),
-                smooth_shade=False,
-                edge_width=0.3,
-            )
-            self._tri_mesh.set_selection_mode("faces_only")
+            # Register particle entity
+            if model.particle_count > 0:
+                self.particle_entity = ps.register_point_cloud(
+                    name="Particles",
+                    enabled=False,
+                    points=model.particle_q.numpy().reshape(model.particle_count, 3) * self.scale,
+                    radius=model.particle_radius.numpy()[0] * self.scale,
+                )
 
+            # Register triangle entity
+            if model.tri_count > 0:
+                self.tri_indices = model.tri_indices.numpy()
+                self.tri_entity = ps.register_surface_mesh(
+                    name="Triangles",
+                    vertices=model.particle_q.numpy().reshape(model.particle_count, 3) * self.scale,
+                    faces=model.tri_indices.numpy().reshape(model.tri_count, 3),
+                    color=(184 / 255.0, 67 / 255.0, 1),
+                    back_face_policy="custom",
+                    edge_color=(0, 0, 0),
+                    smooth_shade=False,
+                    edge_width=0.3,
+                )
+                self.tri_entity.set_selection_mode("faces_only")
+
+            # Register body entity
             for i in range(model.body_count):
                 shape_indices = model.body_shapes[i]
                 for shape_idx in shape_indices:
-                    ps.register_surface_mesh(
-                        name=model.shape_key[shape_idx],
-                        vertices=model.shape_geo_src[shape_idx].vertices,
-                        faces=model.shape_geo_src[shape_idx].indices.reshape(-1, 3),
-                        back_face_policy="cull",
-                        edge_color=(1, 1, 1),
-                        smooth_shade=False,
-                        edge_width=0.2,
-                        color=(0, 0, 0),
-                        material="wax",
-                    )
+                    if isinstance(model.shape_geo_src[shape_idx], Mesh):
+                        if self.shape_flags[shape_idx] & 1 == 0:
+                            continue
+
+                        @wp.kernel
+                        def transform_vertices_kernel(
+                            index: wp.int32,
+                            scale: float,
+                            vertices_in: wp.array(dtype=wp.vec3),
+                            scaling3d: wp.array(dtype=wp.vec3),
+                            transforms: wp.array(dtype=wp.transform),
+                            vertices_out: wp.array(dtype=wp.vec3),
+                        ):
+                            tid = wp.tid()
+                            scaling = scaling3d[index] * scale
+                            new_pos = wp.transform_point(transforms[index], vertices_in[tid])
+                            new_pos[0] *= scaling[0]
+                            new_pos[1] *= scaling[1]
+                            new_pos[2] *= scaling[2]
+                            vertices_out[tid] = new_pos
+
+                        shape_vertices = wp.array(model.shape_geo_src[shape_idx].vertices, dtype=wp.vec3)
+
+                        wp.launch(
+                            transform_vertices_kernel,
+                            dim=len(shape_vertices),
+                            inputs=[
+                                shape_idx,
+                                self.scale,
+                                shape_vertices,
+                                model.shape_geo.scale,
+                                model.shape_transform,
+                            ],
+                            outputs=[shape_vertices],
+                        )
+
+                        self.body_entities[model.shape_key[shape_idx]] = ps.register_surface_mesh(
+                            name=model.shape_key[shape_idx],
+                            vertices=shape_vertices.numpy(),
+                            faces=model.shape_geo_src[shape_idx].indices.reshape(-1, 3),
+                            back_face_policy="cull",
+                            edge_color=(1, 1, 1),
+                            smooth_shade=True,
+                            edge_width=0.0,
+                            color=(0, 0, 0),
+                            material="wax",
+                        )
 
     def set_user_update(self, callback):
         self.user_update = callback
 
     def update_state(self, state: State):
-        if self._tri_mesh is not None:
-            vertices = state.particle_q.numpy().reshape(state.particle_count, 3)
-            self._tri_mesh.update_vertex_positions(vertices)
+        # Download to host.
+        vertices = state.particle_q.numpy().reshape(state.particle_count, 3) * self.scale
+
+        if self.particle_entity is not None:
+            if self.particle_entity.is_enabled():
+                self.particle_entity.update_point_positions(vertices)
+
+        if self.tri_entity is not None:
+            self.tri_entity.update_vertex_positions(vertices)
 
             if self._pick_result is not None:
-                if self._pick_result.structure_name == self._tri_mesh.get_name():
+                if self._pick_result.structure_name == self.tri_entity.get_name():
                     bary_coord = self.drag_bary_coord
                     index = self._pick_result.structure_data["index"]
-                    face = self._tri_indices[index, 0:3]
+                    face = self.tri_indices[index, 0:3]
                     x0 = wp.vec3(vertices[face[0], 0:3])
                     x1 = wp.vec3(vertices[face[1], 0:3])
                     x2 = wp.vec3(vertices[face[2], 0:3])
                     self._drag_point.set_position(x0 * bary_coord[0] + x1 * bary_coord[1] + x2 * bary_coord[2])
 
-            ps.request_redraw()
+        if len(self.body_entities) > 0:
+
+            @wp.kernel
+            def transform_to_mat4x4_kernel(
+                scale: float,
+                transform_in: wp.array(dtype=wp.transform),
+                transform_out: wp.array(dtype=wp.mat44),
+            ):
+                tid = wp.tid()
+                transform = transform_in[tid]
+                translation = wp.transform_get_translation(transform) * scale
+                wp.transform_set_translation(transform, translation)
+                transform_out[tid] = wp.transform_to_matrix(transform)
+
+            wp.launch(
+                transform_to_mat4x4_kernel,
+                dim=self.model.body_count,
+                inputs=[self.scale, state.body_q],
+                outputs=[self._body_transform_mat4x4],
+            )
+
+            body_q = self._body_transform_mat4x4.numpy()
+
+            for i in range(self.model.body_count):
+                shape_indices = self.model.body_shapes[i]
+                for shape_idx in shape_indices:
+                    if isinstance(self.model.shape_geo_src[shape_idx], Mesh):
+                        if self.shape_flags[shape_idx] & 1:
+                            self.body_entities[self.model.shape_key[shape_idx]].set_transform(body_q[i])
+
+        ps.request_redraw()
 
     def _set_up_coord_axes(self, scale: float = 0.2, radius: float = 3e-3):
         edges = np.array([[0, 1], [2, 3], [4, 5]])
@@ -184,11 +278,10 @@ class PolyscopeRenderer:
         elif psim.IsKeyPressed(psim.ImGuiKey_Escape):
             ps.unshow()  # Exit
         elif psim.IsKeyPressed(psim.ImGuiKey_X):  # Show/hide edges
-            if self._body_meshes is not None:
-                for mesh in self._body_meshes:
-                    mesh.set_edge_width(0 if mesh.get_edge_width() != 0 else 0.3)
-            if self._tri_mesh is not None:
-                self._tri_mesh.set_edge_width(0 if self._tri_mesh.get_edge_width() != 0 else 0.3)
+            for _, entity in self.body_entities.items():
+                entity.set_edge_width(0 if entity.get_edge_width() != 0 else 0.3)
+            if self.tri_entity is not None:
+                self.tri_entity.set_edge_width(0 if self.tri_entity.get_edge_width() != 0 else 0.3)
         elif psim.IsKeyPressed(psim.ImGuiKey_C):
             # Show/hide coordinate axes
             self._coord_axes.set_enabled(not self._coord_axes.is_enabled())
@@ -222,7 +315,7 @@ class PolyscopeRenderer:
                 self._pick_result = pick_result
                 self._drag_point.set_enabled(True)
                 self._drag_point.set_position(pick_result.position)
-                if (pick_result.structure_name == self._tri_mesh.get_name()) and (
+                if (pick_result.structure_name == self.tri_entity.get_name()) and (
                     self._pick_result.structure_data["element_type"] == "face"
                 ):
                     self.drag_index = pick_result.structure_data["index"]
