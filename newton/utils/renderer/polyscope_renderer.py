@@ -159,7 +159,7 @@ class PolyscopeRenderer:
             for i in range(model.body_count):
                 shape_indices = model.body_shapes[i]
                 for shape_idx in shape_indices:
-                    if isinstance(model.shape_geo_src[shape_idx], Mesh):
+                    if isinstance(model.shape_source[shape_idx], Mesh):
                         if self.shape_flags[shape_idx] & 1 == 0:
                             continue
 
@@ -180,7 +180,7 @@ class PolyscopeRenderer:
                             new_pos[2] *= scaling[2]
                             vertices_out[tid] = new_pos
 
-                        shape_vertices = wp.array(model.shape_geo_src[shape_idx].vertices, dtype=wp.vec3)
+                        shape_vertices = wp.array(model.shape_source[shape_idx].vertices, dtype=wp.vec3)
 
                         wp.launch(
                             transform_vertices_kernel,
@@ -189,7 +189,7 @@ class PolyscopeRenderer:
                                 shape_idx,
                                 self.scale,
                                 shape_vertices,
-                                model.shape_geo.scale,
+                                model.shape_scale,
                                 model.shape_transform,
                             ],
                             outputs=[shape_vertices],
@@ -198,7 +198,7 @@ class PolyscopeRenderer:
                         self.body_entities[model.shape_key[shape_idx]] = ps.register_surface_mesh(
                             name=model.shape_key[shape_idx],
                             vertices=shape_vertices.numpy(),
-                            faces=model.shape_geo_src[shape_idx].indices.reshape(-1, 3),
+                            faces=model.shape_source[shape_idx].indices.reshape(-1, 3),
                             back_face_policy="cull",
                             edge_color=(1, 1, 1),
                             smooth_shade=True,
@@ -257,7 +257,7 @@ class PolyscopeRenderer:
             for i in range(self.model.body_count):
                 shape_indices = self.model.body_shapes[i]
                 for shape_idx in shape_indices:
-                    if isinstance(self.model.shape_geo_src[shape_idx], Mesh):
+                    if isinstance(self.model.shape_source[shape_idx], Mesh):
                         if self.shape_flags[shape_idx] & 1:
                             self.body_entities[self.model.shape_key[shape_idx]].set_transform(body_q[i])
 
