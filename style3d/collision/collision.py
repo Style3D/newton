@@ -8,10 +8,9 @@
 
 import warp as wp
 
-from newton.sim import Contacts, Model, State
-from newton.solvers.style3d.plus.bvh import EdgeBvh, TriBvh
-
-from .kernels import (
+from newton import Contacts, Model, State
+from style3d.bvh import EdgeBvh, TriBvh
+from style3d.collision.kernels import (
     handle_edge_edge_contacts_kernel,
     handle_vertex_triangle_contacts_kernel,
     solve_untangling_kernel,

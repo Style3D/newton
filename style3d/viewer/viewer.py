@@ -14,8 +14,7 @@ import polyscope as ps
 import polyscope.imgui as psim
 import warp as wp
 
-from newton.geometry.types import Mesh
-from newton.sim import Model, State
+from newton import Mesh, Model, State
 
 ########################################################################################################################
 #####################################################    Viewer    #####################################################

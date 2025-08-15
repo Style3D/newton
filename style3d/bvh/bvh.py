@@ -8,7 +8,7 @@
 
 import warp as wp
 
-from newton.solvers.style3d.plus.bvh.kernels import (
+from style3d.bvh.kernels import (
     aabb_vs_aabb_kernel,
     aabb_vs_line_kernel,
     compute_edge_aabbs_kernel,

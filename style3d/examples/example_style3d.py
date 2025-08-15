@@ -11,10 +11,7 @@ import warp as wp
 from pxr import Usd, UsdGeom
 
 import newton
-import newton.examples
-import newton.utils
-from newton.geometry import PARTICLE_FLAG_ACTIVE, Mesh
-from newton.solvers.style3d.plus import Viewer
+from style3d import Viewer
 
 
 class Example:
@@ -28,7 +25,7 @@ class Example:
         self.num_frames = num_frames
         self.profiler = {}
         self.use_cuda_graph = wp.get_device().is_cuda
-        builder = newton.sim.Style3DModelBuilder(up_axis=newton.Axis.Y)
+        builder = newton.Style3DModelBuilder(up_axis=newton.Axis.Y)
 
         use_cloth_mesh = True
         if use_cloth_mesh:
@@ -69,7 +66,7 @@ class Example:
             )
             builder.add_shape_mesh(
                 body=builder.add_body(),
-                mesh=Mesh(avatar_mesh_points, avatar_mesh_indices),
+                mesh=newton.Mesh(avatar_mesh_points, avatar_mesh_indices),
             )
             fixed_points = [0]
         else:
@@ -98,14 +95,14 @@ class Example:
         # set fixed points
         flags = self.model.particle_flags.numpy()
         for fixed_vertex_id in fixed_points:
-            flags[fixed_vertex_id] = wp.uint32(int(flags[fixed_vertex_id]) & ~int(PARTICLE_FLAG_ACTIVE))
+            flags[fixed_vertex_id] = wp.uint32(int(flags[fixed_vertex_id]) & ~int(newton.ParticleFlags.ACTIVE))
         self.model.particle_flags = wp.array(flags)
 
         # set up contact query and contact detection distances
         self.model.soft_contact_radius = 0.2
         self.model.soft_contact_margin = 0.35
 
-        self.solver = newton.solvers.Style3DSolver(
+        self.solver = newton.solvers.SolverStyle3D(
             model=self.model,
             iterations=self.iterations,
             enable_mouse_dragging=True,
