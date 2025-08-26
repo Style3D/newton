@@ -183,9 +183,8 @@ class Style3DModelBuilder(ModelBuilder):
 
         D = np.concatenate((qp[..., None], rp[..., None]), axis=-1)
 
-        areas = np.linalg.det(D) / 2.0
-        areas[areas < 0.0] = 0.0
-        valid_inds = (areas > 0.0).nonzero()[0]
+        areas = np.abs(np.linalg.det(D) / 2.0)
+        valid_inds = (areas != 0.0).nonzero()[0]
         if len(valid_inds) < len(areas):
             print("inverted or degenerate triangle elements")
 
