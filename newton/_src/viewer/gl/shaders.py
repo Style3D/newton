@@ -1,5 +1,4 @@
 import ctypes
-from typing import Optional
 
 import numpy as np
 
@@ -313,7 +312,6 @@ void main()
     // gamma correction (sRGB)
     color = pow(color, vec3(1.0 / 2.2));
 
-    //FragColor = vec4(N*0.5 + vec3(0.5), 1.0);
     FragColor = vec4(color, 1.0);
 }
 """
@@ -475,8 +473,8 @@ class ShaderShape(ShaderGL):
         ground_color: tuple[float, float, float] = (0.294, 0.333, 0.592),
         sky_color: tuple[float, float, float] = (0.745, 0.863, 0.941),
         enable_shadows: bool = False,
-        shadow_texture: Optional[int] = None,
-        light_space_matrix: Optional[np.ndarray] = None,
+        shadow_texture: int | None = None,
+        light_space_matrix: np.ndarray | None = None,
     ):
         """Update all shader uniforms."""
         with self:

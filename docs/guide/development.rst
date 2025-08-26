@@ -1,56 +1,25 @@
-Development Guide
-=================
+Development
+===========
 
 This document is a guide for developers who want to contribute to the project or understand its internal workings in more detail.
 
-Environment setup
------------------
+Please refer to `CONTRIBUTING.md <https://github.com/newton-physics/governance/blob/main/CONTRIBUTING.md>`_ for how to best contribute to Newton and relevant legal information (CLA).
 
-Clone the repository
-^^^^^^^^^^^^^^^^^^^^
+Installation
+------------
 
-.. code-block:: console
+To install Newton, see the :doc:`installation` guide.
 
-    git clone git@github.com:newton-physics/newton.git
-    cd newton
+Python Dependency Management
+----------------------------
 
-Using uv
-^^^^^^^^
-
-`uv <https://docs.astral.sh/uv/>`_ is a Python package and project manager.
-
-Install uv:
-
-.. tab-set::
-    :sync-group: os
-
-    .. tab-item:: macOS / Linux
-        :sync: linux
-
-        .. code-block:: console
-
-            curl -LsSf https://astral.sh/uv/install.sh | sh
-
-    .. tab-item:: Windows
-        :sync: windows
-
-        .. code-block:: console
-
-            powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-
-Run basic examples:
-
-.. code-block:: console
-
-    # An example with basic dependencies
-    uv run newton/examples/example_quadruped.py
-
-    # An example that requires extras
-    uv run --extra dev newton/examples/example_humanoid.py
+UV Lock File
+^^^^^^^^^^^^
 
 When using uv, the `lockfile <https://docs.astral.sh/uv/concepts/projects/layout/#the-lockfile>`__
-(``uv.lock``) is used to resolve project dependencies
-into exact versions for reproducibility among different machines.
+(``uv.lock``) is used to resolve project dependencies into exact versions for reproducibility among different machines.
+
+We maintain a lockfile in the root of the repository that pins exact versions of all dependencies and their transitive dependencies.
 
 Sometimes, a dependency in the lockfile needs to be updated to a newer version.
 This can be done by running ``uv lock --upgrade-package <package-name>``:
@@ -69,58 +38,6 @@ uv also provides a command to update all dependencies in the lockfile:
 
 Remember to commit ``uv.lock`` after running a command that updates the lockfile.
 
-Using venv
-^^^^^^^^^^
-
-These instructions are meant for users who wish to set up a development environment using `venv <https://docs.python.org/3/library/venv.html>`__
-or Conda (e.g. from `Miniforge <https://github.com/conda-forge/miniforge>`__).
-
-.. tab-set::
-    :sync-group: os
-
-    .. tab-item:: macOS / Linux
-        :sync: linux
-
-        .. code-block:: console
-
-            python -m venv .venv
-            source .venv/bin/activate
-
-    .. tab-item:: Windows (console)
-        :sync: windows
-
-        .. code-block:: console
-
-            python -m venv .venv
-            .venv\Scripts\activate.bat
-
-    .. tab-item:: Windows (PowerShell)
-        :sync: windows-ps
-
-        .. code-block:: console
-
-            python -m venv .venv
-            .venv\Scripts\Activate.ps1
-
-Installing dependencies including optional ones:
-
-.. code-block:: console
-
-    python -m pip install mujoco --pre -f https://py.mujoco.org/
-    python -m pip install warp-lang --pre -U -f https://pypi.nvidia.com/warp-lang/
-    python -m pip install git+https://github.com/google-deepmind/mujoco_warp.git@main
-    python -m pip install -e .[dev]
-
-Run basic examples:
-
-.. code-block:: console
-
-    # An example with basic dependencies
-    python newton/examples/example_quadruped.py
-
-    # An example that requires extras
-    python newton/examples/example_humanoid.py
-
 Running the tests
 -----------------
 
@@ -129,8 +46,7 @@ and by default runs in up to eight parallel processes. On some systems, the
 tests must be run in a serial manner with ``--serial-fallback`` due to an
 outstanding bug.
 
-Some tests rely on optional dependencies (like `usd-core <https://pypi.org/project/usd-core/>`__) and will be skipped if not installed.  
-Pass ``--help`` to either runner to see all available flags.
+Pass ``--help`` to either run method below to see all available flags.
 
 .. tab-set::
     :sync-group: env
@@ -140,7 +56,7 @@ Pass ``--help`` to either runner to see all available flags.
         
         .. code-block:: console
 
-            # install all extras and run tests
+            # install development extras and run tests
             uv run --extra dev -m newton.tests
 
     .. tab-item:: venv
@@ -150,6 +66,29 @@ Pass ``--help`` to either runner to see all available flags.
 
             # install dev extras (including testing & coverage deps)
             python -m pip install -e .[dev]
+            # run tests
+            python -m newton.tests
+            
+Most tests run when the ``dev`` extras are installed. The tests that run examples that use PyTorch to inference an RL policy are skipped if the ``torch`` dependency is not installed. In order to run these tests, include the ``torch-cu12`` extras:
+
+.. tab-set::
+    :sync-group: env
+
+    .. tab-item:: uv
+        :sync: uv
+
+        .. code-block:: console
+
+            # install development extras and run tests
+            uv run --extra dev --extra torch-cu12 -m newton.tests
+
+    .. tab-item:: venv
+        :sync: venv
+
+        .. code-block:: console
+
+            # install both dev and torch-cu12 extras (need to pull from PyTorch CUDA 12.8 wheel index)
+            python -m pip install --extra-index-url https://download.pytorch.org/whl/cu128 -e .[dev,torch-cu12]
             # run tests
             python -m newton.tests
 
@@ -362,68 +301,3 @@ also ensuring that the benchmark is run a sufficient number of times to get a st
 The ``--durations all`` flag can be passed to the ``asv run`` command to show the durations of all benchmarks,
 which is helpful for ensuring that a single benchmark is not requiring an abnormally long amount of time compared
 to the other benchmarks.
-
-Contribution Guide
-==================
-
-Some ways to contribute to the development of Newton include:
-
-* Reporting bugs and requesting new features on `GitHub <https://github.com/newton-physics/newton/issues>`__.
-* Asking questions, sharing your work, or participating in discussion threads on
-  `GitHub <https://github.com/newton-physics/newton/discussions>`__.
-* Adding new examples to the Newton repository.
-* Documentation improvements.
-* Contributing bug fixes or new features.
-
-Code contributions
-------------------
-
-Code contributions from the community are welcome.
-Rather than requiring a formal Contributor License Agreement (CLA), we use the
-`Developer Certificate of Origin <https://developercertificate.org/>`__ to
-ensure contributors have the right to submit their contributions to this project.
-Please ensure that all commits have a
-`sign-off <https://git-scm.com/docs/git-commit#Documentation/git-commit.txt--s>`__ 
-added with an email address that matches the commit author
-to agree to the DCO terms for each particular contribution.
-
-The full text of the DCO is as follows:
-
-.. code-block:: text
-
-    Version 1.1
-
-    Copyright (C) 2004, 2006 The Linux Foundation and its contributors.
-
-    Everyone is permitted to copy and distribute verbatim copies of this
-    license document, but changing it is not allowed.
-
-
-    Developer's Certificate of Origin 1.1
-
-    By making a contribution to this project, I certify that:
-
-    (a) The contribution was created in whole or in part by me and I
-        have the right to submit it under the open source license
-        indicated in the file; or
-
-    (b) The contribution is based upon previous work that, to the best
-        of my knowledge, is covered under an appropriate open source
-        license and I have the right under that license to submit that
-        work with modifications, whether created in whole or in part
-        by me, under the same open source license (unless I am
-        permitted to submit under a different license), as indicated
-        in the file; or
-
-    (c) The contribution was provided directly to me by some other
-        person who certified (a), (b) or (c) and I have not modified
-        it.
-
-    (d) I understand and agree that this project and the contribution
-        are public and that a record of the contribution (including all
-        personal information I submit with it, including my sign-off) is
-        maintained indefinitely and may be redistributed consistent with
-        this project or the open source license(s) involved.
-
-Contributors are encouraged to first open an issue on GitHub to discuss proposed
-feature contributions and gauge potential interest.

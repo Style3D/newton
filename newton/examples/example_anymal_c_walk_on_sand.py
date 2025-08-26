@@ -19,7 +19,7 @@
 # Shows Anymal C with a pretrained policy coupled with implicit mpm sand.
 #
 # Example usage:
-# uv run --extra cu12 newton/examples/example_anymal_c_walk_on_sand.py
+# uv run --extra examples --extra torch-cu12 newton/examples/example_anymal_c_walk_on_sand.py
 ###########################################################################
 
 import sys
@@ -83,7 +83,7 @@ class Example:
         builder.default_shape_cfg.kf = 1.0e3
         builder.default_shape_cfg.mu = 0.75
 
-        asset_path = newton.utils.download_asset("anymal_c_simple_description")
+        asset_path = newton.utils.download_asset("anybotics_anymal_c")
         newton.utils.parse_urdf(
             str(asset_path / "urdf" / "anymal.urdf"),
             builder,
@@ -313,7 +313,7 @@ def _merge_meshes(
 
     mesh_id = np.repeat(np.arange(len(points), dtype=int), repeats=pt_count)
 
-    merged_points = np.vstack([pts * scale for pts, scale in zip(points, scales)])
+    merged_points = np.vstack([pts * scale for pts, scale in zip(points, scales, strict=False)])
 
     merged_indices = np.concatenate([idx + offsets[k] for k, idx in enumerate(indices)])
 

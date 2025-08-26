@@ -28,7 +28,6 @@ from typing import Any, Literal
 import numpy as np
 import warp as wp
 
-from ..core.spatial import quat_between_axes
 from ..core.types import (
     Axis,
     AxisType,
@@ -69,10 +68,9 @@ class ModelBuilder:
     """A helper class for building simulation models at runtime.
 
     Use the ModelBuilder to construct a simulation scene. The ModelBuilder
-    and builds the scene representation using standard Python data structures (lists),
-    this means it is not differentiable. Once :meth:`finalize`
-    has been called the ModelBuilder transfers all data to Warp tensors and returns
-    an object that may be used for simulation.
+    represents the scene using standard Python data structures like lists,
+    which are convenient but unsuitable for efficient simulation.
+    Call :meth:`finalize` to construct a simulation-ready Model.
 
     Example
     -------
@@ -266,6 +264,15 @@ class ModelBuilder:
             )
 
     def __init__(self, up_axis: AxisType = Axis.Z, gravity: float = -9.81):
+        """
+        Initializes a new ModelBuilder instance for constructing simulation models.
+
+        Args:
+            up_axis (AxisType, optional): The axis to use as the "up" direction in the simulation.
+                Defaults to Axis.Z.
+            gravity (float, optional): The magnitude of gravity to apply along the up axis.
+                Defaults to -9.81.
+        """
         self.num_envs = 0
 
         # region defaults
@@ -481,7 +488,15 @@ class ModelBuilder:
 
     @property
     def up_vector(self) -> Vec3:
-        """Computes the 3D up vector from :attr:`up_axis`."""
+        """
+        Returns the 3D unit vector corresponding to the current up axis (read-only).
+
+        This property computes the up direction as a 3D vector based on the value of :attr:`up_axis`.
+        For example, if ``up_axis`` is ``Axis.Z``, this returns ``(0, 0, 1)``.
+
+        Returns:
+            Vec3: The 3D up vector corresponding to the current up axis.
+        """
         return axis_to_vec3(self.up_axis)
 
     @up_vector.setter
@@ -493,45 +508,138 @@ class ModelBuilder:
     # region counts
     @property
     def shape_count(self):
+        """
+        The number of shapes in the model.
+        """
         return len(self.shape_type)
 
     @property
     def body_count(self):
+        """
+        The number of rigid bodies in the model.
+        """
         return len(self.body_q)
 
     @property
     def joint_count(self):
+        """
+        The number of joints in the model.
+        """
         return len(self.joint_type)
 
     @property
     def particle_count(self):
+        """
+        The number of particles in the model.
+        """
         return len(self.particle_q)
 
     @property
     def tri_count(self):
+        """
+        The number of triangles in the model.
+        """
         return len(self.tri_poses)
 
     @property
     def tet_count(self):
+        """
+        The number of tetrahedra in the model.
+        """
         return len(self.tet_poses)
 
     @property
     def edge_count(self):
+        """
+        The number of edges (for bending) in the model.
+        """
         return len(self.edge_rest_angle)
 
     @property
     def spring_count(self):
+        """
+        The number of springs in the model.
+        """
         return len(self.spring_rest_length)
 
     @property
     def muscle_count(self):
+        """
+        The number of muscles in the model.
+        """
         return len(self.muscle_start)
 
     @property
     def articulation_count(self):
+        """
+        The number of articulations in the model.
+        """
         return len(self.articulation_start)
 
     # endregion
+
+    def _compute_replicate_offsets(self, num_copies: int, spacing: tuple[float, float, float]):
+        # compute positional offsets per environment
+        spacing = np.array(spacing)
+        nonzeros = np.nonzero(spacing)[0]
+        num_dim = nonzeros.shape[0]
+        if num_dim > 0:
+            side_length = int(np.ceil(num_copies ** (1.0 / num_dim)))
+            spacings = []
+            if num_dim == 1:
+                for i in range(num_copies):
+                    spacings.append(i * spacing)
+            elif num_dim == 2:
+                for i in range(num_copies):
+                    d0 = i // side_length
+                    d1 = i % side_length
+                    offset = np.zeros(3)
+                    offset[nonzeros[0]] = d0 * spacing[nonzeros[0]]
+                    offset[nonzeros[1]] = d1 * spacing[nonzeros[1]]
+                    spacings.append(offset)
+            elif num_dim == 3:
+                for i in range(num_copies):
+                    d0 = i // (side_length * side_length)
+                    d1 = (i // side_length) % side_length
+                    d2 = i % side_length
+                    offset = np.zeros(3)
+                    offset[0] = d0 * spacing[0]
+                    offset[1] = d1 * spacing[1]
+                    offset[2] = d2 * spacing[2]
+                    spacings.append(offset)
+            spacings = np.array(spacings)
+        else:
+            spacings = np.zeros((num_copies, 3))
+        min_offsets = np.min(spacings, axis=0)
+        correction = min_offsets + (np.max(spacings, axis=0) - min_offsets) / 2.0
+        # ensure the envs are not shifted below the ground plane
+        correction[Axis.from_any(self.up_axis)] = 0.0
+        spacings -= correction
+        return spacings
+
+    def replicate(
+        self,
+        builder: ModelBuilder,
+        num_copies: int,
+        spacing: tuple[float, float, float] = (5.0, 5.0, 0.0),
+    ):
+        """
+        Replicates the given builder multiple times, offsetting each copy according to the supplied spacing.
+
+        This method is useful for creating multiple instances of a sub-model (e.g., robots, environments)
+        arranged in a regular grid or along a line. Each copy is offset in space by a multiple of the
+        specified spacing vector, and all entities from each copy are assigned to a new environment group.
+
+        Args:
+            builder (ModelBuilder): The builder to replicate. All entities from this builder will be copied.
+            num_copies (int): The number of copies to create.
+            spacing (tuple[float, float, float], optional): The spacing between each copy along each axis.
+                For example, (5.0, 5.0, 0.0) arranges copies in a 2D grid in the XY plane.
+                Defaults to (5.0, 5.0, 0.0).
+        """
+        offsets = self._compute_replicate_offsets(num_copies, spacing)
+        for i in range(num_copies):
+            self.add_builder(builder, xform=wp.transform(offsets[i], wp.quat_identity()))
 
     def add_articulation(self, key: str | None = None):
         # an articulation is a set of contiguous bodies bodies from articulation_start[i] to articulation_start[i+1]
@@ -654,7 +762,12 @@ class ModelBuilder:
                     self.shape_transform.append(builder.shape_transform[s])
 
         for b, shapes in builder.body_shapes.items():
-            self.body_shapes[b + start_body_idx] = [s + start_shape_idx for s in shapes]
+            if b == -1:
+                if -1 not in self.body_shapes:
+                    self.body_shapes[-1] = []
+                self.body_shapes[-1].extend([s + start_shape_idx for s in shapes])
+            else:
+                self.body_shapes[b + start_body_idx] = [s + start_shape_idx for s in shapes]
 
         if builder.joint_count:
             joint_X_p = copy.deepcopy(builder.joint_X_p)
@@ -1499,7 +1612,7 @@ class ModelBuilder:
         enabled: bool = True,
     ) -> int:
         """Adds a joint equality constraint to the model.
-        Constrains the position or angle of one joint to be a quartic polynomial of another joint. Only scalar joint types (slide and hinge) can be used.
+        Constrains the position or angle of one joint to be a quartic polynomial of another joint. Only scalar joint types (prismatic and revolute) can be used.
 
         Args:
             joint1: Index of the first joint
@@ -1863,9 +1976,9 @@ class ModelBuilder:
         self.body_inv_mass.clear()
         self.body_inv_inertia.clear()
         self.body_group.clear()  # Clear body groups
-        if -1 in self.body_shapes:
-            static_shapes = self.body_shapes[-1]
-            self.body_shapes.clear()
+        static_shapes = self.body_shapes.get(-1)
+        self.body_shapes.clear()
+        if static_shapes is not None:
             # restore static shapes
             self.body_shapes[-1] = static_shapes
         for i in retained_bodies:
@@ -2251,20 +2364,18 @@ class ModelBuilder:
         xform: Transform | None = None,
         radius: float = 1.0,
         half_height: float = 0.5,
-        axis: AxisType = Axis.Z,
         cfg: ShapeConfig | None = None,
         key: str | None = None,
     ) -> int:
         """Adds a capsule collision shape to a body.
 
-        The capsule is centered at its local origin as defined by `xform`. Its length extends along the specified `axis`.
+        The capsule is centered at its local origin as defined by `xform`. Its length extends along the Z-axis.
 
         Args:
             body (int): The index of the parent body this shape belongs to. Use -1 for shapes not attached to any specific body.
             xform (Transform | None): The transform of the capsule in the parent body's local frame. If `None`, the identity transform `wp.transform()` is used. Defaults to `None`.
             radius (float): The radius of the capsule's hemispherical ends and its cylindrical segment. Defaults to `1.0`.
             half_height (float): The half-length of the capsule's central cylindrical segment (excluding the hemispherical ends). Defaults to `0.5`.
-            axis (AxisType): The local axis of the capsule along which its length is aligned (typically `Axis.X`, `Axis.Y`, or `Axis.Z`). Defaults to `Axis.Z`.
             cfg (ShapeConfig | None): The configuration for the shape's physical and collision properties. If `None`, :attr:`default_shape_cfg` is used. Defaults to `None`.
             key (str | None): An optional unique key for identifying the shape. If `None`, a default key is automatically generated. Defaults to `None`.
 
@@ -2276,9 +2387,6 @@ class ModelBuilder:
             xform = wp.transform()
         else:
             xform = wp.transform(*xform)
-        # internally capsule axis is always +Z
-        q = quat_between_axes(Axis.Z, axis)
-        xform = wp.transform(xform.p, xform.q * q)
 
         if cfg is None:
             cfg = self.default_shape_cfg
@@ -2298,20 +2406,18 @@ class ModelBuilder:
         xform: Transform | None = None,
         radius: float = 1.0,
         half_height: float = 0.5,
-        axis: AxisType = Axis.Z,
         cfg: ShapeConfig | None = None,
         key: str | None = None,
     ) -> int:
         """Adds a cylinder collision shape to a body.
 
-        The cylinder is centered at its local origin as defined by `xform`. Its length extends along the specified `axis`.
+        The cylinder is centered at its local origin as defined by `xform`. Its length extends along the Z-axis.
 
         Args:
             body (int): The index of the parent body this shape belongs to. Use -1 for shapes not attached to any specific body.
             xform (Transform | None): The transform of the cylinder in the parent body's local frame. If `None`, the identity transform `wp.transform()` is used. Defaults to `None`.
             radius (float): The radius of the cylinder. Defaults to `1.0`.
-            half_height (float): The half-length of the cylinder along the `axis`. Defaults to `0.5`.
-            axis (AxisType): The local axis of the cylinder along which its length is aligned (e.g., `Axis.X`, `Axis.Y`, `Axis.Z`). Defaults to `Axis.Z`.
+            half_height (float): The half-length of the cylinder along the Z-axis. Defaults to `0.5`.
             cfg (ShapeConfig | None): The configuration for the shape's physical and collision properties. If `None`, :attr:`default_shape_cfg` is used. Defaults to `None`.
             key (str | None): An optional unique key for identifying the shape. If `None`, a default key is automatically generated. Defaults to `None`.
 
@@ -2323,9 +2429,6 @@ class ModelBuilder:
             xform = wp.transform()
         else:
             xform = wp.transform(*xform)
-        # internally cylinder axis is always +Z
-        q = quat_between_axes(Axis.Z, axis)
-        xform = wp.transform(xform.p, xform.q * q)
 
         if cfg is None:
             cfg = self.default_shape_cfg
@@ -2345,13 +2448,12 @@ class ModelBuilder:
         xform: Transform | None = None,
         radius: float = 1.0,
         half_height: float = 0.5,
-        axis: AxisType = Axis.Z,
         cfg: ShapeConfig | None = None,
         key: str | None = None,
     ) -> int:
         """Adds a cone collision shape to a body.
 
-        The cone's origin is at its geometric center, with the base at -half_height and apex at +half_height along the specified `axis`.
+        The cone's origin is at its geometric center, with the base at -half_height and apex at +half_height along the Z-axis.
         The center of mass is located at -half_height/2 from the origin (1/4 of the total height from the base toward the apex).
 
         Args:
@@ -2359,7 +2461,6 @@ class ModelBuilder:
             xform (Transform | None): The transform of the cone in the parent body's local frame. If `None`, the identity transform `wp.transform()` is used. Defaults to `None`.
             radius (float): The radius of the cone's base. Defaults to `1.0`.
             half_height (float): The half-height of the cone (distance from the geometric center to either the base or apex). The total height is 2*half_height. Defaults to `0.5`.
-            axis (AxisType): The local axis of the cone along which its height is aligned. The apex points toward the positive direction of this axis. Defaults to `Axis.Z`.
             cfg (ShapeConfig | None): The configuration for the shape's physical and collision properties. If `None`, :attr:`default_shape_cfg` is used. Defaults to `None`.
             key (str | None): An optional unique key for identifying the shape. If `None`, a default key is automatically generated. Defaults to `None`.
 
@@ -2371,9 +2472,6 @@ class ModelBuilder:
             xform = wp.transform()
         else:
             xform = wp.transform(*xform)
-        # internally cone axis is always +Z
-        q = quat_between_axes(Axis.Z, axis)
-        xform = wp.transform(xform.p, xform.q * q)
 
         if cfg is None:
             cfg = self.default_shape_cfg
@@ -2910,6 +3008,7 @@ class ModelBuilder:
                 np.array(tri_kd)[valid_inds],
                 np.array(tri_drag)[valid_inds],
                 np.array(tri_lift)[valid_inds],
+                strict=False,
             )
         )
         areas = areas.tolist()
@@ -3092,7 +3191,7 @@ class ModelBuilder:
         edge_ke = init_if_none(edge_ke, self.default_edge_ke)
         edge_kd = init_if_none(edge_kd, self.default_edge_kd)
 
-        self.edge_bending_properties.extend(zip(edge_ke, edge_kd))
+        self.edge_bending_properties.extend(zip(edge_ke, edge_kd, strict=False))
 
     def add_cloth_grid(
         self,
@@ -3293,7 +3392,6 @@ class ModelBuilder:
             [tri_drag] * num_tris,
             [tri_lift] * num_tris,
         )
-
         for t in range(num_tris):
             area = areas[t]
 
@@ -3350,6 +3448,31 @@ class ModelBuilder:
         radius_mean: float | None = None,
         radius_std: float = 0.0,
     ):
+        """
+        Adds a regular 3D grid of particles to the model.
+
+        This helper function creates a grid of particles arranged in a rectangular lattice,
+        with optional random jitter and per-particle radius variation. The grid is defined
+        by its dimensions along each axis and the spacing between particles.
+
+        Args:
+            pos (Vec3): The world-space position of the grid origin.
+            rot (Quat): The rotation to apply to the grid (as a quaternion).
+            vel (Vec3): The initial velocity to assign to each particle.
+            dim_x (int): Number of particles along the X axis.
+            dim_y (int): Number of particles along the Y axis.
+            dim_z (int): Number of particles along the Z axis.
+            cell_x (float): Spacing between particles along the X axis.
+            cell_y (float): Spacing between particles along the Y axis.
+            cell_z (float): Spacing between particles along the Z axis.
+            mass (float): Mass to assign to each particle.
+            jitter (float): Maximum random offset to apply to each particle position.
+            radius_mean (float, optional): Mean radius for particles. If None, uses the builder's default.
+            radius_std (float, optional): Standard deviation for particle radii. If > 0, radii are sampled from a normal distribution.
+
+        Returns:
+            None
+        """
         radius_mean = radius_mean if radius_mean is not None else self.default_particle_radius
 
         rng = np.random.default_rng(42)
@@ -3626,8 +3749,15 @@ class ModelBuilder:
 
     def add_free_joints_to_floating_bodies(self, new_bodies: Iterable[int] | None = None):
         """
-        Adds a free joint to every body that is not a child in any joint and has mass > 0.
-        Should be called after all other joints have been added.
+        Adds a free joint to every rigid body that is not a child in any joint and has positive mass.
+
+        Args:
+            new_bodies (Iterable[int] or None, optional): The set of body indices to consider for adding free joints.
+
+        Note:
+            - Bodies that are already a child in any joint will be skipped.
+            - Only bodies with strictly positive mass will receive a free joint.
+            - This is useful for ensuring that all floating (unconnected) bodies are properly articulated.
         """
         # set(self.joint_child) is connected_bodies
         floating_bodies = set(new_bodies) - set(self.joint_child)
@@ -3693,18 +3823,25 @@ class ModelBuilder:
         )
 
     def finalize(self, device: Devicelike | None = None, requires_grad: bool = False) -> Model:
-        """Convert this builder object to a concrete model for simulation.
+        """
+        Finalize the builder and create a concrete Model for simulation.
 
-        After building simulation elements this method should be called to transfer
-        all data to device memory ready for simulation.
+        This method transfers all simulation data from the builder to device memory,
+        returning a Model object ready for simulation. It should be called after all
+        elements (particles, bodies, shapes, joints, etc.) have been added to the builder.
 
         Args:
-            device: The simulation device to use, e.g.: 'cpu', 'cuda'
-            requires_grad: Whether to enable gradient computation for the model
+            device: The simulation device to use (e.g., 'cpu', 'cuda'). If None, uses the current Warp device.
+            requires_grad: If True, enables gradient computation for the model (for differentiable simulation).
 
         Returns:
+            Model: A fully constructed Model object containing all simulation data on the specified device.
 
-            A model object.
+        Notes:
+            - Performs validation and correction of rigid body inertia and mass properties.
+            - Closes all start-index arrays (e.g., for muscles, joints, articulations) with sentinel values.
+            - Sets up all arrays and properties required for simulation, including particles, bodies, shapes,
+              joints, springs, muscles, constraints, and collision/contact data.
         """
         from .collide import count_rigid_contact_points  # noqa: PLC0415
 
@@ -3735,7 +3872,7 @@ class ModelBuilder:
             m.particle_inv_mass = wp.array(particle_inv_mass, dtype=wp.float32, requires_grad=requires_grad)
             m.particle_radius = wp.array(self.particle_radius, dtype=wp.float32, requires_grad=requires_grad)
             m.particle_flags = wp.array([flag_to_int(f) for f in self.particle_flags], dtype=wp.int32)
-            m.particle_group = wp.array(self.particle_group, dtype=wp.int32) if self.particle_count > 0 else None
+            m.particle_group = wp.array(self.particle_group, dtype=wp.int32)
             m.particle_max_radius = np.max(self.particle_radius) if len(self.particle_radius) > 0 else 0.0
             m.particle_max_velocity = self.particle_max_velocity
 
@@ -3778,7 +3915,7 @@ class ModelBuilder:
             m.shape_collision_radius = wp.array(
                 self.shape_collision_radius, dtype=wp.float32, requires_grad=requires_grad
             )
-            m.shape_group = wp.array(self.shape_group, dtype=wp.int32) if self.shape_count > 0 else None
+            m.shape_group = wp.array(self.shape_group, dtype=wp.int32)
 
             m.shape_source = self.shape_source  # used for rendering
 
@@ -3933,7 +4070,7 @@ class ModelBuilder:
             m.body_qd = wp.array(self.body_qd, dtype=wp.spatial_vector, requires_grad=requires_grad)
             m.body_com = wp.array(self.body_com, dtype=wp.vec3, requires_grad=requires_grad)
             m.body_key = self.body_key
-            m.body_group = wp.array(self.body_group, dtype=wp.int32) if self.body_count > 0 else None
+            m.body_group = wp.array(self.body_group, dtype=wp.int32)
 
             # joints
             m.joint_type = wp.array(self.joint_type, dtype=wp.int32)
@@ -3946,7 +4083,7 @@ class ModelBuilder:
             m.joint_q = wp.array(self.joint_q, dtype=wp.float32, requires_grad=requires_grad)
             m.joint_qd = wp.array(self.joint_qd, dtype=wp.float32, requires_grad=requires_grad)
             m.joint_key = self.joint_key
-            m.joint_group = wp.array(self.joint_group, dtype=wp.int32) if self.joint_count > 0 else None
+            m.joint_group = wp.array(self.joint_group, dtype=wp.int32)
             # compute joint ancestors
             child_to_joint = {}
             for i, child in enumerate(self.joint_child):
@@ -3985,9 +4122,7 @@ class ModelBuilder:
             m.joint_qd_start = wp.array(joint_qd_start, dtype=wp.int32)
             m.articulation_start = wp.array(articulation_start, dtype=wp.int32)
             m.articulation_key = self.articulation_key
-            m.articulation_group = (
-                wp.array(self.articulation_group, dtype=wp.int32) if self.articulation_count > 0 else None
-            )
+            m.articulation_group = wp.array(self.articulation_group, dtype=wp.int32)
 
             # equality constraints
             m.equality_constraint_type = wp.array(self.equality_constraint_type, dtype=wp.int32)
@@ -4033,7 +4168,23 @@ class ModelBuilder:
             return m
 
     def find_shape_contact_pairs(self, model: Model):
-        # find potential contact pairs based on collision groups and collision mask (pairwise filtering)
+        """
+        Identifies and stores all potential shape contact pairs for collision detection.
+
+        This method examines the collision groups and collision masks of all shapes in the model
+        to determine which pairs of shapes should be considered for contact generation. It respects
+        any user-specified collision filter pairs to avoid redundant or undesired contacts.
+
+        The resulting contact pairs are stored in the model as a 2D array of shape indices.
+
+        Args:
+            model (Model): The simulation model to which the contact pairs will be assigned.
+
+        Side Effects:
+            - Sets `model.shape_contact_pairs` to a wp.array of shape pairs (wp.vec2i).
+            - Sets `model.shape_contact_pair_count` to the number of contact pairs found.
+        """
+        # Copy the set of filtered-out shape pairs to avoid modifying the original
         filters = copy.copy(self.shape_collision_filter_pairs)
         contact_pairs = []
         # iterate over collision groups (islands)
