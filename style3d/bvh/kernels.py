@@ -90,7 +90,7 @@ def aabb_vs_aabb_kernel(
     # outputs
     query_results: wp.array(dtype=int, ndim=2),
 ):
-    tid = wp.tid()
+    tid = wp.int32(wp.tid())
     lower = lower_bounds[tid] - wp.vec3(query_radius)
     upper = upper_bounds[tid] + wp.vec3(query_radius)
 
@@ -99,7 +99,7 @@ def aabb_vs_aabb_kernel(
     query = wp.bvh_query_aabb(bvh_id, lower, upper)
 
     while (query_count < query_list_rows - 1) and wp.bvh_query_next(query, query_index):
-        if not (ignore_self_hits and query_index == tid):
+        if not (ignore_self_hits and query_index <= tid):
             query_results[query_count + 1, tid] = query_index
             query_count += 1
 
@@ -118,7 +118,7 @@ def aabb_vs_line_kernel(
     # outputs
     query_results: wp.array(dtype=int, ndim=2),
 ):
-    eid = wp.tid()
+    eid = wp.int32(wp.tid())
     v1 = vertices[edge_indices[eid, 2]]
     v2 = vertices[edge_indices[eid, 3]]
 
@@ -127,7 +127,7 @@ def aabb_vs_line_kernel(
     query = wp.bvh_query_ray(bvh_id, v1, v2 - v1)
 
     while (query_count < query_list_rows - 1) and wp.bvh_query_next(query, query_index):
-        if not (ignore_self_hits and query_index == eid):
+        if not (ignore_self_hits and query_index <= eid):
             if line_intersects_aabb(v1, v2, lower_bounds[query_index], upper_bounds[query_index]):
                 query_results[query_count + 1, eid] = query_index
                 query_count += 1
@@ -190,7 +190,7 @@ def edge_vs_edge_kernel(
     # outputs
     query_results: wp.array(dtype=int, ndim=2),
 ):
-    eid = wp.tid()
+    eid = wp.int32(wp.tid())
 
     v0 = test_edge_indices[eid, 2]
     v1 = test_edge_indices[eid, 3]
@@ -206,6 +206,8 @@ def edge_vs_edge_kernel(
     query = wp.bvh_query_aabb(bvh_id, lower, upper)
 
     while (query_count < query_list_rows - 1) and wp.bvh_query_next(query, edge_index):
+        if ignore_self_hits and edge_index <= eid:
+            continue
         v2 = edge_indices[edge_index, 2]
         v3 = edge_indices[edge_index, 3]
         if ignore_self_hits and (v0 == v2 or v0 == v3 or v1 == v2 or v1 == v3):
