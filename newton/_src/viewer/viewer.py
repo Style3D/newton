@@ -61,6 +61,17 @@ class ViewerBase:
         self.show_springs = False
         self.show_triangles = True
 
+    def is_key_down(self, key) -> bool:
+        """Default key query API. Concrete viewers can override.
+
+        Args:
+            key: Key identifier (string or backend-specific code)
+
+        Returns:
+            bool: Always False by default.
+        """
+        return False
+
     def set_model(self, model):
         if self.model is not None:
             raise RuntimeError("Viewer set_model() can be called only once.")
@@ -328,6 +339,14 @@ class ViewerBase:
         indices = wp.array(indices, dtype=wp.uint32, device=self.device)
 
         self.log_mesh(name, points, indices, normals, uvs, hidden=hidden)
+
+    def log_gizmo(
+        self,
+        gid,
+        transform,
+    ):
+        # Optional: for interactive viewers
+        pass
 
     @abstractmethod
     def log_mesh(
