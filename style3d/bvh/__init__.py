@@ -6,10 +6,10 @@
 #   Date:           2025/07/03                                                                                         #
 ########################################################################################################################
 
-from .bvh import Bvh, EdgeBvh, TriBvh
+from .bvh import BvhAabb, BvhEdge, BvhTri
 
 __all__ = [
-    "Bvh",
-    "EdgeBvh",
-    "TriBvh",
+    "BvhAabb",
+    "BvhEdge",
+    "BvhTri",
 ]

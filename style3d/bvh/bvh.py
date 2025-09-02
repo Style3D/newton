@@ -22,11 +22,12 @@ from style3d.bvh.kernels import (
 ########################################################################################################################
 
 
-class Bvh:
+class BvhAabb:
     """A wrapper class for Warp's BVH (Bounding Volume Hierarchy) structure.
 
-    This class manages a BVH for efficient spatial queries.
-    It provides methods for refitting the hierarchy and querying against it.
+    This class manages a BVH for efficient spatial queries such as AABB vs AABB
+    or AABB vs line segment intersections. It provides methods for building,
+    rebuilding, and refitting the hierarchy, as well as performing queries.
 
     Query results are stored in a 2d-array for efficient read/write operations, where each
     column corresponds to a query thread and each row represents a result slot (see below):
@@ -65,26 +66,64 @@ class Bvh:
         self.upper_bounds = wp.zeros(num_leaves, dtype=wp.vec3, device=self.device)
 
     def is_built(self) -> bool:
-        """Returns if BVH has been built."""
+        """Returns True if the BVH has been built, otherwise False."""
         return self.bvh is not None
 
     def build(self):
         """Builds the BVH from the current lower and upper bounds.
 
-        This should be called when the leaf bounds are set for the first time or if the BVH needs to be fully rebuilt.
+        This method allocates and constructs the BVH hierarchy from scratch
+        based on the provided leaf bounds. It must be called at least once
+        before using the BVH for queries.
+
+        Use this when:
+            - Initializing the BVH for the first time.
+            - The number of leaves has changed.
+            - The hierarchy structure must be recomputed.
 
         Warning:
-            This function **must not** be called inside a `wp.ScopedCapture()` context.
-            Currently, Warp does not provide an API to rebuild a `Bvh` without triggering memory movement,
-            which is incompatible with capture mode.
+            This function **must not** be called inside a `wp.ScopedCapture()` context,
+            since it performs out-of-place allocations.
         """
         self.bvh = wp.Bvh(self.lower_bounds, self.upper_bounds)
+
+    def rebuild(self):
+        """Rebuilds the BVH using the current lower and upper bounds.
+
+        Unlike `build()`, this does not reallocate or create a new BVH, but
+        instead updates the hierarchy using the existing BVH object. This is
+        more efficient than a full `build()`, but still recomputes the tree
+        topology.
+
+        Use this when:
+            - Leaf bounds have changed significantly.
+            - The BVH structure needs to be updated without a full rebuild.
+
+        Notes:
+            - Can be safely called inside a `wp.ScopedCapture()` context,
+              since all operations are performed in-place.
+            - Raises:
+                RuntimeError: If the BVH has not been built yet.
+        """
+        if self.bvh is None:
+            raise RuntimeError("BVH hasn't been built yet!")
+        else:
+            self.bvh.rebuild()
 
     def refit(self):
         """Refits the existing BVH to updated leaf bounds.
 
-        This is more efficient than rebuilding and should be used when the structure of the BVH
-        remains the same but the positions of the bounding boxes have changed (e.g., moving objects).
+        This is the most efficient update operation. It preserves the existing
+        BVH structure and only updates bounding volumes to fit the new leaf
+        positions.
+
+        Use this when:
+            - The number of leaves is unchanged.
+            - Only the positions of primitives have moved (e.g., rigid or deforming objects).
+            - You want the cheapest possible update.
+
+        Raises:
+            RuntimeError: If the BVH has not been built yet.
         """
         if self.bvh is None:
             raise RuntimeError("BVH hasn't been built yet!")
@@ -132,6 +171,7 @@ class Bvh:
             inputs=[self.bvh.id, query_results.shape[0], query_radius, ignore_self_hits, lower_bounds, upper_bounds],
             outputs=[query_results],
             device=self.device,
+            block_dim=64,
         )
 
     def aabb_vs_line(
@@ -181,6 +221,7 @@ class Bvh:
             ],
             outputs=[query_results],
             device=self.device,
+            block_dim=64,
         )
 
 
@@ -189,24 +230,26 @@ class Bvh:
 ########################################################################################################################
 
 
-class EdgeBvh(Bvh):
+class BvhEdge(BvhAabb):
     """BVH structure specialized for edge primitives (line segments).
 
-    Inherits from the base Bvh class and implements edge-specific AABB computation and queries.
-
+    This class extends :class:`BvhAabb` with functionality to compute AABBs
+    from edges (pairs of vertices) and to perform edge-specific queries.
+    It supports building, refitting, and querying against edge-based BVHs.
     """
 
     def __init__(self, edge_count: int, device: wp.context.Device):
         super().__init__(edge_count, device)
 
     def update_aabbs(self, pos: wp.array(dtype=wp.vec3), edge_indices: wp.array(dtype=int, ndim=2), enlarge: float):
-        """
-        Computes AABBs for all edges based on current vertex positions and edge indices.
+        """Computes AABBs for all edges based on current vertex positions and edge indices.
 
         Args:
             pos (wp.array): Vertex position array (wp.vec3).
-            edge_indices (wp.array): Triangle index array (M, 4), each row contains indices into `pos`.
-            enlarge (float): Optional margin to expand each bounding box (for padding or motion blur).
+            edge_indices (wp.array): Integer array of shape (M, 4). Columns 2 and 3
+                of each row contain indices into `pos` defining an edge.
+            enlarge (float): Optional margin to expand each bounding box
+                (useful for padding or motion blur).
         """
         # ================================    Runtime checks    ================================
         assert edge_indices.shape[1] == 4, f"edge_indices must be of shape (M, 4), got {edge_indices.shape}"
@@ -221,39 +264,56 @@ class EdgeBvh(Bvh):
         )
 
     def build(self, pos: wp.array(dtype=wp.vec3), edge_indices: wp.array(dtype=int, ndim=2), enlarge: float = 0.0):
-        """
-        Builds the edge BVH from scratch using the given vertex positions and edge indices.
+        """Builds the edge BVH from scratch using the given vertex positions and edge indices.
 
-        This method computes the AABBs for all edges based on the current vertex positions,
-        and then constructs the BVH hierarchy.
+        This computes the AABBs for all edges and then constructs a new BVH hierarchy.
 
         Args:
             pos (wp.array): Vertex positions (wp.vec3).
-            edge_indices (wp.array): Integer array of shape (M, 4), where columns 2 and 3 of each row
-                                    contain the vertex indices defining an edge (i.e., edge i connects
-                                    vertices pos[edge_indices[i, 2]] and pos[edge_indices[i, 3]]).
-            enlarge (float): Optional padding value to expand each edge's bounding box (default is 0.0).
+            edge_indices (wp.array): Integer array of shape (M, 4). Columns 2 and 3
+                of each row contain the vertex indices defining an edge.
+            enlarge (float): Optional padding value to expand each edge's bounding box (default 0.0).
 
         Warning:
-            This function **must not** be called inside a `wp.ScopedCapture()` context.
-            Currently, Warp does not provide an API to rebuild a `Bvh` without triggering memory movement,
-            which is incompatible with capture mode.
+            This function **must not** be called inside a `wp.ScopedCapture()` context,
+            since it triggers allocations and memory movement.
+        """
+        self.update_aabbs(pos, edge_indices, enlarge)
+        super().build()
+
+    def rebuild(self, pos: wp.array(dtype=wp.vec3), edge_indices: wp.array(dtype=int, ndim=2), enlarge: float = 0.0):
+        """Rebuilds the edge BVH using the current vertex positions and edge indices.
+
+        This recomputes the edge AABBs and reconstructs the BVH hierarchy
+        from scratch (i.e., equivalent to `build()` but reuses the existing object).
+
+        Args:
+            pos (wp.array): Updated vertex positions (wp.vec3).
+            edge_indices (wp.array): Integer array of shape (M, 4). Columns 2 and 3
+                of each row contain the vertex indices defining an edge.
+            enlarge (float): Optional padding value to expand each edge's bounding box (default 0.0).
+
+        Notes:
+            - Unlike :func:`refit`, this recomputes the BVH topology, not just the bounds.
+            - May be significantly more expensive than `refit()` but more robust
+              when edge connectivity has changed or large movements occurred.
         """
         self.update_aabbs(pos, edge_indices, enlarge)
         super().build()
 
     def refit(self, pos: wp.array(dtype=wp.vec3), edge_indices: wp.array(dtype=int, ndim=2), enlarge: float = 0.0):
-        """
-        Refits the edge BVH after vertex positions have changed, without rebuilding the hierarchy.
+        """Refits the edge BVH after vertex positions have changed, without rebuilding the hierarchy.
 
-        This method updates AABBs for all edges and adjusts the internal BVH structure accordingly.
-        Use this for dynamic geometry where connectivity stays the same, but positions change.
+        This updates the leaf AABBs for all edges and adjusts the internal BVH bounds,
+        while preserving the existing hierarchy structure.
 
         Args:
             pos (wp.array): Updated vertex positions (wp.vec3).
-            edge_indices (wp.array): Integer array of shape (M, 4), where each row [i2, i3] defines an edge
-                                    connecting vertices pos[i2] and pos[i3].
-            enlarge (float): Optional padding value to expand each edge's bounding box (default is 0.0).
+            edge_indices (wp.array): Integer array of shape (M, 4). Columns 2 and 3
+                of each row contain the vertex indices defining an edge.
+            enlarge (float): Optional padding value to expand each edge's bounding box (default 0.0).
+
+        Use this for dynamic geometry where connectivity stays the same but positions change.
         """
         self.update_aabbs(pos, edge_indices, enlarge)
         super().refit()
@@ -306,6 +366,7 @@ class EdgeBvh(Bvh):
             ],
             outputs=[query_results],
             device=self.device,
+            block_dim=64,
         )
 
 
@@ -314,24 +375,27 @@ class EdgeBvh(Bvh):
 ########################################################################################################################
 
 
-class TriBvh(Bvh):
+class BvhTri(BvhAabb):
     """BVH structure specialized for triangular face primitives.
 
-    Inherits from the base Bvh class and implements triangle-specific AABB computation and queries.
-
+    This class extends :class:`BvhAabb` with functionality to compute AABBs
+    from triangle primitives and perform triangle-specific queries.
+    It supports building, rebuilding, refitting, and spatial queries
+    involving triangles.
     """
 
     def __init__(self, tri_count: int, device: wp.context.Device):
         super().__init__(tri_count, device)
 
     def update_aabbs(self, pos: wp.array(dtype=wp.vec3), tri_indices: wp.array(dtype=int, ndim=2), enlarge: float):
-        """
-        Computes AABBs for all triangles based on current vertex positions and triangle indices.
+        """Computes AABBs for all triangles based on current vertex positions and indices.
 
         Args:
             pos (wp.array): Vertex position array (wp.vec3).
-            tri_indices (wp.array): Triangle index array (M, 3), each row contains indices into `pos`.
-            enlarge (float): Optional margin to expand each bounding box (for padding or motion blur).
+            tri_indices (wp.array): Integer array of shape (M, 3),
+                where each row contains vertex indices defining a triangle.
+            enlarge (float): Optional margin to expand each bounding box
+                (useful for padding or motion blur).
         """
         # ================================    Runtime checks    ================================
         assert tri_indices.shape[1] == 3, f"tri_indices must be of shape (M, 3), got {tri_indices.shape}"
@@ -346,36 +410,57 @@ class TriBvh(Bvh):
         )
 
     def build(self, pos: wp.array(dtype=wp.vec3), tri_indices: wp.array(dtype=int, ndim=2), enlarge: float = 0.0):
-        """
-        Builds the triangle BVH from scratch using the given vertex positions and triangle indices.
+        """Builds the triangle BVH from scratch.
 
-        This method computes the AABBs for all triangles based on the current vertex positions,
-        and then constructs the BVH hierarchy.
+        This computes AABBs for all triangles and constructs a new BVH hierarchy.
 
         Args:
             pos (wp.array): Vertex positions (wp.vec3).
-            tri_indices (wp.array): Triangle indices (M x 3 int array), where each row defines a triangle.
-            enlarge (float): Optional padding value to expand each triangle's bounding box (default is 0.0).
+            tri_indices (wp.array): Integer array of shape (M, 3),
+                where each row defines a triangle.
+            enlarge (float): Optional padding value to expand each triangle's bounding box (default 0.0).
 
         Warning:
-            This function **must not** be called inside a `wp.ScopedCapture()` context.
-            Currently, Warp does not provide an API to rebuild a `Bvh` without triggering memory movement,
-            which is incompatible with capture mode.
+            This function **must not** be called inside a `wp.ScopedCapture()` context,
+            since it triggers allocations and memory movement.
         """
         self.update_aabbs(pos, tri_indices, enlarge)
         super().build()
 
-    def refit(self, pos: wp.array(dtype=wp.vec3), tri_indices: wp.array(dtype=int, ndim=2), enlarge: float = 0.0):
-        """
-        Refits the triangle BVH after vertex positions have changed, without rebuilding the hierarchy.
+    def rebuild(self, pos: wp.array(dtype=wp.vec3), tri_indices: wp.array(dtype=int, ndim=2), enlarge: float = 0.0):
+        """Rebuilds the triangle BVH using the current vertex positions and indices.
 
-        This method updates AABBs for all triangles and adjusts the internal BVH structure accordingly.
-        Use this for dynamic geometry where connectivity stays the same, but positions change.
+        This recomputes the triangle AABBs and rebuilds the BVH hierarchy
+        in place (more expensive than `refit`, but more robust when triangles
+        move significantly or topology has changed).
 
         Args:
             pos (wp.array): Updated vertex positions (wp.vec3).
-            tri_indices (wp.array): Triangle indices (M x 3 int array).
-            enlarge (float): Optional bounding box padding for each triangle (default is 0.0).
+            tri_indices (wp.array): Integer array of shape (M, 3),
+                where each row defines a triangle.
+            enlarge (float): Optional padding value to expand each triangle's bounding box (default 0.0).
+
+        Notes:
+            - Unlike :func:`refit`, this recomputes the BVH topology,
+              not just the bounding volumes.
+            - More efficient than a full :func:`build()` if the BVH already exists.
+        """
+        self.update_aabbs(pos, tri_indices, enlarge)
+        super().rebuild()
+
+    def refit(self, pos: wp.array(dtype=wp.vec3), tri_indices: wp.array(dtype=int, ndim=2), enlarge: float = 0.0):
+        """Refits the triangle BVH after vertex positions have changed, without rebuilding the hierarchy.
+
+        This updates AABBs for all triangles and propagates the changes up the hierarchy,
+        while preserving the existing BVH structure.
+
+        Args:
+            pos (wp.array): Updated vertex positions (wp.vec3).
+            tri_indices (wp.array): Integer array of shape (M, 3),
+                where each row defines a triangle.
+            enlarge (float): Optional bounding box padding for each triangle (default 0.0).
+
+        Use this for dynamic geometry where connectivity stays the same but positions change.
         """
         self.update_aabbs(pos, tri_indices, enlarge)
         super().refit()
@@ -429,6 +514,7 @@ class TriBvh(Bvh):
             ],
             outputs=[query_results],
             device=self.device,
+            block_dim=64,
         )
 
 
@@ -456,11 +542,14 @@ if __name__ == "__main__":
     edge_indices = wp.array([[0, 1, 2, 3]], dtype=int)
     tri_indices = wp.array([[0, 1, 6], [3, 4, 5], [6, 7, 0]], dtype=int)
 
-    tri_bvh = TriBvh(3, wp.context.get_device())
-    edge_bvh = EdgeBvh(1, wp.context.get_device())
+    tri_bvh = BvhTri(3, wp.context.get_device())
+    edge_bvh = BvhEdge(1, wp.context.get_device())
 
     tri_bvh.build(pos, tri_indices)
     edge_bvh.build(pos, edge_indices)
+
+    tri_bvh.rebuild(pos, tri_indices)
+    edge_bvh.rebuild(pos, edge_indices)
 
     print(f"tri_bvh.lower_bounds[0] = {tri_bvh.lower_bounds.numpy()[0]}")
     print(f"tri_bvh.upper_bounds[0] = {tri_bvh.upper_bounds.numpy()[0]}")
