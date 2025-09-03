@@ -8,6 +8,8 @@
 
 import warp as wp
 
+from newton._src.solvers.vbd.solver_vbd import evaluate_body_particle_contact
+
 
 @wp.func
 def triangle_normal(A: wp.vec3, B: wp.vec3, C: wp.vec3):
@@ -29,6 +31,67 @@ def triangle_barycentric(A: wp.vec3, B: wp.vec3, C: wp.vec3, P: wp.vec3):
     u = (dot11 * dot02 - dot01 * dot12) * invDenom
     v = (dot00 * dot12 - dot01 * dot02) * invDenom
     return wp.vec3(u, v, 1.0 - u - v)
+
+
+@wp.kernel
+def eval_body_contact_kernel(
+    # inputs
+    dt: float,
+    pos_prev: wp.array(dtype=wp.vec3),
+    pos: wp.array(dtype=wp.vec3),
+    # body-particle contact
+    soft_contact_ke: float,
+    soft_contact_kd: float,
+    friction_mu: float,
+    friction_epsilon: float,
+    particle_radius: wp.array(dtype=float),
+    soft_contact_particle: wp.array(dtype=int),
+    contact_count: wp.array(dtype=int),
+    contact_max: int,
+    shape_material_mu: wp.array(dtype=float),
+    shape_body: wp.array(dtype=int),
+    body_q: wp.array(dtype=wp.transform),
+    body_q_prev: wp.array(dtype=wp.transform),
+    body_qd: wp.array(dtype=wp.spatial_vector),
+    body_com: wp.array(dtype=wp.vec3),
+    contact_shape: wp.array(dtype=int),
+    contact_body_pos: wp.array(dtype=wp.vec3),
+    contact_body_vel: wp.array(dtype=wp.vec3),
+    contact_normal: wp.array(dtype=wp.vec3),
+    # outputs: particle force and hessian
+    forces: wp.array(dtype=wp.vec3),
+    hessians: wp.array(dtype=wp.mat33),
+):
+    t_id = wp.tid()
+
+    particle_body_contact_count = min(contact_max, contact_count[0])
+
+    if t_id < particle_body_contact_count:
+        particle_idx = soft_contact_particle[t_id]
+        body_contact_force, body_contact_hessian = evaluate_body_particle_contact(
+            particle_idx,
+            pos[particle_idx],
+            pos_prev[particle_idx],
+            t_id,
+            soft_contact_ke,
+            soft_contact_kd,
+            friction_mu,
+            friction_epsilon,
+            particle_radius,
+            shape_material_mu,
+            shape_body,
+            body_q,
+            body_q_prev,
+            body_qd,
+            body_com,
+            contact_shape,
+            contact_body_pos,
+            contact_body_vel,
+            contact_normal,
+            dt,
+        )
+        wp.atomic_add(forces, particle_idx, body_contact_force)
+        wp.atomic_add(hessians, particle_idx, body_contact_hessian)
 
 
 @wp.kernel
@@ -277,7 +340,7 @@ def solve_untangling_kernel(
         # Can be precomputed
         stiff_1 = (static_diags[face[0]] + static_diags[face[1]] + static_diags[face[2]]) / 3.0
         stiff = stiff_factor * (stiff_0 * stiff_1) / (stiff_0 + stiff_1)
-        disp = thickness
+        disp = 2.0 * thickness
 
         force = stiff * G * disp
         hess = stiff * wp.outer(G, G)

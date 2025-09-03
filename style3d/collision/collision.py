@@ -9,8 +9,9 @@
 import warp as wp
 
 from newton import Contacts, Model, State
-from style3d.bvh import EdgeBvh, TriBvh
+from style3d.bvh import BvhEdge, BvhTri
 from style3d.collision.kernels import (
+    eval_body_contact_kernel,
     handle_edge_edge_contacts_kernel,
     handle_vertex_triangle_contacts_kernel,
     solve_untangling_kernel,
@@ -35,15 +36,19 @@ class Collision:
         self.stiff_vf = 0.5  # Stiffness coefficient for vertex-face (VF) collision constraints
         self.stiff_ee = 0.1  # Stiffness coefficient for edge-edge (EE) collision constraints
         self.stiff_ef = 1.0  # Stiffness coefficient for edge-face (EF) collision constraints
-        self.tri_bvh = TriBvh(model.tri_count, self.model.device)
-        self.edge_bvh = EdgeBvh(model.edge_count, self.model.device)
+        self.friction_epsilon = 1e-2
+        self.tri_bvh = BvhTri(model.tri_count, self.model.device)
+        self.edge_bvh = BvhEdge(model.edge_count, self.model.device)
+        self.body_contact_max = model.shape_count * model.particle_count
         self.broad_phase_ee = wp.array(shape=(64, model.edge_count), dtype=int, device=self.model.device)
         self.broad_phase_ef = wp.array(shape=(16, model.edge_count), dtype=int, device=self.model.device)
         self.broad_phase_vf = wp.array(shape=(64, model.particle_count), dtype=int, device=self.model.device)
 
         self.Hx = wp.zeros(model.particle_count, dtype=wp.vec3, device=self.model.device)
         self.contact_hessian_diags = wp.zeros(model.particle_count, dtype=wp.mat33, device=self.model.device)
-        self.rebuild_bvh(model.particle_q)
+
+        self.edge_bvh.build(model.particle_q, self.model.edge_indices, self.radius)
+        self.tri_bvh.build(model.particle_q, self.model.tri_indices, self.radius)
 
     def rebuild_bvh(self, pos: wp.array(dtype=wp.vec3)):
         """
@@ -52,8 +57,8 @@ class Collision:
         Args:
             pos: Array of vertex positions.
         """
-        self.tri_bvh.build(pos, self.model.tri_indices, self.radius)
-        self.edge_bvh.build(pos, self.model.edge_indices, self.radius)
+        self.tri_bvh.rebuild(pos, self.model.tri_indices, self.radius)
+        self.edge_bvh.rebuild(pos, self.model.edge_indices, self.radius)
 
     def refit_bvh(self, pos: wp.array(dtype=wp.vec3)):
         """
@@ -195,6 +200,37 @@ class Collision:
                 outputs=[particle_forces, self.contact_hessian_diags],
                 device=self.model.device,
             )
+
+        wp.launch(
+            kernel=eval_body_contact_kernel,
+            dim=self.body_contact_max,
+            inputs=[
+                dt,
+                particle_q_prev,
+                state_in.particle_q,
+                # body-particle contact
+                self.model.soft_contact_ke,
+                self.model.soft_contact_kd,
+                self.model.soft_contact_mu,
+                self.friction_epsilon,
+                self.model.particle_radius,
+                contacts.soft_contact_particle,
+                contacts.soft_contact_count,
+                contacts.soft_contact_max,
+                self.model.shape_material_mu,
+                self.model.shape_body,
+                state_out.body_q,
+                state_in.body_q,
+                self.model.body_qd,
+                self.model.body_com,
+                contacts.soft_contact_shape,
+                contacts.soft_contact_body_pos,
+                contacts.soft_contact_body_vel,
+                contacts.soft_contact_normal,
+            ],
+            outputs=[particle_forces, self.contact_hessian_diags],
+            device=self.model.device,
+        )
 
     def contact_hessian_diagonal(self):
         """Return diagonal of contact Hessian for preconditioning.
