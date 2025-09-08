@@ -299,7 +299,7 @@ class BvhEdge(BvhAabb):
               when edge connectivity has changed or large movements occurred.
         """
         self.update_aabbs(pos, edge_indices, enlarge)
-        super().build()
+        super().rebuild()
 
     def refit(self, pos: wp.array(dtype=wp.vec3), edge_indices: wp.array(dtype=int, ndim=2), enlarge: float = 0.0):
         """Refits the edge BVH after vertex positions have changed, without rebuilding the hierarchy.
