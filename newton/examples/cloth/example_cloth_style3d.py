@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+
 import numpy as np
 import warp as wp
 from pxr import Usd, UsdGeom
@@ -20,7 +22,7 @@ from pxr import Usd, UsdGeom
 import newton
 import newton.examples
 import newton.utils
-from newton import Mesh, ParticleFlags
+from newton import ParticleFlags
 from newton._src.solvers.style3d import CollisionHandler
 
 
@@ -31,26 +33,23 @@ class Example:
         self.frame_dt = 1.0 / self.fps
 
         # must be an even number when using CUDA Graph
-        self.sim_substeps = 10
+        self.sim_substeps = 20
         self.sim_time = 0.0
         self.sim_dt = self.frame_dt / self.sim_substeps
 
         self.iterations = 4
 
+        viewer._paused = True
         self.viewer = viewer
         builder = newton.Style3DModelBuilder(up_axis=newton.Axis.Z)
 
         use_cloth_mesh = True
         if use_cloth_mesh:
-            asset_path = newton.utils.download_asset("style3d")
+            # asset_path = newton.utils.download_asset("style3d")
 
-            # Garment
-            # garment_usd_name = "Women_Skirt"
-            # garment_usd_name = "Female_T_Shirt"
-            garment_usd_name = "Women_Sweatshirt"
-
-            usd_stage = Usd.Stage.Open(str(asset_path / "garments" / (garment_usd_name + ".usd")))
-            usd_geom_garment = UsdGeom.Mesh(usd_stage.GetPrimAtPath(str("/Root/" + garment_usd_name + "/Root_Garment")))
+            # Grament
+            usd_stage = Usd.Stage.Open(os.path.join(newton.examples.get_asset_directory(), "demo1.usd"))
+            usd_geom_garment = UsdGeom.Mesh(usd_stage.GetPrimAtPath("/Root/demo1/Root_Garment"))
 
             garment_prim = UsdGeom.PrimvarsAPI(usd_geom_garment.GetPrim()).GetPrimvar("st")
             garment_mesh_indices = np.array(usd_geom_garment.GetFaceVertexIndicesAttr().Get())
@@ -59,34 +58,29 @@ class Example:
             garment_mesh_uv = np.array(garment_prim.Get()) * 1e-3
 
             # Avatar
-            usd_stage = Usd.Stage.Open(str(asset_path / "avatars" / "Female.usd"))
-            usd_geom_avatar = UsdGeom.Mesh(usd_stage.GetPrimAtPath("/Root/Female/Root_SkinnedMesh_Avatar_0_Sub_2"))
+            # usd_stage = Usd.Stage.Open(str(asset_path / "avatars" / "Female.usd"))
+            usd_geom_avatar = UsdGeom.Mesh(usd_stage.GetPrimAtPath("/Root/demo1/Root_SkinnedMesh_Avatar_0_Sub_0"))
             avatar_mesh_indices = np.array(usd_geom_avatar.GetFaceVertexIndicesAttr().Get())
             avatar_mesh_points = np.array(usd_geom_avatar.GetPointsAttr().Get())
 
             builder.add_aniso_cloth_mesh(
                 pos=wp.vec3(0, 0, 0),
-                rot=wp.quat_from_axis_angle(axis=wp.vec3(1, 0, 0), angle=wp.pi / 2.0),
+                rot=wp.quat_identity(),
                 vel=wp.vec3(0.0, 0.0, 0.0),
                 tri_aniso_ke=wp.vec3(1.0e2, 1.0e2, 1.0e1),
-                edge_aniso_ke=wp.vec3(2.0e-5, 1.0e-5, 5.0e-6),
+                edge_aniso_ke=wp.vec3(2.0e-5, 1.0e-5, 5.0e-6) * 0.0,
                 panel_verts=garment_mesh_uv.tolist(),
                 panel_indices=garment_mesh_uv_indices.tolist(),
                 vertices=garment_mesh_points.tolist(),
                 indices=garment_mesh_indices.tolist(),
+                particle_radius=3.0e-3,
                 density=0.3,
                 scale=1.0,
-                particle_radius=5.0e-3,
             )
             builder.add_shape_mesh(
                 body=builder.add_body(),
-                xform=wp.transform(
-                    p=wp.vec3(0, 0, 0),
-                    q=wp.quat_from_axis_angle(axis=wp.vec3(1, 0, 0), angle=wp.pi / 2.0),
-                ),
-                mesh=Mesh(avatar_mesh_points, avatar_mesh_indices),
+                mesh=newton.Mesh(avatar_mesh_points, avatar_mesh_indices),
             )
-            # fixed_points = [0]
             fixed_points = []
         else:
             grid_dim = 100
@@ -119,12 +113,8 @@ class Example:
         self.model.particle_flags = wp.array(flags)
 
         # set up contact query and contact detection distances
-        self.model.soft_contact_radius = 0.2e-2
-        self.model.soft_contact_margin = 0.35e-2
-        self.model.soft_contact_ke = 1.0e1
-        self.model.soft_contact_kd = 1.0e-6
-        self.model.soft_contact_mu = 0.2
-        self.model.gravity = wp.vec3(0.0, 0.0, -9.81)
+        self.model.soft_contact_radius = 0.2
+        self.model.soft_contact_margin = 0.35
 
         self.solver = newton.solvers.SolverStyle3D(
             model=self.model,
@@ -181,6 +171,11 @@ class Example:
 
 
 if __name__ == "__main__":
+    # Create parser with base arguments
+    # parser = newton.examples.create_parser()
+    # parser.set_defaults(viewer = "usd")
+    # parser.set_defaults(output_path = "d:/desktop/demo.usd")
+
     # Parse arguments and initialize viewer
     viewer, args = newton.examples.init()
 
