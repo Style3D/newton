@@ -32,10 +32,10 @@ class Collision:
             device: The target Warp device (e.g. "cpu" or "cuda:0").
         """
         self.model = model
-        self.radius = 3e-3  # Contact radius
-        self.stiff_vf = 0.5  # Stiffness coefficient for vertex-face (VF) collision constraints
-        self.stiff_ee = 0.1  # Stiffness coefficient for edge-edge (EE) collision constraints
-        self.stiff_ef = 1.0  # Stiffness coefficient for edge-face (EF) collision constraints
+        self.radius = 4e-3  # Contact radius
+        self.stiff_vf = 0.1  # Stiffness coefficient for vertex-face (VF) collision constraints
+        self.stiff_ee = 0.02  # Stiffness coefficient for edge-edge (EE) collision constraints
+        self.stiff_ef = 0.20  # Stiffness coefficient for edge-face (EF) collision constraints
         self.friction_epsilon = 1e-2
         self.tri_bvh = BvhTri(model.tri_count, self.model.device)
         self.edge_bvh = BvhEdge(model.edge_count, self.model.device)
