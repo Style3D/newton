@@ -11,6 +11,7 @@ import warp as wp
 from pxr import Usd, UsdGeom
 
 import newton
+import style3d
 from style3d import Viewer
 
 
@@ -29,7 +30,7 @@ class Example:
 
         use_cloth_mesh = True
         if use_cloth_mesh:
-            asset_path = newton.utils.download_asset("style3d_description")
+            asset_path = newton.utils.download_asset("style3d")
 
             # Grament
             # garment_usd_name = "Women_Skirt"
@@ -106,6 +107,7 @@ class Example:
             model=self.model,
             iterations=self.iterations,
             enable_mouse_dragging=True,
+            collision_handler=style3d.Collision(self.model),
         )
         self.solver.precompute(builder)
         self.state0 = self.model.state()

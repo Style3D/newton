@@ -14,9 +14,7 @@
 # limitations under the License.
 
 from .collision import Collision
-from .solver_style3d import SolverStyle3D
 
 __all__ = [
     "Collision",
-    "SolverStyle3D",
 ]

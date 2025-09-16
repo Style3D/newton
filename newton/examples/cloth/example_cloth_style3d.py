@@ -20,8 +20,8 @@ from pxr import Usd, UsdGeom
 import newton
 import newton.examples
 import newton.utils
+import style3d
 from newton import Mesh, ParticleFlags
-from newton._src.solvers.style3d import CollisionHandler
 
 
 class Example:
@@ -129,7 +129,7 @@ class Example:
         self.solver = newton.solvers.SolverStyle3D(
             model=self.model,
             iterations=self.iterations,
-            collision_handler=CollisionHandler(self.model),
+            collision_handler=style3d.Collision(self.model),
         )
         self.solver.precompute(
             builder,
