@@ -67,6 +67,7 @@ class SolverStyle3D(SolverBase):
         model: Style3DModel,
         collision_handler=None,
         iterations=10,
+        pcg_iterations=10,
         drag_spring_stiff: float = 1e2,
         enable_mouse_dragging: bool = False,
     ):
@@ -75,6 +76,7 @@ class SolverStyle3D(SolverBase):
             model: The `Style3DModel` to integrate.
             collision_handler (CollisionHandler or None, optional):
                 Handles collision detection and response. If `None`, collision handling will be disabled.
+            pcg_iterations: Number of PCG iterations per non-linear iteration.
             iterations: Number of non-linear iterations per step.
             drag_spring_stiff: The stiffness of spring connecting barycentric-weighted drag-point and target-point.
             enable_mouse_dragging: Enable/disable dragging kernel.
@@ -83,8 +85,9 @@ class SolverStyle3D(SolverBase):
         super().__init__(model)
         self.style3d_model = model
         self.collision = collision_handler
-        self.nonlinear_iterations = iterations
         self.drag_spring_stiff = drag_spring_stiff
+        self.pcg_iterations = pcg_iterations
+        self.nonlinear_iterations = iterations
         self.enable_mouse_dragging = enable_mouse_dragging
         self.pd_matrix_builder = PDMatrixBuilder(model.particle_count)
         self.linear_solver = PcgSolver(model.particle_count, self.device)
@@ -246,7 +249,7 @@ class SolverStyle3D(SolverBase):
                 self.rhs,
                 self.inv_A_diags,
                 self.dx,
-                wp.min(_iter, 10),
+                self.pcg_iterations,
                 None if self.collision is None else self.collision.hessian_multiply,
             )
 
