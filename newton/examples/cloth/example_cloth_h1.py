@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 
 import numpy as np
 import warp as wp
@@ -34,12 +33,12 @@ class Example:
         self.sim_time = 0.0
 
         # must be an even number when using CUDA Graph
-        self.sim_substeps = 10
+        self.sim_substeps = 8
         self.sim_dt = self.frame_dt / self.sim_substeps
         self.iterations = 10
 
         self.viewer = viewer
-        self.viewer._paused = __name__ == "__main__"
+        self.viewer._paused = True
         self.frame_index = 0
 
         # ------------------------------------------------------------------
@@ -55,39 +54,37 @@ class Example:
         # ------------------------------------------------------------------
         # Build a cloth
         # ------------------------------------------------------------------
+        garment_usd_name = "h1_jacket"
+        # garment_usd_name = "h1_cake_skirt"
         cloth_builder = newton.Style3DModelBuilder()
-        # asset_path = newton.utils.download_asset("style3d_description")
-        # garment_usd_name = "Women_Sweatshirt"
-        # usd_stage = Usd.Stage.Open(str(asset_path / "garments" / (garment_usd_name + ".usd")))
-        # usd_geom_garment = UsdGeom.Mesh(usd_stage.GetPrimAtPath(str("/Root/" + garment_usd_name + "/Root_Garment")))
-
-        usd_stage = Usd.Stage.Open(os.path.join(newton.examples.get_asset_directory(), "piyi.usd"))
-        usd_geom_garment = UsdGeom.Mesh(usd_stage.GetPrimAtPath("/Root/piyi/Root_Garment"))
+        asset_path = newton.utils.download_asset("style3d")
+        usd_stage = Usd.Stage.Open(f"{asset_path}/garments/{garment_usd_name}.usd")
+        usd_geom_garment = UsdGeom.Mesh(usd_stage.GetPrimAtPath(f"/Root/{garment_usd_name}/Root_Garment"))
         garment_prim = UsdGeom.PrimvarsAPI(usd_geom_garment.GetPrim()).GetPrimvar("st")
-        garment_mesh_indices = np.array(usd_geom_garment.GetFaceVertexIndicesAttr().Get())
-        garment_mesh_points = np.array(usd_geom_garment.GetPointsAttr().Get())[:, [2, 0, 1]]  # y-up to z-up
-        garment_mesh_uv_indices = np.array(garment_prim.GetIndices())
-        garment_mesh_uv = np.array(garment_prim.Get()) * 1e-3
+        self.garment_mesh_indices = np.array(usd_geom_garment.GetFaceVertexIndicesAttr().Get())
+        self.garment_mesh_points = np.array(usd_geom_garment.GetPointsAttr().Get())[:, [2, 0, 1]]  # y-up to z-up
+        self.garment_mesh_uv_indices = np.array(garment_prim.GetIndices())
+        self.garment_mesh_uv = np.array(garment_prim.Get()) * 1e-3
 
         cloth_builder.add_aniso_cloth_mesh(
             pos=wp.vec3(0, 0, 0),
             rot=wp.quat_identity(),
             vel=wp.vec3(0.0, 0.0, 0.0),
             tri_aniso_ke=wp.vec3(1.0e2, 1.0e2, 1.0e2) * 10.0,
-            edge_aniso_ke=wp.vec3(1.0e-6, 1.0e-6, 1.0e-6) * 50.0,
-            panel_verts=garment_mesh_uv.tolist(),
-            panel_indices=garment_mesh_uv_indices.tolist(),
-            vertices=garment_mesh_points.tolist(),
-            indices=garment_mesh_indices.tolist(),
+            edge_aniso_ke=wp.vec3(1.0e-6, 1.0e-6, 1.0e-6) * 40.0,
+            panel_verts=self.garment_mesh_uv.tolist(),
+            panel_indices=self.garment_mesh_uv_indices.tolist(),
+            vertices=self.garment_mesh_points.tolist(),
+            indices=self.garment_mesh_indices.tolist(),
             density=0.5,
             scale=1.0,
-            particle_radius=1.5e-3,
+            particle_radius=3.0e-3,
         )
         h1.add_builder(cloth_builder)
 
         self.graph = None
         self.model = h1.finalize()
-        self.model.soft_contact_ke = 1e4
+        self.model.soft_contact_ke = 5e3
         self.model.shape_material_mu.fill_(0.0)
         self.viewer.set_model(self.model)
 
@@ -113,6 +110,12 @@ class Example:
         # ------------------------------------------------------------------
         body_q_np = self.state.body_q.numpy()
         self.ee_tfs = [wp.transform(*body_q_np[link_idx]) for _, link_idx in self.ee]
+
+        # A-pose
+        # wp.transform_set_translation(self.ee_tfs[0], wp.vec3(0.0,  1.2,  0.0))
+        # wp.transform_set_translation(self.ee_tfs[1], wp.vec3(0.0, -1.2, -0.0))
+        # wp.transform_set_rotation(self.ee_tfs[0], wp.quat(-0.1, 0.5,  0.4, 0.75))
+        # wp.transform_set_rotation(self.ee_tfs[1], wp.quat( 0.1, 0.5, -0.4, 0.75))
 
         # ------------------------------------------------------------------
         # IK setup (single problem)
@@ -171,14 +174,19 @@ class Example:
             lambda_initial=0.1,
             jacobian_mode=ik.IKJacobianMode.ANALYTIC,
         )
+        self.ik_solver.solve(iterations=self.ik_iters)
+        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state)
 
         # ------------------------------------------------------------------
         # Cloth solver
         # ------------------------------------------------------------------
+        collision_handler = style3d.Collision(self.model)
+        collision_handler.radius = 3.5e-3
+
         self.cloth_solver = newton.solvers.SolverStyle3D(
             model=self.model,
             iterations=self.iterations,
-            collision_handler=style3d.Collision(self.model),
+            collision_handler=collision_handler,
         )
         self.cloth_solver.precompute(h1)
         self.control = self.model.control()
@@ -219,15 +227,16 @@ class Example:
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state)
         # return
         self.body_q_1.assign(self.state.body_q)
+        self.cloth_solver.rebuild_bvh(self.state)
         for ii in range(self.sim_substeps):
             wp.launch(
                 self.transform_interpolate,
                 inputs=[ii / (self.sim_substeps - 1.0), self.body_q_0, self.body_q_1],
-                outputs=[self.state.body_q],
+                outputs=[self.state1.body_q],
                 dim=self.model.body_count,
                 device=self.model.device,
             )
-            self.state1.body_q.assign(self.state.body_q)
+            self.state.body_q.assign(self.state1.body_q)
             self.contacts = self.model.collide(self.state, soft_contact_margin=0.3)
             self.cloth_solver.step(self.state, self.state1, self.control, self.contacts, self.sim_dt)
             (self.state, self.state1) = (self.state1, self.state)
@@ -281,14 +290,14 @@ class Example:
             wp.transform_set_translation(self.ee_tfs[1], pos1)
         elif self.sim_time < key_time[2]:
             """Drop hands"""
-            pos_lerp_ratio = 0.5 * wp.clamp((self.sim_time - key_time[1]) / (key_time[2] - key_time[1]), 0.0, 1.0)
+            pos_lerp_ratio = wp.clamp((self.sim_time - key_time[1]) / (key_time[2] - key_time[1]), 0.0, 1.0)
             rot_lerp_ratio = wp.clamp((self.sim_time - key_time[1]) / (key_time[2] - key_time[1]), 0.0, 1.0)
             for i in range(len(target_pos)):
                 tf = self.ee_tfs[i]
                 rot = wp.transform_get_rotation(tf)
                 pos = wp.transform_get_translation(tf)
-                wp.transform_set_translation(tf, wp.lerp(pos, target_pos[1][i], wp.pow(pos_lerp_ratio, 1.0)))
-                wp.transform_set_rotation(tf, wp.quat_slerp(rot, target_rot[1][i], wp.pow(rot_lerp_ratio, 2.0)))
+                wp.transform_set_translation(tf, wp.lerp(pos, target_pos[1][i], wp.pow(pos_lerp_ratio, 2.0)))
+                wp.transform_set_rotation(tf, wp.quat_slerp(rot, target_rot[1][i], wp.pow(rot_lerp_ratio, 3.0)))
 
     # ----------------------------------------------------------------------
     # Template API
@@ -311,15 +320,28 @@ class Example:
         self.viewer.begin_frame(self.sim_time)
 
         # Register gizmos (the viewer will draw & mutate transforms in-place)
-        # for (name, _), tf in zip(self.ee, self.ee_tfs, strict=False):
-        #    self.viewer.log_gizmo(f"target_{name}", tf)
+        for (name, _), tf in zip(self.ee, self.ee_tfs, strict=False):
+            self.viewer.log_gizmo(f"target_{name}", tf)
 
         # Visualize the current articulated state
         # newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state)
         if isinstance(self.viewer, newton._src.viewer.ViewerUSD):
-            self.viewer.log_mesh(
-                "/model/triangles", self.state.particle_q, self.model.tri_indices.flatten(), backface_culling=False
-            )
+            if self.frame_index == 1:
+                self.viewer.log_mesh(
+                    name="/model/triangles",
+                    points=self.state.particle_q,
+                    indices=self.model.tri_indices.flatten(),
+                    uvs=wp.array(self.garment_mesh_uv, dtype=float),
+                    uv_indices=wp.array(self.garment_mesh_uv_indices, dtype=wp.int32),
+                    backface_culling=False,
+                )
+            else:
+                self.viewer.log_mesh(
+                    name="/model/triangles",
+                    points=self.state.particle_q,
+                    indices=self.model.tri_indices.flatten(),
+                    backface_culling=False,
+                )
 
             # Register body entity
             for i in range(self.model.body_count):
@@ -369,7 +391,7 @@ class Example:
                         self.viewer.log_mesh(
                             f"/model/triangles_{self.model.shape_key[shape_idx]}", shape_vertices, shape_indices
                         )
-            print(f"[{self.viewer._frame_index}/300]")
+            print(f"[{self.viewer._frame_index}/600]")
         else:
             self.viewer.log_state(self.state)
 
@@ -380,7 +402,7 @@ class Example:
 if __name__ == "__main__":
     # Parse arguments and initialize viewer
     parser = newton.examples.create_parser()
-    # parser.set_defaults(num_frames=601, viewer="usd", output_path="D:/desktop/example_h1.usd")
+    # parser.set_defaults(num_frames=601, viewer="usd", output_path="D:/desktop/h1_animation.usd")
     viewer, args = newton.examples.init(parser)
     example = Example(viewer)
     newton.examples.run(example)
