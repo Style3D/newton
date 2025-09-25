@@ -44,12 +44,13 @@ class Collision:
         self.stiff_ee = 0.1  # Stiffness coefficient for edge-edge (EE) collision constraints
         self.stiff_ef = 1.0  # Stiffness coefficient for edge-face (EF) collision constraints
         self.friction_epsilon = 1e-2
+        self.integrate_with_external_rigid_solver = True
         self.tri_bvh = BvhTri(model.tri_count, self.model.device)
         self.edge_bvh = BvhEdge(model.edge_count, self.model.device)
         self.body_contact_max = model.shape_count * model.particle_count
-        self.broad_phase_ee = wp.array(shape=(64, model.edge_count), dtype=int, device=self.model.device)
-        self.broad_phase_ef = wp.array(shape=(16, model.edge_count), dtype=int, device=self.model.device)
-        self.broad_phase_vf = wp.array(shape=(64, model.particle_count), dtype=int, device=self.model.device)
+        self.broad_phase_ee = wp.array(shape=(32, model.edge_count), dtype=int, device=self.model.device)
+        self.broad_phase_ef = wp.array(shape=(32, model.edge_count), dtype=int, device=self.model.device)
+        self.broad_phase_vf = wp.array(shape=(32, model.particle_count), dtype=int, device=self.model.device)
 
         self.Hx = wp.zeros(model.particle_count, dtype=wp.vec3, device=self.model.device)
         self.contact_hessian_diags = wp.zeros(model.particle_count, dtype=wp.mat33, device=self.model.device)
@@ -89,7 +90,7 @@ class Collision:
             edge_indices: Edge connectivity.
         """
         max_dist = self.radius * 3.0
-        query_radius = self.radius * 2.0
+        query_radius = self.radius
 
         self.refit_bvh(particle_q)
 
@@ -226,8 +227,8 @@ class Collision:
                 contacts.soft_contact_max,
                 self.model.shape_material_mu,
                 self.model.shape_body,
-                state_out.body_q,
-                state_in.body_q,
+                state_out.body_q if self.integrate_with_external_rigid_solver else state_in.body_q,
+                state_in.body_q if self.integrate_with_external_rigid_solver else None,
                 self.model.body_qd,
                 self.model.body_com,
                 contacts.soft_contact_shape,
