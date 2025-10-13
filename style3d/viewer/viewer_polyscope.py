@@ -21,7 +21,7 @@ from newton import Mesh, Model, State
 ########################################################################################################################
 
 
-class Viewer:
+class ViewerPolyscope:
     def __init__(
         self,
         model: Model = None,
@@ -464,5 +464,5 @@ class Viewer:
 
 
 if __name__ == "__main__":
-    viewer = Viewer()
+    viewer = ViewerPolyscope()
     viewer.run()

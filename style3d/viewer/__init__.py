@@ -6,8 +6,8 @@
 #   Date:           2025/06/19                                                                                         #
 ########################################################################################################################
 
-from .viewer import Viewer
+from .viewer_polyscope import ViewerPolyscope
 
 __all__ = [
-    "Viewer",
+    "ViewerPolyscope",
 ]

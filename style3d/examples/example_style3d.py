@@ -12,7 +12,7 @@ from pxr import Usd, UsdGeom
 
 import newton
 from newton._src.solvers.style3d.collision import Collision
-from style3d import Viewer
+from style3d import ViewerPolyscope
 
 
 class Example:
@@ -113,7 +113,7 @@ class Example:
         self.state0 = self.model.state()
         self.state1 = self.model.state()
         self.control = self.model.control()
-        self.viewer = Viewer(self.model)
+        self.viewer = ViewerPolyscope(self.model)
         self.viewer.set_user_update(self.update)
 
         self.cuda_graph = None
