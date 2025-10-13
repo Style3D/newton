@@ -6,11 +6,8 @@
 #   Date:           2025/07/03                                                                                         #
 ########################################################################################################################
 
-from newton._src.solvers.style3d.collision import Collision
-
 from .viewer import Viewer
 
 __all__ = [
-    "Collision",
     "Viewer",
 ]
