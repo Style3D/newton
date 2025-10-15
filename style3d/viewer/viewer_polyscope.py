@@ -6,7 +6,6 @@
 #   Date:           2025/06/19                                                                                         #
 ########################################################################################################################
 
-import math
 import time
 
 import numpy as np
@@ -60,11 +59,9 @@ class ViewerPolyscope(ViewerBase):
         self.body_entities = {}
 
         # FPS counting
-        self._sim_fps = 0.0
         self._render_fps = 1.0
         self._redner_fps_count = 0
         self._render_fps_last_time = 0.0
-        self._sim_fps_time_cost = []
 
         # Drag info
         self._drag_dist = 0.0
@@ -447,11 +444,7 @@ class ViewerPolyscope(ViewerBase):
             psim.TextColored([0, 1, 0, 1], "Running")
         psim.Text(f"Sim Time: {self.sim_time:.1f} s")
         psim.Text(f"Frame Count: {self.sim_frames}")
-        if self._sim_fps != 0.0:
-            psim.Text(f"Update FPS: {self._sim_fps:.1f} / {1e3 / self._sim_fps:.1f}ms")
-        else:
-            psim.Text("Update FPS: 0.0 / Inf.ms")
-        psim.Text(f"Render FPS: {self._render_fps:.1f} / {1e3 / self._render_fps:.1f}ms")
+        psim.Text(f"FPS: {self._render_fps:.1f} / {1e3 / self._render_fps:.1f}ms")
 
         if self.model is not None:
             psim.Separator()
@@ -480,14 +473,7 @@ class ViewerPolyscope(ViewerBase):
         self._process_mouse_inputs()
         if self.user_update is not None:
             if not self.paused:
-                time_begin = time.time()
                 self.user_update()
-                time_end = time.time()
-                # update simulation fps
-                self._sim_fps_time_cost.append(time_end - time_begin)
-                if len(self._sim_fps_time_cost) > 5:
-                    self._sim_fps_time_cost.pop(0)
-                    self._sim_fps = len(self._sim_fps_time_cost) / math.fsum(self._sim_fps_time_cost)
 
     @override
     def is_running(self) -> bool:
@@ -496,6 +482,11 @@ class ViewerPolyscope(ViewerBase):
     @override
     def is_paused(self) -> bool:
         return self.paused
+
+    @override
+    def begin_frame(self, time):
+        super().begin_frame(time)
+        self.sim_time = time
 
     @override
     def end_frame(self):
