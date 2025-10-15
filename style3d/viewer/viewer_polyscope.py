@@ -15,7 +15,7 @@ import polyscope.imgui as psim
 import warp as wp
 from typing_extensions import override
 
-from newton import Mesh, State
+from newton import Axis, AxisType, Mesh, State
 from newton._src.viewer.viewer import ViewerBase
 
 ########################################################################################################################
@@ -26,6 +26,7 @@ from newton._src.viewer.viewer import ViewerBase
 class ViewerPolyscope(ViewerBase):
     def __init__(
         self,
+        up_axis: AxisType = Axis.Y,
         window_size: tuple[int, int] = (1920, 1080),
         scale: float = 1.0,
         vsync=False,
@@ -41,6 +42,7 @@ class ViewerPolyscope(ViewerBase):
         self.scale = scale
         self.sim_time = 0.0
         self.sim_frames = 0
+        self.up_axis = up_axis
         self.tri_indices = None
         self._coord_axes = None
         self.user_update = None
@@ -122,6 +124,22 @@ class ViewerPolyscope(ViewerBase):
         # Init camera
         self._update_camera()
 
+    def _array_to_y_up(self, np_array):
+        if self.up_axis == Axis.Z:
+            return np_array[:, [1, 2, 0]]
+        elif self.up_axis == Axis.X:
+            return np_array[:, [2, 0, 1]]
+        else:
+            return np_array
+
+    def _transform_to_y_up(self, np_array):
+        if self.up_axis == Axis.Z:
+            return np.array([[0, 1, 0, 0], [0, 0, 1, 0], [1, 0, 0, 0], [0, 0, 0, 1]], dtype=np.float32) @ np_array
+        elif self.up_axis == Axis.X:
+            return np.array([[0, 0, 1, 0], [1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 0, 1]], dtype=np.float32) @ np_array
+        else:
+            return np_array
+
     @override
     def set_model(self, model):
         super().set_model(model)
@@ -130,13 +148,14 @@ class ViewerPolyscope(ViewerBase):
             # Cache
             self.shape_flags = model.shape_flags.numpy()
             self._body_transform_mat4x4 = wp.zeros(model.body_count, dtype=wp.mat44)
+            particle_q = self._array_to_y_up(model.particle_q.numpy().reshape(model.particle_count, 3)) * self.scale
 
             # Register particle entity
             if model.particle_count > 0:
                 self.particle_entity = ps.register_point_cloud(
                     name="Particles",
                     enabled=False,
-                    points=model.particle_q.numpy().reshape(model.particle_count, 3) * self.scale,
+                    points=particle_q,
                     radius=model.particle_radius.numpy()[0] * self.scale,
                 )
 
@@ -145,7 +164,7 @@ class ViewerPolyscope(ViewerBase):
                 self.tri_indices = model.tri_indices.numpy()
                 self.tri_entity = ps.register_surface_mesh(
                     name="Triangles",
-                    vertices=model.particle_q.numpy().reshape(model.particle_count, 3) * self.scale,
+                    vertices=particle_q,
                     faces=model.tri_indices.numpy().reshape(model.tri_count, 3),
                     color=(184 / 255.0, 67 / 255.0, 1),
                     back_face_policy="custom",
@@ -213,23 +232,23 @@ class ViewerPolyscope(ViewerBase):
     @override
     def log_state(self, state: State):
         # Download to host.
-        vertices = state.particle_q.numpy().reshape(state.particle_count, 3) * self.scale
+        particle_q = self._array_to_y_up(state.particle_q.numpy().reshape(state.particle_count, 3)) * self.scale
 
         if self.particle_entity is not None:
             if self.particle_entity.is_enabled():
-                self.particle_entity.update_point_positions(vertices)
+                self.particle_entity.update_point_positions(particle_q)
 
         if self.tri_entity is not None:
-            self.tri_entity.update_vertex_positions(vertices)
+            self.tri_entity.update_vertex_positions(particle_q)
 
             if self._pick_result is not None:
                 if self._pick_result.structure_name == self.tri_entity.get_name():
                     bary_coord = self.drag_bary_coord
                     index = self._pick_result.structure_data["index"]
                     face = self.tri_indices[index, 0:3]
-                    x0 = wp.vec3(vertices[face[0], 0:3])
-                    x1 = wp.vec3(vertices[face[1], 0:3])
-                    x2 = wp.vec3(vertices[face[2], 0:3])
+                    x0 = wp.vec3(particle_q[face[0], 0:3])
+                    x1 = wp.vec3(particle_q[face[1], 0:3])
+                    x2 = wp.vec3(particle_q[face[2], 0:3])
                     self._drag_point.set_position(x0 * bary_coord[0] + x1 * bary_coord[1] + x2 * bary_coord[2])
 
         if len(self.body_entities) > 0:
@@ -260,7 +279,9 @@ class ViewerPolyscope(ViewerBase):
                 for shape_idx in shape_indices:
                     if isinstance(self.model.shape_source[shape_idx], Mesh):
                         if self.shape_flags[shape_idx] & 1:
-                            self.body_entities[self.model.shape_key[shape_idx]].set_transform(body_q[i])
+                            self.body_entities[self.model.shape_key[shape_idx]].set_transform(
+                                self._transform_to_y_up(body_q[i])
+                            )
 
         ps.request_redraw()
 
