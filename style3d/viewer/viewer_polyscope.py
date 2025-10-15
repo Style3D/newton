@@ -13,30 +13,30 @@ import numpy as np
 import polyscope as ps
 import polyscope.imgui as psim
 import warp as wp
+from typing_extensions import override
 
-from newton import Mesh, Model, State
+from newton import Mesh, State
+from newton._src.viewer.viewer import ViewerBase
 
 ########################################################################################################################
 #####################################################    Viewer    #####################################################
 ########################################################################################################################
 
 
-class ViewerPolyscope:
+class ViewerPolyscope(ViewerBase):
     def __init__(
         self,
-        model: Model = None,
         window_size: tuple[int, int] = (1920, 1080),
         scale: float = 1.0,
         vsync=False,
     ):
         """Initialize a 3D renderer with customizable window properties.
         Args:
-            model (newton.Model): The Newton physics model to render
             window_size (Tuple[int, int]): Window dimensions (width, height)
             vsync (bool): Enable vertical synchronization (default: False)
         """
+        super().__init__()
         self.vsync = vsync
-        self.model = model
         self.paused = True
         self.scale = scale
         self.sim_time = 0.0
@@ -45,12 +45,12 @@ class ViewerPolyscope:
         self._coord_axes = None
         self.user_update = None
         self._pick_result = None
+        self.request_exit = False
         self.ground_plane_mode = "tile_reflection"
 
         # Cache variables
-        if model is not None:
-            self.shape_flags = model.shape_flags.numpy()
-            self._body_transform_mat4x4 = wp.zeros(model.body_count, dtype=wp.mat44)
+        self.shape_flags = None
+        self._body_transform_mat4x4 = None
 
         # Render entities
         self.tri_entity = None
@@ -122,8 +122,15 @@ class ViewerPolyscope:
         # Init camera
         self._update_camera()
 
+    @override
+    def set_model(self, model):
+        super().set_model(model)
         # Add meshes
         if model is not None:
+            # Cache
+            self.shape_flags = model.shape_flags.numpy()
+            self._body_transform_mat4x4 = wp.zeros(model.body_count, dtype=wp.mat44)
+
             # Register particle entity
             if model.particle_count > 0:
                 self.particle_entity = ps.register_point_cloud(
@@ -203,7 +210,8 @@ class ViewerPolyscope:
     def set_user_update(self, callback):
         self.user_update = callback
 
-    def update_state(self, state: State):
+    @override
+    def log_state(self, state: State):
         # Download to host.
         vertices = state.particle_q.numpy().reshape(state.particle_count, 3) * self.scale
 
@@ -269,6 +277,7 @@ class ViewerPolyscope:
         if psim.IsKeyPressed(psim.ImGuiKey_Space):
             self.paused = not self.paused  # Run/pause
         elif psim.IsKeyPressed(psim.ImGuiKey_Escape):
+            self.request_exit = True
             ps.unshow()  # Exit
         elif psim.IsKeyPressed(psim.ImGuiKey_X):  # Show/hide edges
             for _, entity in self.body_entities.items():
@@ -458,6 +467,19 @@ class ViewerPolyscope:
                 if len(self._sim_fps_time_cost) > 5:
                     self._sim_fps_time_cost.pop(0)
                     self._sim_fps = len(self._sim_fps_time_cost) / math.fsum(self._sim_fps_time_cost)
+
+    @override
+    def is_running(self) -> bool:
+        return not self.request_exit and not ps.window_requests_close()
+
+    @override
+    def is_paused(self) -> bool:
+        return self.paused
+
+    @override
+    def end_frame(self):
+        super().end_frame()
+        ps.frame_tick()
 
     def run(self):
         ps.show()

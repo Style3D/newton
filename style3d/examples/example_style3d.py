@@ -11,7 +11,6 @@ import warp as wp
 from pxr import Usd, UsdGeom
 
 import newton
-from newton._src.solvers.style3d.collision import Collision
 from style3d import ViewerPolyscope
 
 
@@ -107,13 +106,13 @@ class Example:
             model=self.model,
             iterations=self.iterations,
             enable_mouse_dragging=True,
-            collision_handler=Collision(self.model),
         )
         self.solver.precompute(builder)
         self.state0 = self.model.state()
         self.state1 = self.model.state()
         self.control = self.model.control()
-        self.viewer = ViewerPolyscope(self.model)
+        self.viewer = ViewerPolyscope()
+        self.viewer.set_model(self.model)
         self.viewer.set_user_update(self.update)
 
         self.cuda_graph = None
@@ -147,7 +146,7 @@ class Example:
 
         self.advance_frame()
         self.advance_frame()
-        self.viewer.update_state(self.state0)
+        self.viewer.log_state(self.state0)
 
 
 if __name__ == "__main__":
