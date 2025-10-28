@@ -1,15 +1,13 @@
 ########################################################################################################################
 #   Company:        Zhejiang Linctex Digital Technology Ltd.(Style3D)                                                  #
 #   Copyright:      All rights reserved by Linctex                                                                     #
-#   Description:    Style3D collision package                                                                          #
+#   Description:    Style3D Solver Plus                                                                                #
 #   Author:         Wenchao Huang (physhuangwenchao@gmail.com)                                                         #
-#   Date:           2025/07/03                                                                                         #
+#   Date:           2025/10/27                                                                                         #
 ########################################################################################################################
 
-from .style3d_plus import SolverStyle3DPro
-from .viewer import ViewerPolyscope
+from .solver_style3d_pro import SolverStyle3DPro
 
 __all__ = [
     "SolverStyle3DPro",
-    "ViewerPolyscope",
 ]
