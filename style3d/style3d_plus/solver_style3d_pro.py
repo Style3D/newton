@@ -2,7 +2,7 @@
 #   Company:        Zhejiang Linctex Digital Technology Ltd.(Style3D)                                                  #
 #   Copyright:      All rights reserved by Linctex                                                                     #
 #   Description:    Style3D Solver Plus                                                                                #
-#   Author:         Wenchao Huang (physhuangwenchao@gmail.com)                                                         #
+#   Author:         Wenchao Huang                                                                                      #
 #   Date:           2025/10/27                                                                                         #
 ########################################################################################################################
 
@@ -71,13 +71,13 @@ class SolverStyle3DPro(nt.solvers.SolverBase):
             self.faces = faces_np
             self.cloth = sim.Cloth(faces_np, verts_np, [], False)
             cloth_attrib = sim.ClothAttrib()
-            cloth_attrib.stretch_stiff = sim.Vec3f(120, 100, 80)
-            cloth_attrib.bend_stiff = sim.Vec3f(1e-6, 1e-6, 1e-6)
             cloth_attrib.density = 0.2
             cloth_attrib.thickness = 3e-3
             cloth_attrib.static_friction = 0.03
             cloth_attrib.dynamic_friction = 0.03
+            cloth_attrib.bend_stiff = sim.Vec3f(1e-6, 1e-6, 1e-6)
             self.cloth.set_attrib(cloth_attrib)
+            self.cloth.set_inplane_prop(model.tri_aniso_ke.numpy())
             self.cloth.set_pin(self.is_fixed, self.fixed_indices)
             self.cloth.attach(self.world)
 
