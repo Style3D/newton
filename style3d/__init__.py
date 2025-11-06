@@ -6,10 +6,8 @@
 #   Date:           2025/07/03                                                                                         #
 ########################################################################################################################
 
-from .style3d_plus import SolverStyle3DPro
 from .viewer import ViewerPolyscope
 
 __all__ = [
-    "SolverStyle3DPro",
     "ViewerPolyscope",
 ]
