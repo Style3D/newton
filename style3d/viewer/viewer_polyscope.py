@@ -60,7 +60,7 @@ class ViewerPolyscope(ViewerBase):
 
         # FPS counting
         self._render_fps = 1.0
-        self._redner_fps_count = 0
+        self._render_fps_count = 0
         self._render_fps_last_time = 0.0
 
         # Drag info
@@ -229,7 +229,8 @@ class ViewerPolyscope(ViewerBase):
     @override
     def log_state(self, state: State):
         # Download to host.
-        particle_q = self._array_to_y_up(state.particle_q.numpy().reshape(state.particle_count, 3)) * self.scale
+        if state.particle_q is not None:
+            particle_q = self._array_to_y_up(state.particle_q.numpy().reshape(state.particle_count, 3)) * self.scale
 
         if self.particle_entity is not None:
             if self.particle_entity.is_enabled():
@@ -328,7 +329,7 @@ class ViewerPolyscope(ViewerBase):
         # Button key
         LeftButton, RightButton, MiddleButton = 0, 1, 2
 
-        # Click evnet
+        # Click event
         if psim.IsMouseClicked(LeftButton):
             pick_result = ps.pick(screen_coords=mouse_pos)
             if pick_result.is_hit:
@@ -430,11 +431,11 @@ class ViewerPolyscope(ViewerBase):
     def _update_gui(self):
         # update render fps
         curr_time = time.time()
-        if (self._redner_fps_count > 0) and (curr_time - self._render_fps_last_time > 0.1):
-            self._render_fps = self._redner_fps_count / (curr_time - self._render_fps_last_time)
+        if (self._render_fps_count > 0) and (curr_time - self._render_fps_last_time > 0.1):
+            self._render_fps = self._render_fps_count / (curr_time - self._render_fps_last_time)
             self._render_fps_last_time = curr_time
-            self._redner_fps_count = 0
-        self._redner_fps_count += 1
+            self._render_fps_count = 0
+        self._render_fps_count += 1
 
         psim.Text("State: ")
         psim.SameLine()
