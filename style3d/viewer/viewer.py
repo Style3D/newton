@@ -58,11 +58,12 @@ class Viewer:
         # Drag info
         self._pick_dist = 0.0
         self.pick_result = None
-        self.drag_info_chg = False
-        self.drag_position = wp.vec3(0, 0, 0)
 
         # User callbacks
-        self._user_update = None
+        self._user_update = None  # _user_update()
+        self._on_release_drag = None  # _on_release_drag()
+        self._on_drag = None  # _on_drag(target_pos: tuple[float, float, float])
+        self._on_pick = None  # _on_pick(pick_res: ps.PickResult)
 
         # Setup polyscope scene parameters
         ps.set_program_name(title)  # should be called before init()
@@ -122,6 +123,15 @@ class Viewer:
 
     def set_user_update(self, user_func):
         self._user_update = user_func
+
+    def set_on_pick(self, callback):
+        self._on_pick = callback
+
+    def set_on_drag(self, callback):
+        self._on_drag = callback
+
+    def set_on_release_drag(self, callback):
+        self._on_release_drag = callback
 
     def _update_camera(self):
         r = wp.sin(wp.radians(self._camera_theta))
@@ -224,12 +234,13 @@ class Viewer:
                 self.pick_result = pick_result
                 self._dragged_point.set_enabled(True)
                 self._dragged_point.set_position(pick_result.position)
-                self.drag_position = wp.vec3(pick_result.position)
                 eye_pos = ps.get_view_camera_parameters().get_position()
                 self._pick_dist = wp.length(wp.vec3(pick_result.position - eye_pos))
             else:
                 self._dragged_point.set_enabled(False)  #
                 self.pick_result = None
+            if self._on_pick is not None:
+                self._on_pick(pick_result)
             self.drag_info_chg = True
         if ps.imgui.IsMouseClicked(ps.imgui.ImGuiMouseButton_Middle):
             pass
@@ -244,24 +255,25 @@ class Viewer:
 
         # Dragging
         if (self.pick_result is not None) and ps.imgui.IsMouseDragging(ps.imgui.ImGuiMouseButton_Left):
-            camera_params = ps.get_view_camera_parameters()
-            aspect = camera_params.get_aspect()
-            view_mat = camera_params.get_view_mat()
-            fov = wp.radians(camera_params.get_fov_vertical_deg())
-            axis_x = wp.vec3(view_mat[0, 0], view_mat[0, 1], view_mat[0, 2])
-            axis_y = wp.vec3(view_mat[1, 0], view_mat[1, 1], view_mat[1, 2])
-            axis_z = wp.vec3(view_mat[2, 0], view_mat[2, 1], view_mat[2, 2])
-            origin = wp.vec3(camera_params.get_position())
-            (width, height) = ps.get_window_size()
-            nx = 2.0 * (mouse_pos[0] + 0.5) / width - 1.0
-            ny = 2.0 * (mouse_pos[1] + 0.5) / height - 1.0
-            u = nx * wp.tan(fov / 2.0) * aspect
-            v = ny * wp.tan(fov / 2.0)
-            ray_dir = wp.normalize(axis_x * u - axis_y * v - axis_z)
-            self.drag_position = origin + ray_dir * self._pick_dist
-            self.drag_info_chg = True
+            if self._on_drag is not None:
+                camera_params = ps.get_view_camera_parameters()
+                aspect = camera_params.get_aspect()
+                view_mat = camera_params.get_view_mat()
+                fov = wp.radians(camera_params.get_fov_vertical_deg())
+                axis_x = wp.vec3(view_mat[0, 0], view_mat[0, 1], view_mat[0, 2])
+                axis_y = wp.vec3(view_mat[1, 0], view_mat[1, 1], view_mat[1, 2])
+                axis_z = wp.vec3(view_mat[2, 0], view_mat[2, 1], view_mat[2, 2])
+                origin = wp.vec3(camera_params.get_position())
+                (width, height) = ps.get_window_size()
+                nx = 2.0 * (mouse_pos[0] + 0.5) / width - 1.0
+                ny = 2.0 * (mouse_pos[1] + 0.5) / height - 1.0
+                u = nx * wp.tan(fov / 2.0) * aspect
+                v = ny * wp.tan(fov / 2.0)
+                ray_dir = wp.normalize(axis_x * u - axis_y * v - axis_z)
+                self._on_drag(origin + ray_dir * self._pick_dist)
         elif ps.imgui.IsMouseReleased(ps.imgui.ImGuiMouseButton_Left):
-            self.drag_info_chg = True
+            if self._on_release_drag is not None:
+                self._on_release_drag()
 
         should_update_camera = False
 
@@ -323,5 +335,22 @@ class Viewer:
 
 
 if __name__ == "__main__":
+
+    def user_update():
+        print("user_update")
+
+    def on_pick(pick_result: ps.PickResult):
+        print("on pick")
+
+    def on_drag(drag_pos: tuple[float, float, float]):
+        print(f"on drag: {drag_pos}")
+
+    def on_release_drag():
+        print("on release drag")
+
     viewer = Viewer()
+    viewer.set_user_update(user_update)
+    viewer.set_on_release_drag(on_release_drag)
+    viewer.set_on_drag(on_drag)
+    viewer.set_on_pick(on_pick)
     viewer.run()

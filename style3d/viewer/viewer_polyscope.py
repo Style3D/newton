@@ -50,7 +50,30 @@ class ViewerPolyscope(Viewer, ViewerBase):
 
         # Drag info
         self.drag_index = -1
+        self.drag_info_chg = False
+        self.drag_position = wp.vec3(0, 0, 0)
         self.drag_bary_coord = wp.vec3(0, 0, 0)
+
+        self.set_on_pick(self.handle_pick)
+        self.set_on_drag(self.handle_drag)
+        self.set_on_release_drag(self.handle_release_drag)
+
+    def handle_pick(self, pick_result: ps.PickResult):
+        if pick_result is not None:
+            if pick_result.is_hit:
+                if pick_result.structure_name == self.tri_entity.get_name():
+                    self.drag_index = pick_result.structure_data["index"]
+                    self.drag_bary_coord = pick_result.structure_data["bary_coords"]
+                    self.drag_position = wp.vec3(pick_result.position)
+                    self.drag_info_chg = True
+
+    def handle_drag(self, drag_pos: tuple[float, float, float]):
+        self.drag_position = wp.vec3(drag_pos[0], drag_pos[1], drag_pos[2])
+        self.drag_info_chg = True
+
+    def handle_release_drag(self):
+        self.drag_info_chg = self.drag_index != -1
+        self.drag_index = -1
 
     def _array_to_y_up(self, np_array):
         if self.up_axis == Axis.Z:
@@ -163,16 +186,6 @@ class ViewerPolyscope(Viewer, ViewerBase):
             self.body_count = 0
             self.tri_count = 0
             self.tet_count = 0
-
-    def update_drag_info(self):
-        if self.pick_result is not None:
-            if ps.imgui.IsMouseDown(ps.imgui.ImGuiMouseButton_Left):
-                if self.pick_result.structure_name == self.tri_entity.get_name():
-                    if self.pick_result.structure_data["element_type"] == "face":
-                        self.drag_bary_coord = wp.vec3(self.pick_result.structure_data["bary_coords"])
-                        self.drag_index = self.pick_result.structure_data["index"]
-                        return
-        self.drag_index = -1
 
     @override
     def log_state(self, state: State):

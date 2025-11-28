@@ -141,7 +141,6 @@ class Example:
 
     def update(self):
         if self.viewer.drag_info_chg:
-            self.viewer.update_drag_info()
             self.solver.update_drag_info(self.viewer.drag_index, self.viewer.drag_position, self.viewer.drag_bary_coord)
             self.viewer.drag_info_chg = False
 
