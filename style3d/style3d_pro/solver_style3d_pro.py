@@ -6,6 +6,12 @@
 #   Date:           2025/10/27                                                                                         #
 ########################################################################################################################
 
+import os
+import sys
+
+# sys.path.append("D:/Desktop/SimulatorSDK/build/lib/Debug")
+sys.path.append("D:/Desktop/SimulatorSDK/build/lib/RelWithDebInfo")
+
 import numpy as np
 import style3dsim as sim
 import warp as wp
@@ -39,19 +45,23 @@ class SolverStyle3DPro(nt.solvers.SolverBase):
         self.enable_mouse_dragging = enable_mouse_dragging
 
         # Login
-        if not sim.is_login():
-            user = input("User Name:")
-            password = input("Password:")
-            sim.set_log_callback(sim_log_callback)
-            sim.login(user, password, True, None)
+        if os.path.exists("key.txt"):
+            with open("key.txt", encoding="utf-8") as f:
+                lines = f.read().splitlines()
+                username = lines[0].strip()
+                password = lines[1].strip()
+        else:
+            username = input("User Name: ")
+            password = input("Password: ")
+        sim.login(username, password, True, None)
 
         if sim.is_login():
             # Configure World
             self.world = sim.World()
             self.world_attrib = sim.WorldAttrib()
             self.world_attrib.enable_gpu = True
-            self.world_attrib.ground_static_friction = 0.0
-            self.world_attrib.ground_dynamic_friction = 0.0
+            # self.world_attrib.ground_static_friction = 0.0
+            # self.world_attrib.ground_dynamic_friction = 0.0
             self.world_attrib.enable_rigid_self_collision = False
             if model.up_axis == newton.Axis.Z:
                 self.world_attrib.gravity = sim.Vec3f(0, 0, -9.8)
@@ -77,7 +87,6 @@ class SolverStyle3DPro(nt.solvers.SolverBase):
             cloth_attrib.dynamic_friction = 0.03
             cloth_attrib.bend_stiff = sim.Vec3f(1e-6, 1e-6, 1e-6)
             self.cloth.set_attrib(cloth_attrib)
-            self.cloth.set_inplane_prop(model.tri_aniso_ke.numpy())
             self.cloth.set_pin(self.is_fixed, self.fixed_indices)
             self.cloth.attach(self.world)
 
