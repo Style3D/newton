@@ -21,7 +21,7 @@ from style3d.viewer.viewer import Viewer
 ########################################################################################################################
 
 
-class ViewerPolyscope(Viewer, ViewerBase):
+class ViewerNewton(Viewer, ViewerBase):
     def __init__(
         self,
         up_axis: AxisType = Axis.Y,
@@ -34,7 +34,11 @@ class ViewerPolyscope(Viewer, ViewerBase):
             window_size (Tuple[int, int]): Window dimensions (width, height)
             vsync (bool): Enable vertical synchronization (default: False)
         """
-        super().__init__(window_size=window_size, vsync=vsync)
+        super().__init__(
+            title="Newton Viewer",
+            window_size=window_size,
+            vsync=vsync,
+        )
         self.scale = scale
         self.up_axis = up_axis
         self.tri_indices = None
@@ -272,5 +276,5 @@ class ViewerPolyscope(Viewer, ViewerBase):
 
 
 if __name__ == "__main__":
-    viewer = ViewerPolyscope()
+    viewer = ViewerNewton()
     viewer.run()

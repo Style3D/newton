@@ -11,7 +11,7 @@ import warp as wp
 from pxr import Usd, UsdGeom
 
 import newton
-from style3d import ViewerPolyscope
+from style3d import ViewerNewton
 
 
 class Example:
@@ -111,7 +111,7 @@ class Example:
         self.state0 = self.model.state()
         self.state1 = self.model.state()
         self.control = self.model.control()
-        self.viewer = ViewerPolyscope()
+        self.viewer = ViewerNewton()
         self.viewer.set_model(self.model)
         self.viewer.set_user_update(self.update)
 

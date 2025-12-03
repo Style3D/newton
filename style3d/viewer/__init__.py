@@ -7,9 +7,9 @@
 ########################################################################################################################
 
 from .viewer import Viewer
-from .viewer_polyscope import ViewerPolyscope
+from .viewer_newton import ViewerNewton
 
 __all__ = [
     "Viewer",
-    "ViewerPolyscope",
+    "ViewerNewton",
 ]
