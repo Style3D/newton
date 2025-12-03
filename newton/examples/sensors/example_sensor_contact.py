@@ -98,6 +98,7 @@ class Example:
         up_axis = newton.Axis.Z
 
         world_builder = newton.ModelBuilder(up_axis=up_axis)
+        newton.solvers.SolverMuJoCo.register_custom_attributes(world_builder)
         world_builder.add_mjcf(
             newton.examples.get_asset("nv_ant.xml"),
             ignore_names=["floor", "ground"],
@@ -111,6 +112,7 @@ class Example:
             up_axis=up_axis,
             xform=wp.transform((0.0, 0.0, 3.5), wp.quat_identity()),
             collapse_fixed_joints=COLLAPSE_FIXED_JOINTS,
+            parse_sites=False,  # AD: remove once asset is fixed
         )
 
         builder = newton.ModelBuilder()
@@ -308,7 +310,7 @@ class Example:
         if not isinstance(self.solver, newton.solvers.SolverMuJoCo):
             self.ants.eval_fk(self.state_0, mask=mask)
 
-    def test(self):
+    def test_final(self):
         assert len(find_nonfinite_members(self.torso_all_contact_sensor)) == 0
         assert len(find_nonfinite_members(self.arm_ground_contact_sensor)) == 0
         assert len(find_nonfinite_members(self.foot_arm_contact_sensor)) == 0

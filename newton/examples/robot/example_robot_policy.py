@@ -229,6 +229,7 @@ class Example:
 
         # Build the model
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
         builder.default_joint_cfg = newton.ModelBuilder.JointDofConfig(
             armature=0.1,
             limit_ke=1.0e2,
@@ -256,9 +257,6 @@ class Example:
         builder.joint_q[:3] = [0.0, 0.0, 0.76]
         builder.joint_q[3:7] = [0.0, 0.0, 0.7071, 0.7071]
         builder.joint_q[7:] = config["mjw_joint_pos"]
-
-        for i in range(len(builder.joint_dof_mode)):
-            builder.joint_dof_mode[i] = newton.JointMode.TARGET_POSITION
 
         for i in range(len(config["mjw_joint_stiffness"])):
             builder.joint_target_ke[i + 6] = config["mjw_joint_stiffness"][i]
@@ -319,7 +317,7 @@ class Example:
             print("[INFO] Using CUDA graph")
             self.use_cuda_graph = True
             torch_tensor = torch.zeros(self.config["num_dofs"] + 6, device=self.torch_device, dtype=torch.float32)
-            self.control.joint_target = wp.from_torch(torch_tensor, dtype=wp.float32, requires_grad=False)
+            self.control.joint_target_pos = wp.from_torch(torch_tensor, dtype=wp.float32, requires_grad=False)
             with wp.ScopedCapture() as capture:
                 self.simulate()
             self.graph = capture.graph
@@ -393,7 +391,7 @@ class Example:
             a = self.joint_pos_initial + self.config["action_scale"] * self.rearranged_act
             a_with_zeros = torch.cat([torch.zeros(6, device=self.torch_device, dtype=torch.float32), a.squeeze(0)])
             a_wp = wp.from_torch(a_with_zeros, dtype=wp.float32, requires_grad=False)
-            wp.copy(self.control.joint_target, a_wp)
+            wp.copy(self.control.joint_target_pos, a_wp)
 
         for _ in range(self.decimation):
             if self.graph:
@@ -409,7 +407,7 @@ class Example:
         self.viewer.log_contacts(self.contacts, self.state_0)
         self.viewer.end_frame()
 
-    def test(self):
+    def test_final(self):
         newton.examples.test_body_state(
             self.model,
             self.state_0,

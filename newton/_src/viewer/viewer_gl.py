@@ -46,7 +46,7 @@ class ViewerGL(ViewerBase):
 
     Key Features:
         - Real-time 3D rendering of Newton models and simulation states.
-        - Camera navigation with WASD and mouse controls.
+        - Camera navigation with WASD/QE and mouse controls.
         - Object picking and manipulation via mouse.
         - Visualization toggles for joints, contacts, particles, springs, etc.
         - Wind force controls and visualization.
@@ -116,6 +116,7 @@ class ViewerGL(ViewerBase):
             self.ui = UI(self.renderer.window)
         else:
             self.ui = None
+        self._gizmo_log = None
 
         # Performance tracking
         self._fps_history = []
@@ -170,7 +171,7 @@ class ViewerGL(ViewerBase):
         points = wp.array(vertices[:, 0:3], dtype=wp.vec3, device=self.device)
         normals = wp.array(vertices[:, 3:6], dtype=wp.vec3, device=self.device)
         uvs = wp.array(vertices[:, 6:8], dtype=wp.vec2, device=self.device)
-        indices = wp.array(indices, dtype=wp.uint32, device=self.device)
+        indices = wp.array(indices, dtype=wp.int32, device=self.device)
 
         self._point_mesh.update(points, indices, normals, uvs)
 
@@ -193,14 +194,34 @@ class ViewerGL(ViewerBase):
         """
         super().set_model(model)
 
-        self.picking = Picking(model, pick_stiffness=10000.0, pick_damping=1000.0)
+        self.picking = Picking(model, pick_stiffness=10000.0, pick_damping=1000.0, world_offsets=self.world_offsets)
         self.wind = Wind(model)
 
         fb_w, fb_h = self.renderer.window.get_framebuffer_size()
         self.camera = Camera(width=fb_w, height=fb_h, up_axis=model.up_axis if model else "Z")
 
     @override
+    def set_world_offsets(self, spacing: tuple[float, float, float] | list[float] | wp.vec3):
+        """Set world offsets and update the picking system.
+
+        Args:
+            spacing: Spacing between worlds along each axis.
+        """
+        super().set_world_offsets(spacing)
+        # Update picking system with new world offsets
+        if hasattr(self, "picking") and self.picking is not None:
+            self.picking.world_offsets = self.world_offsets
+
+    @override
     def set_camera(self, pos: wp.vec3, pitch: float, yaw: float):
+        """
+        Set the camera position, pitch, and yaw.
+
+        Args:
+            pos: The camera position.
+            pitch: The camera pitch.
+            yaw: The camera yaw.
+        """
         self.camera.pos = pos
         self.camera.pitch = pitch
         self.camera.yaw = yaw
@@ -399,14 +420,25 @@ class ViewerGL(ViewerBase):
             self.log_lines("picking_line", None, None, None)
             return
 
-        # Get the pick target and current picked point on geometry
+        # Get the pick target and current picked point on geometry (in physics space)
         pick_state = self.picking.pick_state.numpy()
-        pick_target = wp.vec3(pick_state[8], pick_state[9], pick_state[10])
-        picked_point = wp.vec3(pick_state[11], pick_state[12], pick_state[13])
+        pick_target = np.array([pick_state[8], pick_state[9], pick_state[10]], dtype=np.float32)
+        picked_point = np.array([pick_state[11], pick_state[12], pick_state[13]], dtype=np.float32)
+
+        # Apply world offset to convert from physics space to visual space
+        if self.world_offsets is not None and self.world_offsets.shape[0] > 0:
+            if self.model.body_world is not None:
+                body_world_idx = self.model.body_world.numpy()[pick_body_idx]
+                if body_world_idx >= 0 and body_world_idx < self.world_offsets.shape[0]:
+                    world_offset = self.world_offsets.numpy()[body_world_idx]
+                    pick_target = pick_target + world_offset
+                    picked_point = picked_point + world_offset
 
         # Create line data
-        starts = wp.array([picked_point], dtype=wp.vec3, device=self.device)
-        ends = wp.array([pick_target], dtype=wp.vec3, device=self.device)
+        starts = wp.array(
+            [wp.vec3(picked_point[0], picked_point[1], picked_point[2])], dtype=wp.vec3, device=self.device
+        )
+        ends = wp.array([wp.vec3(pick_target[0], pick_target[1], pick_target[2])], dtype=wp.vec3, device=self.device)
         colors = wp.array([wp.vec3(0.0, 1.0, 1.0)], dtype=wp.vec3, device=self.device)
 
         # Render the line
@@ -485,7 +517,7 @@ class ViewerGL(ViewerBase):
 
         self.renderer.present()
 
-    def get_frame(self, target_image: wp.array | None = None) -> wp.array:
+    def get_frame(self, target_image: wp.array | None = None, render_ui: bool = False) -> wp.array:
         """
         Retrieve the last rendered frame.
 
@@ -496,6 +528,7 @@ class ViewerGL(ViewerBase):
             target_image (wp.array, optional):
                 Optional pre-allocated Warp array with shape `(height, width, 3)`
                 and dtype `wp.uint8`. If `None`, a new array will be created.
+            render_ui (bool): Whether to render the UI.
 
         Returns:
             wp.array: GPU array containing RGB image data with shape `(height, width, 3)`
@@ -530,6 +563,13 @@ class ViewerGL(ViewerBase):
         assert self.renderer._frame_fbo is not None
         gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self.renderer._frame_fbo)
         gl.glBindBuffer(gl.GL_PIXEL_PACK_BUFFER, self._pbo)
+
+        if render_ui and self.ui:
+            self.ui.begin_frame()
+            self._render_ui()
+            self.ui.end_frame()
+            self.ui.render()
+
         gl.glReadPixels(0, 0, w, h, gl.GL_RGB, gl.GL_UNSIGNED_BYTE, ctypes.c_void_p(0))
         gl.glBindBuffer(gl.GL_PIXEL_PACK_BUFFER, 0)
         gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
@@ -776,8 +816,8 @@ class ViewerGL(ViewerBase):
         elif symbol == pyglet.window.key.F:
             # Frame camera around model bounds
             self._frame_camera_on_model()
-        elif symbol == pyglet.window.key.ESCAPE or symbol == pyglet.window.key.Q:
-            # Exit with Escape or Q key
+        elif symbol == pyglet.window.key.ESCAPE:
+            # Exit with Escape key
             self.renderer.close()
 
     def on_key_release(self, symbol, modifiers):
@@ -878,6 +918,10 @@ class ViewerGL(ViewerBase):
             desired -= right  # strafe left
         if self.renderer.is_key_down(pyglet.window.key.D) or self.renderer.is_key_down(pyglet.window.key.RIGHT):
             desired += right  # strafe right
+        if self.renderer.is_key_down(pyglet.window.key.Q):
+            desired -= up  # pan down
+        if self.renderer.is_key_down(pyglet.window.key.E):
+            desired += up  # pan up
 
         dn = float(np.linalg.norm(desired))
         if dn > 1.0e-6:
@@ -1062,6 +1106,10 @@ class ViewerGL(ViewerBase):
                     show_visual = self.show_visual
                     changed, self.show_visual = imgui.checkbox("Show Visual", show_visual)
 
+                    # Inertia boxes toggle
+                    show_inertia_boxes = self.show_inertia_boxes
+                    changed, self.show_inertia_boxes = imgui.checkbox("Show Inertia Boxes", show_inertia_boxes)
+
             imgui.set_next_item_open(True, imgui.Cond_.appearing)
             if imgui.collapsing_header("Example Options"):
                 # Render UI callbacks for side panel
@@ -1138,6 +1186,7 @@ class ViewerGL(ViewerBase):
                 imgui.text("Controls:")
                 imgui.pop_style_color()
                 imgui.text("WASD - Move camera")
+                imgui.text("QE - Pan up/down")
                 imgui.text("Left Click - Look around")
                 imgui.text("Right Click - Pick objects")
                 imgui.text("Scroll - Zoom")

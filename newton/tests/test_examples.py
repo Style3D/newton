@@ -42,8 +42,6 @@ from newton.tests.unittest_utils import (
     sanitize_identifier,
 )
 
-wp.init()
-
 
 def _build_command_line_options(test_options: dict[str, Any]) -> list:
     """Helper function to build command-line options from the test options dictionary."""
@@ -451,6 +449,8 @@ add_example_test(TestIKExamples, name="ik.example_ik_franka", devices=test_devic
 
 add_example_test(TestIKExamples, name="ik.example_ik_h1", devices=test_devices, use_viewer=True)
 
+add_example_test(TestIKExamples, name="ik.example_ik_custom", devices=cuda_test_devices, use_viewer=True)
+
 add_example_test(
     TestIKExamples,
     name="ik.example_ik_benchmark",
@@ -599,6 +599,4 @@ add_example_test(
 )
 
 if __name__ == "__main__":
-    # force rebuild of all kernels
-    # wp.clear_kernel_cache()
     unittest.main(verbosity=2)

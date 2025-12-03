@@ -57,7 +57,7 @@ class Example:
         mjcf_filename = newton.examples.get_asset("nv_humanoid.xml")
 
         articulation_builder = newton.ModelBuilder()
-
+        newton.solvers.SolverMuJoCo.register_custom_attributes(articulation_builder)
         newton.utils.parse_mjcf(
             mjcf_filename,
             articulation_builder,
@@ -124,7 +124,7 @@ class Example:
         self.viewer.log_state(self.state_0)  # ViewerFile automatically records this
         self.viewer.end_frame()
 
-    def test(self):
+    def test_final(self):
         pass
 
 

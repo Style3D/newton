@@ -271,17 +271,18 @@ class Example:
 
         self.sim_time += self.frame_dt
 
-    def test(self):
+    def test_final(self):
         newton.examples.test_body_state(
             self.model,
             self.state_0,
             "all bodies are above the sand",
             lambda q, qd: q[2] > 0.45,
         )
+        voxel_size = self.mpm_solver.mpm_model.voxel_size
         newton.examples.test_particle_state(
             self.sand_state_0,
             "all particles are above the ground",
-            lambda q, qd: q[2] > -0.05,
+            lambda q, qd: q[2] > -voxel_size,
         )
 
     def render(self):
