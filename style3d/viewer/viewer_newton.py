@@ -64,7 +64,7 @@ class ViewerNewton(Viewer, ViewerBase):
 
     def handle_pick(self, pick_result: ps.PickResult):
         if pick_result is not None:
-            if pick_result.is_hit:
+            if pick_result.is_hit and self.tri_entity is not None:
                 if pick_result.structure_name == self.tri_entity.get_name():
                     self.drag_index = pick_result.structure_data["index"]
                     self.drag_bary_coord = pick_result.structure_data["bary_coords"]
