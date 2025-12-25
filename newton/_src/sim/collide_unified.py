@@ -26,6 +26,7 @@ from ..geometry.broad_phase_sap import BroadPhaseSAP
 from ..geometry.collision_core import compute_tight_aabb_from_support
 from ..geometry.contact_data import ContactData
 from ..geometry.narrow_phase import NarrowPhase
+from ..geometry.sdf_hydroelastic import SDFHydroelastic, SDFHydroelasticConfig
 from ..geometry.support_function import (
     GenericShapeData,
     SupportMapDataProvider,
@@ -61,6 +62,11 @@ class UnifiedContactWriterData:
     # Contact matching arrays (optional)
     contact_pair_key: wp.array(dtype=wp.uint64)
     contact_key: wp.array(dtype=wp.uint32)
+    # Per-contact shape properties, empty arrays if not enabled.
+    # Zero-values indicate that no per-contact shape properties are set for this contact
+    out_stiffness: wp.array(dtype=float)
+    out_damping: wp.array(dtype=float)
+    out_friction: wp.array(dtype=float)
 
 
 class BroadPhaseMode(IntEnum):
@@ -80,6 +86,7 @@ class BroadPhaseMode(IntEnum):
 def write_contact(
     contact_data: ContactData,
     writer_data: UnifiedContactWriterData,
+    output_index: int,
 ):
     """
     Write a contact to the output arrays using ContactData and UnifiedContactWriterData.
@@ -87,6 +94,7 @@ def write_contact(
     Args:
         contact_data: ContactData struct containing contact information (includes feature and feature_pair_key)
         writer_data: UnifiedContactWriterData struct containing body info and output arrays (includes contact_pair_key and contact_key)
+        output_index: If -1, use atomic_add to get the next available index if contact distance is less than margin. If >= 0, use this index directly and skip margin check.
     """
     total_separation_needed = (
         contact_data.radius_eff_a + contact_data.radius_eff_b + contact_data.thickness_a + contact_data.thickness_b
@@ -114,44 +122,58 @@ def write_contact(
     margin_b = writer_data.shape_contact_margin[contact_data.shape_b]
     contact_margin = wp.max(margin_a, margin_b)
 
-    if d < contact_margin:
+    index = output_index
+
+    if index < 0:
+        # compute index using atomic counter
+        if d > contact_margin:
+            return
         index = wp.atomic_add(writer_data.contact_count, 0, 1)
         if index >= writer_data.contact_max:
             # Reached buffer limit
             wp.atomic_add(writer_data.contact_count, 0, -1)
             return
 
-        writer_data.out_shape0[index] = contact_data.shape_a
-        writer_data.out_shape1[index] = contact_data.shape_b
+    if index >= writer_data.contact_max:
+        return
 
-        # Get body indices for the shapes
-        body0 = writer_data.shape_body[contact_data.shape_a]
-        body1 = writer_data.shape_body[contact_data.shape_b]
+    writer_data.out_shape0[index] = contact_data.shape_a
+    writer_data.out_shape1[index] = contact_data.shape_b
 
-        # Compute body inverse transforms
-        X_bw_a = wp.transform_identity() if body0 == -1 else wp.transform_inverse(writer_data.body_q[body0])
-        X_bw_b = wp.transform_identity() if body1 == -1 else wp.transform_inverse(writer_data.body_q[body1])
+    # Get body indices for the shapes
+    body0 = writer_data.shape_body[contact_data.shape_a]
+    body1 = writer_data.shape_body[contact_data.shape_b]
 
-        # Contact points are stored in body frames
-        writer_data.out_point0[index] = wp.transform_point(X_bw_a, a_contact_world)
-        writer_data.out_point1[index] = wp.transform_point(X_bw_b, b_contact_world)
+    # Compute body inverse transforms
+    X_bw_a = wp.transform_identity() if body0 == -1 else wp.transform_inverse(writer_data.body_q[body0])
+    X_bw_b = wp.transform_identity() if body1 == -1 else wp.transform_inverse(writer_data.body_q[body1])
 
-        # Match kernels.py convention
-        contact_normal = -contact_normal_a_to_b
+    # Contact points are stored in body frames
+    writer_data.out_point0[index] = wp.transform_point(X_bw_a, a_contact_world)
+    writer_data.out_point1[index] = wp.transform_point(X_bw_b, b_contact_world)
 
-        # Offsets in body frames
-        writer_data.out_offset0[index] = wp.transform_vector(X_bw_a, -offset_mag_a * contact_normal)
-        writer_data.out_offset1[index] = wp.transform_vector(X_bw_b, offset_mag_b * contact_normal)
+    # Match kernels.py convention
+    contact_normal = -contact_normal_a_to_b
 
-        writer_data.out_normal[index] = contact_normal
-        writer_data.out_thickness0[index] = offset_mag_a
-        writer_data.out_thickness1[index] = offset_mag_b
-        writer_data.out_tids[index] = 0  # tid not available in this context
+    # Offsets in body frames
+    writer_data.out_offset0[index] = wp.transform_vector(X_bw_a, -offset_mag_a * contact_normal)
+    writer_data.out_offset1[index] = wp.transform_vector(X_bw_b, offset_mag_b * contact_normal)
 
-        # Write contact key only if contact_key array is non-empty
-        if writer_data.contact_key.shape[0] > 0 and writer_data.contact_pair_key.shape[0] > 0:
-            writer_data.contact_key[index] = contact_data.feature
-            writer_data.contact_pair_key[index] = contact_data.feature_pair_key
+    writer_data.out_normal[index] = contact_normal
+    writer_data.out_thickness0[index] = offset_mag_a
+    writer_data.out_thickness1[index] = offset_mag_b
+    writer_data.out_tids[index] = 0  # tid not available in this context
+
+    # Write contact key only if contact_key array is non-empty
+    if writer_data.contact_key.shape[0] > 0 and writer_data.contact_pair_key.shape[0] > 0:
+        writer_data.contact_key[index] = contact_data.feature
+        writer_data.contact_pair_key[index] = contact_data.feature_pair_key
+
+    # Write stiffness/damping/friction only if per-contact shape properties are enabled
+    if writer_data.out_stiffness.shape[0] > 0:
+        writer_data.out_stiffness[index] = contact_data.contact_stiffness
+        writer_data.out_damping[index] = contact_data.contact_damping
+        writer_data.out_friction[index] = contact_data.contact_friction_scale
 
 
 @wp.kernel
@@ -267,6 +289,7 @@ class CollisionPipelineUnified:
         self,
         shape_count: int,
         particle_count: int,
+        reduce_contacts: bool = True,
         shape_pairs_filtered: wp.array(dtype=wp.vec2i) | None = None,
         rigid_contact_max: int | None = None,
         rigid_contact_max_per_pair: int = 10,
@@ -282,6 +305,7 @@ class CollisionPipelineUnified:
         shape_flags: wp.array(dtype=int) | None = None,
         sap_sort_type=None,
         enable_contact_matching: bool = False,
+        sdf_hydroelastic: SDFHydroelastic | None = None,
     ):
         """
         Initialize the CollisionPipelineUnified.
@@ -289,6 +313,7 @@ class CollisionPipelineUnified:
         Args:
             shape_count (int): Number of shapes in the simulation.
             particle_count (int): Number of particles in the simulation.
+            reduce_contacts (bool, optional): Whether to reduce contacts for mesh-mesh collisions. Defaults to True.
             shape_pairs_filtered (wp.array | None, optional): Precomputed shape pairs for EXPLICIT broad phase mode.
                 Required when broad_phase_mode is BroadPhaseMode.EXPLICIT, ignored otherwise.
             rigid_contact_max (int | None, optional): Maximum number of rigid contacts to allocate.
@@ -319,13 +344,15 @@ class CollisionPipelineUnified:
             enable_contact_matching (bool, optional): Whether to enable contact matching data generation.
                 If True, allocates buffers for contact_pair_key and contact_key arrays that can be used
                 with ContactMatcher for warm-starting physics solvers. Defaults to False.
+            sdf_hydroelastic (SDFHydroelastic | None, optional): Pre-configured SDF hydroelastic collision handler.
+                If provided, enables hydroelastic contact computation for SDF-based shape pairs. Defaults to None.
         """
         self.contacts = None
         self.shape_count = shape_count
         self.broad_phase_mode = broad_phase_mode
         self.device = device
         self.enable_contact_matching = enable_contact_matching
-
+        self.reduce_contacts = reduce_contacts
         self.shape_pairs_max = (shape_count * (shape_count - 1)) // 2
 
         # Initialize broad phase
@@ -379,11 +406,14 @@ class CollisionPipelineUnified:
         self.narrow_phase = NarrowPhase(
             max_candidate_pairs=self.shape_pairs_max,
             max_triangle_pairs=1000000,
+            reduce_contacts=self.reduce_contacts,
             device=device,
             shape_aabb_lower=self.shape_aabb_lower,
             shape_aabb_upper=self.shape_aabb_upper,
             contact_writer_warp_func=write_contact,
+            sdf_hydroelastic=sdf_hydroelastic,
         )
+        self.sdf_hydroelastic = self.narrow_phase.sdf_hydroelastic
 
         with wp.ScopedDevice(device):
             # Narrow phase input arrays
@@ -410,6 +440,7 @@ class CollisionPipelineUnified:
         cls,
         model: Model,
         rigid_contact_max_per_pair: int | None = None,
+        reduce_contacts: bool = True,
         soft_contact_max: int | None = None,
         soft_contact_margin: float = 0.01,
         edge_sdf_iter: int = 10,
@@ -419,6 +450,7 @@ class CollisionPipelineUnified:
         shape_pairs_filtered: wp.array(dtype=wp.vec2i) | None = None,
         sap_sort_type=None,
         enable_contact_matching: bool = False,
+        sdf_hydroelastic_config: SDFHydroelasticConfig | None = None,
     ) -> CollisionPipelineUnified:
         """
         Create a CollisionPipelineUnified instance from a Model.
@@ -427,6 +459,7 @@ class CollisionPipelineUnified:
             model (Model): The simulation model.
             rigid_contact_max_per_pair (int | None, optional): Maximum number of contact points per shape pair.
                 If None, uses model.rigid_contact_max and sets per-pair to 0.
+            reduce_contacts (bool, optional): Whether to reduce contacts for mesh-mesh collisions. Defaults to True.
             soft_contact_max (int | None, optional): Maximum number of soft contacts to allocate.
             soft_contact_margin (float, optional): Margin for soft contact generation. Defaults to 0.01.
             edge_sdf_iter (int, optional): Number of iterations for edge SDF collision. Defaults to 10.
@@ -439,6 +472,7 @@ class CollisionPipelineUnified:
                 Only used when broad_phase_mode is BroadPhaseMode.SAP. If None, uses default (SEGMENTED).
             enable_contact_matching (bool, optional): Whether to enable contact matching data generation.
                 If True, allocates and populates contact_pair_key and contact_key arrays. Defaults to False.
+            sdf_hydroelastic_config (SDFHydroelasticConfig | None, optional): Configuration for SDF hydroelastic collision handling. Defaults to None.
 
         Returns:
             CollisionPipeline: The constructed collision pipeline.
@@ -460,9 +494,14 @@ class CollisionPipelineUnified:
                 # Will raise error in __init__ if EXPLICIT mode requires it
                 shape_pairs_filtered = None
 
+        # Initialize SDF hydroelastic
+        # returns None if no hydroelastic shape pairs in the model
+        sdf_hydroelastic = SDFHydroelastic._from_model(model, config=sdf_hydroelastic_config, writer_func=write_contact)
+
         pipeline = CollisionPipelineUnified(
             model.shape_count,
             model.particle_count,
+            reduce_contacts,
             shape_pairs_filtered,
             rigid_contact_max,
             rigid_contact_max_per_pair,
@@ -478,6 +517,7 @@ class CollisionPipelineUnified:
             shape_flags=model.shape_flags if hasattr(model, "shape_flags") else None,
             sap_sort_type=sap_sort_type,
             enable_contact_matching=enable_contact_matching,
+            sdf_hydroelastic=sdf_hydroelastic,
         )
 
         return pipeline
@@ -501,6 +541,7 @@ class CollisionPipelineUnified:
                 self.soft_contact_max,
                 requires_grad=self.requires_grad,
                 device=self.device,
+                per_contact_shape_properties=self.narrow_phase.sdf_hydroelastic is not None,
             )
         else:
             self.contacts.clear()
@@ -509,7 +550,6 @@ class CollisionPipelineUnified:
 
         # Clear counters
         self.broad_phase_pair_count.zero_()
-        contacts.rigid_contact_count.zero_()  # Clear since write_contact uses atomic_add
 
         # Compute AABBs for all shapes (already expanded by per-shape contact margins)
         wp.launch(
@@ -613,6 +653,10 @@ class CollisionPipelineUnified:
             writer_data.contact_pair_key = self.narrow_phase.empty_contact_pair_key
             writer_data.contact_key = self.narrow_phase.empty_contact_key
 
+        writer_data.out_stiffness = contacts.rigid_contact_stiffness
+        writer_data.out_damping = contacts.rigid_contact_damping
+        writer_data.out_friction = contacts.rigid_contact_friction
+
         # Run narrow phase with custom contact writer (writes directly to Contacts format)
         self.narrow_phase.launch_custom_write(
             candidate_pair=self.broad_phase_shape_pairs,
@@ -621,10 +665,22 @@ class CollisionPipelineUnified:
             shape_data=self.geom_data,
             shape_transform=self.geom_transform,
             shape_source=model.shape_source_ptr,
+            shape_sdf_data=model.shape_sdf_data,
             shape_contact_margin=model.shape_contact_margin,
             shape_collision_radius=model.shape_collision_radius,
+            shape_flags=model.shape_flags,
             writer_data=writer_data,
             device=self.device,
         )
 
         return contacts
+
+    def get_hydro_contact_surface(self):
+        """Get hydroelastic contact surface data for visualization, if available.
+
+        Returns:
+            HydroelasticContactSurfaceData if sdf_hydroelastic is configured, None otherwise.
+        """
+        if self.sdf_hydroelastic is not None:
+            return self.sdf_hydroelastic.get_hydro_contact_surface()
+        return None

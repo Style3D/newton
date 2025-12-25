@@ -23,12 +23,12 @@
 #
 ###########################################################################
 
-import numpy as np
 import warp as wp
-from pxr import Usd, UsdGeom
+from pxr import Usd
 
 import newton
 import newton.examples
+import newton.usd
 
 
 class Example:
@@ -46,16 +46,24 @@ class Example:
         self.viewer = viewer
 
         usd_stage = Usd.Stage.Open(newton.examples.get_asset("curvedSurface.usd"))
-        usd_geom = UsdGeom.Mesh(usd_stage.GetPrimAtPath("/root/cloth"))
+        usd_prim = usd_stage.GetPrimAtPath("/root/cloth")
 
-        mesh_points = np.array(usd_geom.GetPointsAttr().Get())
-        mesh_indices = np.array(usd_geom.GetFaceVertexIndicesAttr().Get())
+        cloth_mesh = newton.usd.get_mesh(usd_prim)
+        mesh_points = cloth_mesh.vertices
+        mesh_indices = cloth_mesh.indices
 
         self.input_scale_factor = 1.0
         vertices = [wp.vec3(v) * self.input_scale_factor for v in mesh_points]
         self.faces = mesh_indices.reshape(-1, 3)
 
         builder = newton.ModelBuilder()
+
+        contact_ke = 1.0e2
+        contact_kd = 1.0e0
+        contact_mu = 0.5
+        builder.default_shape_cfg.ke = contact_ke
+        builder.default_shape_cfg.kd = contact_kd
+        builder.default_shape_cfg.mu = contact_mu
         builder.add_cloth_mesh(
             pos=wp.vec3(0.0, 0.0, 10.0),
             rot=wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), wp.pi / 6.0),
@@ -75,16 +83,16 @@ class Example:
         builder.add_ground_plane()
 
         self.model = builder.finalize()
-        self.model.soft_contact_ke = 1.0e2
-        self.model.soft_contact_kd = 1.0e0
-        self.model.soft_contact_mu = 1.0
+        self.model.soft_contact_ke = contact_ke
+        self.model.soft_contact_kd = contact_kd
+        self.model.soft_contact_mu = contact_mu
 
         self.solver = newton.solvers.SolverVBD(
             self.model,
             self.iterations,
-            handle_self_contact=True,
-            self_contact_radius=0.2,
-            self_contact_margin=0.35,
+            particle_enable_self_contact=True,
+            particle_self_contact_radius=0.2,
+            particle_self_contact_margin=0.35,
         )
 
         self.state_0 = self.model.state()

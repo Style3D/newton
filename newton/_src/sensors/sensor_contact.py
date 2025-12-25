@@ -124,6 +124,8 @@ def populate_contacts(
     from the provided `solver`. It is typically called after a simulation step to refresh
     the contact data for use in sensors or analysis.
 
+    This function will be removed once contact forces are implemented as extended state attributes.
+
     Args:
         contacts (Contacts): The Contacts object to be populated or updated.
         solver (SolverBase): The solver instance containing the latest contact results.
@@ -134,14 +136,14 @@ def populate_contacts(
     solver.update_contacts(contacts)
 
 
-class ContactSensor:
-    """Sensor for contact forces between bodies or shapes.
+class SensorContact:
+    """Sensor that measures contact forces between bodies or shapes.
 
-    The ContactSensor allows you to define a set of "sensing objects" (bodies or shapes) and optionally a set of
+    This sensor allows you to define a set of "sensing objects" (bodies or shapes) and optionally a set of
     "counterpart" objects (bodies or shapes) to sense contact forces against. The sensor can be configured to
     report the total contact force or per-counterpart readings.
 
-    The ContactSensor produces a matrix of force readings, where each row corresponds to one sensing object and
+    SensorContact produces a matrix of force readings, where each row corresponds to one sensing object and
     each column corresponds to one counterpart. Each entry of this matrix is the net contact force vector between
     the sensing object and the counterpart. If no counterparts are specified, the sensor will read the net contact
     force for each sensing object.
@@ -177,7 +179,7 @@ class ContactSensor:
         prune_noncolliding: bool = False,
         verbose: bool | None = None,
     ):
-        """Initialize a ContactSensor.
+        """Initialize the SensorContact.
 
         Exactly one of ``sensing_obj_bodies`` or ``sensing_obj_shapes`` must be specified to define the sensing
         objects. At most one of ``counterpart_bodies`` or ``counterpart_shapes`` may be specified. If neither is
@@ -223,35 +225,30 @@ class ContactSensor:
             match_fn = fnmatch
 
         if sensing_obj_bodies is not None:
-            sensing_obj_bodies = self._match_elem_key(match_fn, model, model.body_key, sensing_obj_bodies)
-            sensing_obj_shapes = []
+            s_bodies = self._match_elem_key(match_fn, model, model.body_key, sensing_obj_bodies)
+            s_shapes = []
         else:
-            sensing_obj_bodies = []
-            sensing_obj_shapes = self._match_elem_key(match_fn, model, model.shape_key, sensing_obj_shapes)
+            s_bodies = []
+            s_shapes = self._match_elem_key(match_fn, model, model.shape_key, sensing_obj_shapes)
 
         if counterpart_bodies is not None:
-            counterpart_bodies = self._match_elem_key(match_fn, model, model.body_key, counterpart_bodies)
-            counterpart_shapes = []
+            c_bodies = self._match_elem_key(match_fn, model, model.body_key, counterpart_bodies)
+            c_shapes = []
             if include_total:
-                counterpart_bodies = [MatchAny, *counterpart_bodies]
+                c_bodies = [MatchAny, *c_bodies]
         elif counterpart_shapes is not None:
-            counterpart_bodies = []
-            counterpart_shapes = self._match_elem_key(match_fn, model, model.shape_key, counterpart_shapes)
+            c_bodies = []
+            c_shapes = self._match_elem_key(match_fn, model, model.shape_key, counterpart_shapes)
             if include_total:
-                counterpart_shapes = [MatchAny, *counterpart_shapes]
+                c_shapes = [MatchAny, *c_shapes]
         else:
-            counterpart_shapes = [MatchAny]
-            counterpart_bodies = []
+            c_shapes = [MatchAny]
+            c_bodies = []
+
+        contact_pairs = set(map(tuple, model.shape_contact_pairs.list())) if prune_noncolliding else None
 
         sp_sorted, sp_reading, self.shape, self.reading_indices, self.sensing_objs, self.counterparts = (
-            self._assemble_sensor_mappings(
-                sensing_obj_bodies,
-                sensing_obj_shapes,
-                counterpart_bodies,
-                counterpart_shapes,
-                model.body_shapes,
-                set(map(tuple, model.shape_contact_pairs.list())) if prune_noncolliding else None,
-            )
+            self._assemble_sensor_mappings(s_bodies, s_shapes, c_bodies, c_shapes, model.body_shapes, contact_pairs)
         )
 
         # initialize warp arrays
@@ -342,7 +339,7 @@ class ContactSensor:
             counterpart_indices.append(sens_counterparts)
 
         # maximum number of readings for any sensing object
-        n_readings = max(map(len, counterpart_indices))
+        n_readings = max(map(len, counterpart_indices)) if counterpart_indices else 0
 
         sp_sorted = sorted(sp_to_reading)
         sp_reading = []

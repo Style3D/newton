@@ -139,7 +139,10 @@ class TestJointDrive(unittest.TestCase):
                     friction=0.0,
                 )
 
-            main_builder.add_builder(world_builder, world=i)
+            # Add the joint to an articulation
+            world_builder.add_articulation([0])
+
+            main_builder.add_world(world_builder)
 
             # Set the start pos and vel of the dof.
             main_builder.joint_q[i] = joint_start_position

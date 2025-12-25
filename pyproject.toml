@@ -25,14 +25,14 @@ classifiers = [
 description = "A GPU-accelerated physics engine for robotics simulation"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["warp-lang>=1.7.0.dev20250823"]
+dependencies = ["warp-lang>=1.11.0.dev20251205"]
 
 [project.optional-dependencies]
 # Core simulation dependencies
 sim = [
     # MuJoCo simulation
     "mujoco-warp>=0.0.1",         # MuJoCo, warp-accelerated
-    "mujoco>=3.3.8.dev832233427", # MuJoCo physics engine
+    "mujoco>=3.4.0.dev839962392", # MuJoCo physics engine
     "cbor2>=5.7.0",
 ]
 
@@ -45,6 +45,7 @@ importers = [
     "coacd>=1.0.7",                # for convex decomposition
     "trimesh>=4.6.8",              # for mesh operations and V-HACD
     "pycollada>=0.9",              # for loading mesh data with trimesh
+    "resolve-robotics-uri-py>=0.4.0",  # for resolving ROS/Gazebo-style URIs
 
     # USD core libraries
     "usd-core>=25.5 ; platform_machine != 'aarch64'",
@@ -113,7 +114,7 @@ explicit = true
 mujoco-warp = { git = "https://github.com/google-deepmind/mujoco_warp" }
 warp-lang = { index = "nvidia" }
 mujoco = { index = "mujoco" }
-torch = [{ index = "pytorch-cu129", extra = "torch-cu12" }]
+torch = [{ index = "pytorch-cu128", extra = "torch-cu12" }]
 
 [dependency-groups]
 dev = ["asv>=0.6.4"]
@@ -125,8 +126,8 @@ indent-width = 4
 exclude = []
 
 [[tool.uv.index]]
-name = "pytorch-cu129"
-url = "https://download.pytorch.org/whl/cu129"
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [tool.ruff.lint]
@@ -213,6 +214,7 @@ reportUnusedCallResult = false
 files.extend-exclude = ["/examples/assets", "*.urdf", "*.usd", "*.usda", "*.mjcf"]
 
 [tool.typos.default.extend-words]
+arange = "arange"
 ba = "ba"
 HAA = "HAA"
 

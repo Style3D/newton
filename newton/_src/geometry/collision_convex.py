@@ -43,7 +43,6 @@ from .simplex_solver import create_solve_closest_distance
 
 _mat43f = wp.types.matrix((4, 3), wp.float32)
 _mat53f = wp.types.matrix((5, 3), wp.float32)
-_vec5 = wp.types.vector(5, wp.float32)
 _vec5u = wp.types.vector(5, wp.uint32)
 
 # Single-contact types (saves registers)
@@ -153,7 +152,7 @@ def create_solve_convex_multi_contact(support_func: Any, writer_func: Any, post_
             contact_data = post_process_contact(
                 contact_data, geom_a, position_a, orientation_a, geom_b, position_b, orientation_b
             )
-            writer_func(contact_data, writer_data)
+            writer_func(contact_data, writer_data, -1)
 
             return 1
 
@@ -277,7 +276,7 @@ def create_solve_convex_single_contact(support_func: Any, writer_func: Any, post
         contact_data = post_process_contact(
             contact_data, geom_a, position_a, orientation_a, geom_b, position_b, orientation_b
         )
-        writer_func(contact_data, writer_data)
+        writer_func(contact_data, writer_data, -1)
 
         return 1
 

@@ -29,10 +29,11 @@ from __future__ import annotations
 
 import numpy as np
 import warp as wp
-from pxr import Usd, UsdGeom
+from pxr import Usd
 
 import newton
 import newton.examples
+import newton.usd
 import newton.utils
 from newton import Model, ModelBuilder, State, eval_fk
 from newton.solvers import SolverFeatherstone, SolverVBD
@@ -146,8 +147,8 @@ class Example:
         self.cloth_particle_radius = 0.008
         self.cloth_body_contact_margin = 0.01
         #       self-contact
-        self.self_contact_radius = 0.002
-        self.self_contact_margin = 0.003
+        self.particle_self_contact_radius = 0.002
+        self.particle_self_contact_margin = 0.003
 
         self.soft_contact_ke = 100
         self.soft_contact_kd = 2e-3
@@ -173,7 +174,7 @@ class Example:
             franka = ModelBuilder()
             self.create_articulation(franka)
 
-            self.scene.add_builder(franka)
+            self.scene.add_world(franka)
             self.bodies_per_world = franka.body_count
             self.dof_q_per_world = franka.joint_coord_count
             self.dof_qd_per_world = franka.joint_dof_count
@@ -192,9 +193,11 @@ class Example:
 
         # add the T-shirt
         usd_stage = Usd.Stage.Open(newton.examples.get_asset("unisex_shirt.usd"))
-        usd_geom = UsdGeom.Mesh(usd_stage.GetPrimAtPath("/root/shirt"))
-        mesh_points = np.array(usd_geom.GetPointsAttr().Get())
-        mesh_indices = np.array(usd_geom.GetFaceVertexIndicesAttr().Get())
+        usd_prim = usd_stage.GetPrimAtPath("/root/shirt")
+
+        shirt_mesh = newton.usd.get_mesh(usd_prim)
+        mesh_points = shirt_mesh.vertices
+        mesh_indices = shirt_mesh.indices
         vertices = [wp.vec3(v) for v in mesh_points]
 
         if self.add_cloth:
@@ -223,6 +226,19 @@ class Example:
         self.model.soft_contact_kd = self.soft_contact_kd
         self.model.soft_contact_mu = self.self_contact_friction
 
+        shape_ke = self.model.shape_material_ke.numpy()
+        shape_kd = self.model.shape_material_kd.numpy()
+
+        shape_ke[...] = self.soft_contact_ke
+        shape_kd[...] = self.soft_contact_kd
+
+        self.model.shape_material_ke = wp.array(
+            shape_ke, dtype=self.model.shape_material_ke.dtype, device=self.model.shape_material_ke.device
+        )
+        self.model.shape_material_kd = wp.array(
+            shape_kd, dtype=self.model.shape_material_kd.dtype, device=self.model.shape_material_kd.device
+        )
+
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.target_joint_qd = wp.empty_like(self.state_0.joint_qd)
@@ -245,13 +261,14 @@ class Example:
             self.cloth_solver = SolverVBD(
                 self.model,
                 iterations=self.iterations,
-                self_contact_radius=self.self_contact_radius,
-                self_contact_margin=self.self_contact_margin,
-                handle_self_contact=True,
-                vertex_collision_buffer_pre_alloc=32,
-                edge_collision_buffer_pre_alloc=64,
                 integrate_with_external_rigid_solver=True,
-                collision_detection_interval=-1,
+                particle_self_contact_radius=self.particle_self_contact_radius,
+                particle_self_contact_margin=self.particle_self_contact_margin,
+                particle_enable_self_contact=True,
+                particle_vertex_contact_buffer_size=32,
+                particle_edge_contact_buffer_size=64,
+                particle_collision_detection_interval=-1,
+                rigid_contact_k_start=self.soft_contact_ke,
             )
 
         self.viewer.set_model(self.model)

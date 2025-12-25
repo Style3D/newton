@@ -284,11 +284,22 @@ class ViewerGL(ViewerBase):
         if not isinstance(self.objects[mesh], MeshGL):
             raise RuntimeError(f"Path {mesh} is not a Mesh object")
 
-        needs_update = not hidden
-        if name not in self.objects:
-            self.objects[name] = MeshInstancerGL(len(xforms), self.objects[mesh])
-            needs_update = True
+        instancer = self.objects.get(name, None)
+        transform_count = len(xforms) if xforms is not None else 0
+        resized = False
 
+        if instancer is None:
+            capacity = max(transform_count, 1)
+            instancer = MeshInstancerGL(capacity, self.objects[mesh])
+            self.objects[name] = instancer
+            resized = True
+        elif transform_count > instancer.num_instances:
+            new_capacity = max(transform_count, instancer.num_instances * 2)
+            instancer = MeshInstancerGL(new_capacity, self.objects[mesh])
+            self.objects[name] = instancer
+            resized = True
+
+        needs_update = resized or not hidden
         if needs_update:
             self.objects[name].update_from_transforms(xforms, scales, colors, materials)
 
@@ -367,8 +378,15 @@ class ViewerGL(ViewerBase):
         if self._point_mesh is None:
             self._create_point_mesh()
 
+        num_points = len(points)
         if name not in self.objects:
-            self.objects[name] = MeshInstancerGL(len(points), self._point_mesh)
+            # Start with a reasonable default.
+            initial_capacity = max(num_points, 256)
+            self.objects[name] = MeshInstancerGL(initial_capacity, self._point_mesh)
+        elif num_points > self.objects[name].num_instances:
+            old = self.objects[name]
+            new_capacity = max(num_points, old.num_instances * 2)
+            self.objects[name] = MeshInstancerGL(new_capacity, self._point_mesh)
 
         self.objects[name].update_from_points(points, radii, colors)
         self.objects[name].hidden = hidden
@@ -409,7 +427,7 @@ class ViewerGL(ViewerBase):
         Args:
             state: The current simulation state.
         """
-        if not self.picking.is_picking():
+        if not self.picking_enabled or not self.picking.is_picking():
             # Clear the picking line if not picking
             self.log_lines("picking_line", None, None, None)
             return
@@ -477,7 +495,8 @@ class ViewerGL(ViewerBase):
         Args:
             state: The current simulation state.
         """
-        self.picking._apply_picking_force(state)
+        if self.picking_enabled:
+            self.picking._apply_picking_force(state)
 
         # Apply wind forces
         self.wind._apply_wind_force(state)
@@ -739,7 +758,7 @@ class ViewerGL(ViewerBase):
         import pyglet  # noqa: PLC0415
 
         # Handle right-click for picking
-        if button == pyglet.window.mouse.RIGHT:
+        if button == pyglet.window.mouse.RIGHT and self.picking_enabled:
             ray_start, ray_dir = self.camera.get_world_ray(x, y)
             if self._last_state is not None:
                 self.picking.pick(self._last_state, ray_start, ray_dir)
@@ -780,7 +799,7 @@ class ViewerGL(ViewerBase):
             self.camera.yaw -= dx
             self.camera.pitch += dy
 
-        if buttons & pyglet.window.mouse.RIGHT:
+        if buttons & pyglet.window.mouse.RIGHT and self.picking_enabled:
             ray_start, ray_dir = self.camera.get_world_ray(x, y)
 
             if self.picking.is_picking():
