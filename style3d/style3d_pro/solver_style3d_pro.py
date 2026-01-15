@@ -6,12 +6,6 @@
 #   Date:           2025/10/27                                                                                         #
 ########################################################################################################################
 
-import os
-import sys
-
-# sys.path.append("D:/Desktop/SimulatorSDK/build/lib/Debug")
-sys.path.append("D:/Desktop/SimulatorSDK/build/lib/RelWithDebInfo")
-
 import numpy as np
 import style3dsim as sim
 import warp as wp
@@ -44,29 +38,9 @@ class SolverStyle3DPro(nt.solvers.SolverBase):
         super().__init__(model)
         self.enable_mouse_dragging = enable_mouse_dragging
 
-        # Login
-        if os.path.exists("key.txt"):
-            with open("key.txt", encoding="utf-8") as f:
-                lines = f.read().splitlines()
-                username = lines[0].strip()
-                password = lines[1].strip()
-        else:
-            username = input("User Name: ")
-            password = input("Password: ")
-        sim.login(username, password, True, None)
-
         if sim.is_login():
-            # Configure World
+            # Create world
             self.world = sim.World()
-            self.world_attrib = sim.WorldAttrib()
-            self.world_attrib.enable_gpu = True
-            # self.world_attrib.ground_static_friction = 0.0
-            # self.world_attrib.ground_dynamic_friction = 0.0
-            self.world_attrib.enable_rigid_self_collision = False
-            if model.up_axis == newton.Axis.Z:
-                self.world_attrib.gravity = sim.Vec3f(0, 0, -9.8)
-                self.world_attrib.ground_direction = sim.Vec3f(0, 0, 1)
-            self.world.set_attrib(self.world_attrib)
 
             # Create Cloth
             verts_np = model.particle_q.numpy()
@@ -80,13 +54,6 @@ class SolverStyle3DPro(nt.solvers.SolverBase):
 
             self.faces = faces_np
             self.cloth = sim.Cloth(faces_np, verts_np, [], False)
-            cloth_attrib = sim.ClothAttrib()
-            cloth_attrib.density = 0.2
-            cloth_attrib.thickness = 3e-3
-            cloth_attrib.static_friction = 0.03
-            cloth_attrib.dynamic_friction = 0.03
-            cloth_attrib.bend_stiff = sim.Vec3f(1e-6, 1e-6, 1e-6)
-            self.cloth.set_attrib(cloth_attrib)
             self.cloth.set_pin(self.is_fixed, self.fixed_indices)
             self.cloth.attach(self.world)
 
@@ -173,8 +140,6 @@ class SolverStyle3DPro(nt.solvers.SolverBase):
                             end_trans = sim.Transform(translation_1, rotation_1, sim.Vec3f(1.0, 1.0, 1.0))
                             self.body_entities[self.model.shape_key[shape_idx]].move(begin_trans, end_trans)
 
-        self.world_attrib.time_step = dt
-        self.world.set_attrib(self.world_attrib)
         self.world.step_sim()
         self.world.fetch_sim(0)
         verts = self.cloth.get_positions()
