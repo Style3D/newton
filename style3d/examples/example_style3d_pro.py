@@ -134,14 +134,6 @@ class Example:
         self.model.soft_contact_mu = 0.2
         self.model.set_gravity((0.0, 0.0, -9.81))
 
-        self.solver = SolverStyle3DPro(
-            model=self.model,
-            iterations=self.iterations,
-        )
-        self.solver.precompute(
-            builder,
-        )
-
         # Login
         if os.path.exists("key.txt"):
             with open("key.txt", encoding="utf-8") as f:
@@ -152,6 +144,14 @@ class Example:
             username = input("User Name: ")
             password = input("Password: ")
         sim.login(username, password, True, None)
+
+        self.solver = SolverStyle3DPro(
+            model=self.model,
+            iterations=self.iterations,
+        )
+        self.solver.precompute(
+            builder,
+        )
 
         # Set style3dsim.World attribute
         world_attrib = sim.WorldAttrib()
