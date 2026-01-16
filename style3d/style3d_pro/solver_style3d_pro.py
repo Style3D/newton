@@ -38,80 +38,79 @@ class SolverStyle3DPro(nt.solvers.SolverBase):
         super().__init__(model)
         self.enable_mouse_dragging = enable_mouse_dragging
 
-        if sim.is_login():
-            # Create world
-            self.world = sim.World()
+        # Create world
+        self.world = sim.World()
 
-            # Create Cloth
-            verts_np = model.particle_q.numpy()
-            faces_np = model.tri_indices.numpy()
-            flags_np = model.particle_flags.numpy()
-            self.is_fixed = [False] * len(verts_np)
-            self.fixed_indices = list(range(len(verts_np)))
+        # Create Cloth
+        verts_np = model.particle_q.numpy()
+        faces_np = model.tri_indices.numpy()
+        flags_np = model.particle_flags.numpy()
+        self.is_fixed = [False] * len(verts_np)
+        self.fixed_indices = list(range(len(verts_np)))
 
-            for i in range(len(verts_np)):
-                self.is_fixed[i] = not (flags_np[i] & newton.ParticleFlags.ACTIVE)
+        for i in range(len(verts_np)):
+            self.is_fixed[i] = not (flags_np[i] & newton.ParticleFlags.ACTIVE)
 
-            self.faces = faces_np
-            self.cloth = sim.Cloth(faces_np, verts_np, [], False)
-            self.cloth.set_pin(self.is_fixed, self.fixed_indices)
-            self.cloth.attach(self.world)
+        self.faces = faces_np
+        self.cloth = sim.Cloth(faces_np, verts_np, [], False)
+        self.cloth.set_pin(self.is_fixed, self.fixed_indices)
+        self.cloth.attach(self.world)
 
-            # Create rigid bodies
-            self.body_entities = {}
-            self.shape_flags = model.shape_flags.numpy()
-            body_trans_np = model.body_q.numpy()
+        # Create rigid bodies
+        self.body_entities = {}
+        self.shape_flags = model.shape_flags.numpy()
+        body_trans_np = model.body_q.numpy()
 
-            # # Register body entity
-            for i in range(model.body_count):
-                shape_indices = model.body_shapes[i]
-                for shape_idx in shape_indices:
-                    if isinstance(model.shape_source[shape_idx], newton.Mesh):
-                        if self.shape_flags[shape_idx] & 1 == 0:
-                            continue
+        # # Register body entity
+        for i in range(model.body_count):
+            shape_indices = model.body_shapes[i]
+            for shape_idx in shape_indices:
+                if isinstance(model.shape_source[shape_idx], newton.Mesh):
+                    if self.shape_flags[shape_idx] & 1 == 0:
+                        continue
 
-                        @wp.kernel
-                        def transform_vertices_kernel(
-                            index: wp.int32,
-                            vertices_in: wp.array(dtype=wp.vec3),
-                            scaling3d: wp.array(dtype=wp.vec3),
-                            transforms: wp.array(dtype=wp.transform),
-                            vertices_out: wp.array(dtype=wp.vec3),
-                        ):
-                            tid = wp.tid()
-                            new_pos = wp.transform_point(transforms[index], vertices_in[tid])
-                            new_pos[0] *= scaling3d[index][0]
-                            new_pos[1] *= scaling3d[index][1]
-                            new_pos[2] *= scaling3d[index][2]
-                            vertices_out[tid] = new_pos
+                    @wp.kernel
+                    def transform_vertices_kernel(
+                        index: wp.int32,
+                        vertices_in: wp.array(dtype=wp.vec3),
+                        scaling3d: wp.array(dtype=wp.vec3),
+                        transforms: wp.array(dtype=wp.transform),
+                        vertices_out: wp.array(dtype=wp.vec3),
+                    ):
+                        tid = wp.tid()
+                        new_pos = wp.transform_point(transforms[index], vertices_in[tid])
+                        new_pos[0] *= scaling3d[index][0]
+                        new_pos[1] *= scaling3d[index][1]
+                        new_pos[2] *= scaling3d[index][2]
+                        vertices_out[tid] = new_pos
 
-                        shape_vertices = wp.array(model.shape_source[shape_idx].vertices, dtype=wp.vec3)
+                    shape_vertices = wp.array(model.shape_source[shape_idx].vertices, dtype=wp.vec3)
 
-                        wp.launch(
-                            transform_vertices_kernel,
-                            dim=len(shape_vertices),
-                            inputs=[
-                                shape_idx,
-                                shape_vertices,
-                                model.shape_scale,
-                                model.shape_transform,
-                            ],
-                            outputs=[shape_vertices],
-                        )
+                    wp.launch(
+                        transform_vertices_kernel,
+                        dim=len(shape_vertices),
+                        inputs=[
+                            shape_idx,
+                            shape_vertices,
+                            model.shape_scale,
+                            model.shape_transform,
+                        ],
+                        outputs=[shape_vertices],
+                    )
 
-                        trans = body_trans_np[i]
-                        translation = sim.Vec3f(trans[0], trans[1], trans[2])
-                        rotation = sim.Quat(trans[3], trans[4], trans[5], trans[6])
-                        scaling = sim.Vec3f(1.0, 1.0, 1.0)
-                        transform = sim.Transform(translation, rotation, scaling)
-                        static_mesh = sim.Mesh(model.shape_source[shape_idx].indices.flatten(), shape_vertices.numpy())
-                        rigid_body = sim.RigidBody(static_mesh, transform)
-                        rigid_body.attach(self.world)
-                        rigid_body.set_pin(True)
-                        attrib = sim.RigidBodyAttrib()
-                        attrib.mass = 10.0
-                        rigid_body.set_attrib(attrib)
-                        self.body_entities[model.shape_key[shape_idx]] = rigid_body
+                    trans = body_trans_np[i]
+                    translation = sim.Vec3f(trans[0], trans[1], trans[2])
+                    rotation = sim.Quat(trans[3], trans[4], trans[5], trans[6])
+                    scaling = sim.Vec3f(1.0, 1.0, 1.0)
+                    transform = sim.Transform(translation, rotation, scaling)
+                    static_mesh = sim.Mesh(model.shape_source[shape_idx].indices.flatten(), shape_vertices.numpy())
+                    rigid_body = sim.RigidBody(static_mesh, transform)
+                    rigid_body.attach(self.world)
+                    rigid_body.set_pin(True)
+                    attrib = sim.RigidBodyAttrib()
+                    attrib.mass = 10.0
+                    rigid_body.set_attrib(attrib)
+                    self.body_entities[model.shape_key[shape_idx]] = rigid_body
 
         # Drag info
         self.drag_pos = wp.zeros(1, dtype=wp.vec3, device=self.device)
