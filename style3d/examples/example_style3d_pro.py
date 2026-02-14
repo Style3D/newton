@@ -66,7 +66,9 @@ class Example:
             garment_mesh_uv_indices = np.array(garment_prim.GetIndices())
 
             # Avatar
-            usd_stage = Usd.Stage.Open(str(asset_path / "avatars" / "Female.usd"))
+            path=str(asset_path / "avatars" / "Female.usd")
+
+            usd_stage = Usd.Stage.Open(path)
             usd_prim_avatar = usd_stage.GetPrimAtPath("/Root/Female/Root_SkinnedMesh_Avatar_0_Sub_2")
             avatar_mesh = newton.usd.get_mesh(usd_prim_avatar)
             avatar_mesh_indices = avatar_mesh.indices

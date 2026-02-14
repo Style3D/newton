@@ -11,7 +11,7 @@ import warp as wp
 from pxr import Usd, UsdGeom
 
 import newton
-from style3d import ViewerNewton
+from style3d.viewer.viewer_newton import ViewerNewton
 
 
 class Example:

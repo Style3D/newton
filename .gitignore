@@ -43,3 +43,6 @@ asv/html
 MUJOCO_LOG.TXT
 imgui.ini
 newton/tests/outputs/
+
+
+style3d/simulation_login.json
