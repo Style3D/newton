@@ -89,9 +89,17 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
 
         self.model = model
 
-        ### add_cloth_to_simulation
         self.world = _get_a_sim_world()
 
+        ### add_cloth_to_simulation
+        self._add_cloth_to_simulation()
+
+        ### add_rigid_body to simulation
+        self._add_rigid_body_to_simulation()
+
+
+    def _add_cloth_to_simulation(self):
+        # TODO: handle multiple cloth
         x, t = self. _extract_cloth_mesh()
 
         if len(t) > 0:
@@ -107,8 +115,8 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
         else:
             self.cloth = None
 
-        ### add_rigid_body to simulation
 
+    def _add_rigid_body_to_simulation(self):
         shape_geo_src = self.model.shape_source
         shape_geo_type = self.model.shape_type.numpy()
         shape_geo_scale = self.model.shape_scale.numpy()
@@ -171,6 +179,7 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
             self. rigid_bodies.append(rigid_body)
             self. rigid_body_index.append(ri)
 
+
     def _quaternion_to_matrix(self,q):
         w, x, y, z = q.w, q.x, q.y, q.z
 
@@ -199,10 +208,11 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
     def _apply_collision_force_to_rigidbody(self,state_in: State):
 
         trans_in = state_in.body_q.numpy()
+        body_f_np = state_in.body_f.numpy()
 
-        for ri,rb in zip(self.rigid_body_index,self.rigid_bodies):
+        for ri, ridx, rb in zip(range(len(self.rigid_body_index)),self.rigid_body_index, self.rigid_bodies):
             #l_rb_id = mp.rigid_body_id[i]
-            l_rb_id = ri
+            l_rb_id = ridx
 
             if len(self.collision_force) <= 0:
                 continue
@@ -211,7 +221,7 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
 
             for f, bary in zip(*rb_force):  # force and bary
 
-                trans_0 = trans_in[ri]
+                trans_0 = trans_in[ridx]
                 begin_trans = _to_sim_transform(trans_0)
 
                 orientation = self._quaternion_to_matrix( begin_trans.rotation )
@@ -220,29 +230,11 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
                 r = orientation @ bary
                 torque = np.cross(r, f)
 
-                ## TODO: apply to rigidbody
-                # append force and torque to rigid body
-                #d. xfrc_applied[l_rb_id] += [f[0], f[1], f[2], torque[0], torque[1], torque[2]]
+                body_f_np[l_rb_id] += [f[0], f[1], f[2], torque[0], torque[1], torque[2]]
 
-    @override
-    def step(self, state_in: State, state_out: State, control: Control, contacts: Contacts, dt: float):
+            state_in.body_f.assign(body_f_np)
 
-        self.rigid_solver. step(state_in, state_out, control, contacts, dt)
-
-        # apply collision force
-        self._update_rigidbody_cloth_collision_force()
-        self._apply_collision_force_to_rigidbody( state_in)
-
-        #simulation step
-        self.world. step_sim()
-
-        #set new rigid body position to simulation
-        self.world. fetch_sim(0)
-
-        if self.cloth is not None:
-            cloth_x = self.cloth.get_positions()
-            state_out. particle_q.assign( cloth_x )
-
+    def _update_rigidbody_pos_to_simulation(self,state_in: State, state_out: State):
         trans_in = state_in.body_q.numpy()
         trans_out = state_out.body_q.numpy()
 
@@ -253,3 +245,29 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
             begin_trans = _to_sim_transform(trans_0)
             end_trans = _to_sim_transform(trans_1)
             rb. move(begin_trans, end_trans)
+
+
+    def _update_cloth_pos_to_state(self, state_out: State):
+        if self.cloth is not None:
+            cloth_x = self.cloth.get_positions()
+            state_out. particle_q.assign( cloth_x )
+
+    @override
+    def step(self, state_in: State, state_out: State, control: Control, contacts: Contacts, dt: float):
+
+        # apply collision force
+        self._update_rigidbody_cloth_collision_force()
+        self._apply_collision_force_to_rigidbody( state_in)
+
+        self.rigid_solver. step(state_in, state_out, control, contacts, dt)
+
+        #simulation step
+        self.world. step_sim()
+
+        #set new rigid body position to simulation
+        self.world. fetch_sim(0)
+
+        self. _update_cloth_pos_to_state(state_out)
+
+        self._update_rigidbody_pos_to_simulation( state_in, state_out)
+

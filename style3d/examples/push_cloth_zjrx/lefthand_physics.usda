@@ -694,9 +694,9 @@ over "lefthand"
 
            ## speicify these values or left it default
            # point3f physics:centerOfMass = (0.015427119, -0.0003081707, -0.00004614473)
-           # float3 physics:diagonalInertia = (1.7737152e-7, 4.3025062e-7, 3.22399e-7)
-           # float physics:mass = 0.1
-           # quatf physics:principalAxes = (1, 0, 0, 0)
+            float3 physics:diagonalInertia = (10, 10, 10)
+            float physics:mass = 1000
+            quatf physics:principalAxes = (1, 0, 0, 0)
 
             # TODO: check if this really take effect
             uniform float physics:density = 1.0  # Define density (in kg/m?)
@@ -715,7 +715,7 @@ over "lefthand"
             prepend apiSchemas = ["PhysicsClothAPI"]
         )
         {
-            double3 xformOp:translate = (-0.1, -1.5, 0.03)
+            double3 xformOp:translate = (-0.1, -1.5, -0.05)
             uniform token[] xformOpOrder = ["xformOp:translate" ]
         }
     }
