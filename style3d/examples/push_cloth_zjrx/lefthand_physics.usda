@@ -23,10 +23,18 @@ def PhysicsScene "physicsScene" (
 
 over "lefthand"
 {
+    def PhysicsFixedJoint "root_joint" (
+        prepend apiSchemas = ["PhysicsArticulationRootAPI", "PhysxArticulationAPI"]
+    )
+    {
+        rel physics:body1 = </lefthand/base_link>
+        bool physxArticulation:enabledSelfCollisions = 0
+        int physxArticulation:solverPositionIterationCount = 32
+        int physxArticulation:solverVelocityIterationCount = 1
+    }
 
     over "base_link" (
-        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI","PhysicsArticulationRootAPI", "PhysxArticulationAPI"]
-        prepend references = </colliders/base_link>
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
     )
     {
         point3f physics:centerOfMass = (0.0011546022, 0.001760947, 0.05817346)
@@ -34,9 +42,28 @@ over "lefthand"
         float physics:mass = 0.069395036
         quatf physics:principalAxes = (0.9266241, -0.029491907, -0.3743872, 0.0182241)
 
-        quatf xformOp:orient = ( 0.5, 0.5, 0.5, 0.5 )
-        uniform token[] xformOpOrder = ["xformOp:orient"]
+        over Xform "collisions" (
+            instanceable = true
+            prepend references = </colliders/base_link>
+        )
+        {
+        }
+
     }
+
+#    over "base_link" (
+#        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI","PhysicsArticulationRootAPI", "PhysxArticulationAPI"]
+#        prepend references = </colliders/base_link>
+#    )
+#    {
+#        point3f physics:centerOfMass = (0.0011546022, 0.001760947, 0.05817346)
+#        float3 physics:diagonalInertia = (0.000044350836, 0.00007099783, 0.00003242542)
+#        float physics:mass = 0.069395036
+#        quatf physics:principalAxes = (0.9266241, -0.029491907, -0.3743872, 0.0182241)
+#
+#        quatf xformOp:orient = ( 0.5, 0.5, 0.5, 0.5 )
+#        uniform token[] xformOpOrder = ["xformOp:orient"]
+#    }
 
     over "index_Link1" (
         prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
@@ -688,7 +715,7 @@ over "lefthand"
             prepend apiSchemas = ["PhysicsClothAPI"]
         )
         {
-            double3 xformOp:translate = (0.0, -1.5, 0.3)
+            double3 xformOp:translate = (-0.1, -1.5, 0.03)
             uniform token[] xformOpOrder = ["xformOp:translate" ]
         }
     }
@@ -701,6 +728,7 @@ over "colliders"
     {
         over "base_link"
         {
+            
             over "node_STL_BINARY_" (
                 prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsMeshCollisionAPI"]
             )

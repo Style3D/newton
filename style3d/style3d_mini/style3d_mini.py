@@ -94,13 +94,18 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
 
         x, t = self. _extract_cloth_mesh()
 
-        self.cloth = sim. Cloth(t, x, np.array([], dtype=float), False)
+        if len(t) > 0:
 
-        cloth_attrib = sim. ClothAttrib()
+            self.cloth = sim. Cloth(t, x, np.array([], dtype=float), False)
 
-        self.cloth. set_attrib(cloth_attrib)
+            cloth_attrib = sim. ClothAttrib()
 
-        self.cloth. attach(self.world)
+            self.cloth. set_attrib(cloth_attrib)
+
+            self.cloth. attach(self.world)
+
+        else:
+            self.cloth = None
 
         ### add_rigid_body to simulation
 
@@ -166,7 +171,17 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
             self. rigid_bodies.append(rigid_body)
             self. rigid_body_index.append(ri)
 
+    def _quaternion_to_matrix(self,q):
+        w, x, y, z = q.w, q.x, q.y, q.z
 
+        # Compute the rotation matrix components
+        R = np.array([
+            [1 - 2 * (y ** 2 + z ** 2), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+            [2 * (x * y + w * z), 1 - 2 * (x ** 2 + z ** 2), 2 * (y * z - w * x)],
+            [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x ** 2 + y ** 2)]
+        ])
+
+        return R
 
     def _extract_cloth_mesh(self):
 
@@ -175,10 +190,48 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
 
         return x, t
 
+    def _update_rigidbody_cloth_collision_force(self ):
+        self.collision_force = []
+        for rb in self.rigid_bodies:
+            f_rb = rb.get_collision_force_piece()
+            self.collision_force.append(f_rb)
+
+    def _apply_collision_force_to_rigidbody(self,state_in: State):
+
+        trans_in = state_in.body_q.numpy()
+
+        for ri,rb in zip(self.rigid_body_index,self.rigid_bodies):
+            #l_rb_id = mp.rigid_body_id[i]
+            l_rb_id = ri
+
+            if len(self.collision_force) <= 0:
+                continue
+
+            rb_force = self.collision_force[ri]
+
+            for f, bary in zip(*rb_force):  # force and bary
+
+                trans_0 = trans_in[ri]
+                begin_trans = _to_sim_transform(trans_0)
+
+                orientation = self._quaternion_to_matrix( begin_trans.rotation )
+
+                orientation = orientation.reshape(3, 3)
+                r = orientation @ bary
+                torque = np.cross(r, f)
+
+                ## TODO: apply to rigidbody
+                # append force and torque to rigid body
+                #d. xfrc_applied[l_rb_id] += [f[0], f[1], f[2], torque[0], torque[1], torque[2]]
+
     @override
     def step(self, state_in: State, state_out: State, control: Control, contacts: Contacts, dt: float):
 
         self.rigid_solver. step(state_in, state_out, control, contacts, dt)
+
+        # apply collision force
+        self._update_rigidbody_cloth_collision_force()
+        self._apply_collision_force_to_rigidbody( state_in)
 
         #simulation step
         self.world. step_sim()
@@ -186,9 +239,9 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
         #set new rigid body position to simulation
         self.world. fetch_sim(0)
 
-        cloth_x = self.cloth.get_positions()
-
-        state_out.particle_q.assign( cloth_x )
+        if self.cloth is not None:
+            cloth_x = self.cloth.get_positions()
+            state_out. particle_q.assign( cloth_x )
 
         trans_in = state_in.body_q.numpy()
         trans_out = state_out.body_q.numpy()

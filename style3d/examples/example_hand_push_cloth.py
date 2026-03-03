@@ -12,6 +12,7 @@ from style3d.style3d_mini import style3d_mini
 from pathlib import Path
 from newton import Mesh
 import numpy as np
+from newton.solvers import SolverNotifyFlags
 
 def _load_mesh_usd(usd_path,root_path) :
 
@@ -68,13 +69,20 @@ class Example:
         self.fps = 100
         self.frame_dt = 1.0 / self.fps
         self.sim_time = 0.0
-        self.sim_substeps = 10
+        self.sim_substeps = 1
         self.sim_dt = self.frame_dt / self.sim_substeps
 
         self.viewer = viewer
         self.args = args
 
         builder = _load_scene_usd ('push_cloth_zjrx/lefthand.usda')
+        #builder = _load_scene_usd ('push_cloth_zjrx/allegro_left_hand_with_cube.usda')
+
+        ## set joint targets and joint drive gains
+        #for i in range(builder.joint_dof_count):
+        #    builder.joint_target_ke[i] = 15
+        #    builder.joint_target_kd[i] = 5
+        #    builder.joint_target_pos[i] = 0.0
 
         # finalize model
         self. model = builder. finalize()
@@ -106,6 +114,44 @@ class Example:
 
     def simulate(self):
 
+        ###control
+        drop_rate = 0.001
+        advance_rate = 0.005
+        hand_z_min = 0.3
+        fi = self.sim_frame
+        x = np.clip(advance_rate * fi, 0, 1.2)
+        y = 0.5
+        z = np.clip(0.3 - drop_rate * float(fi), hand_z_min, 1)
+
+        joint_idx = 0
+
+        joint_X_p_host = self.model.joint_X_p.numpy()
+        #current_xform = joint_X_p_host[joint_idx]
+
+        #if hasattr(current_xform, 'p'):
+        #    pos = current_xform.p
+        #    current_pos = np.array([float(pos[0]), float(pos[1]), float(pos[2])], dtype=np.float32)
+        #    current_rot = current_xform.q
+        #else:
+        #    # 如果无法访问，使用初始位置和旋转
+        #    initial_pos = np.array([x, y, z])
+        #    current_pos = initial_pos.copy()
+        #    current_rot = np.array([0.5, 0.5, 0.5, 0.5])
+
+        #pos = current_xform.p
+        #current_pos = np.array([float(pos[0]), float(pos[1]), float(pos[2])], dtype=np.float32)
+        #current_rot = current_xform.q
+
+        new_pos = np.array([x, y, z])
+        #new_xform = wp.transform(new_pos, current_rot)
+        joint_X_p_host[joint_idx,0:3] = new_pos
+        joint_X_p_host[joint_idx,3:7] = np.array([0.5, 0.5, 0.5, 0.5]) # rotation
+
+        self.model.joint_X_p.assign(joint_X_p_host)
+
+        ##
+        self.solver.notify_model_changed(SolverNotifyFlags.JOINT_PROPERTIES)
+
         for _ in range(self.sim_substeps):
             self. state_0.clear_forces()
 
@@ -115,24 +161,9 @@ class Example:
             self. contacts = self.model.collide(self.state_0, collision_pipeline = self.collision_pipeline)
             self. solver. step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 
-            ###control
-            drop_rate = 0.005
-            advance_rate = 0.002
-            hand_z_min = 0.2
-            fi = self.sim_frame
-            x = np.clip(advance_rate * fi, 0, 1.2)
-            y = 0.5
-            z = np.clip(0.3 - drop_rate * float(fi), hand_z_min, 1)
-
-            #joint_q_h0 = self.state_0.joint_q.numpy()
-            joint_q_h1 = self.state_1.joint_q.numpy()
-            self. palm_pos = np.array([x, y, z])
-            joint_q_h1[0:3] =  self.palm_pos
-            self.state_1.joint_q.assign(joint_q_h1)
-
             # swap states
             self.state_0, self.state_1 = self.state_1, self.state_0
-            self.sim_frame += 1
+        self.sim_frame += 1
 
     def step(self):
         if self.graph:
