@@ -58,7 +58,7 @@
         </script>
     <link rel="index" title="Index" href="../../genindex.html" />
     <link rel="search" title="Search" href="../../search.html" />
-    <link rel="next" title="newton.solvers.SolverMuJoCo" href="newton.solvers.SolverMuJoCo.html" />
+    <link rel="next" title="newton.solvers.SolverKamino" href="newton.solvers.SolverKamino.html" />
     <link rel="prev" title="newton.solvers.SolverFeatherstone" href="newton.solvers.SolverFeatherstone.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
@@ -168,15 +168,15 @@
 
 
 <li class="nav-item ">
-  <a class="nav-link nav-internal" href="../../guide/key-concepts.html">
-    Key Concepts
+  <a class="nav-link nav-internal" href="../../guide/tutorials.html">
+    Tutorials
   </a>
 </li>
 
 
 <li class="nav-item ">
-  <a class="nav-link nav-internal" href="../../guide/tutorials.html">
-    Tutorials
+  <a class="nav-link nav-internal" href="../../guide/development.html">
+    Development
   </a>
 </li>
 
@@ -189,13 +189,6 @@
                 <ul id="pst-nav-more-links" class="dropdown-menu">
                     
 <li class=" ">
-  <a class="nav-link dropdown-item nav-internal" href="../../guide/development.html">
-    Development
-  </a>
-</li>
-
-
-<li class=" ">
   <a class="nav-link dropdown-item nav-internal" href="../../concepts/worlds.html">
     Worlds
   </a>
@@ -205,6 +198,13 @@
 <li class=" ">
   <a class="nav-link dropdown-item nav-internal" href="../../concepts/articulations.html">
     Articulations
+  </a>
+</li>
+
+
+<li class=" ">
+  <a class="nav-link dropdown-item nav-internal" href="../../concepts/mass_inertia.html">
+    Mass and Inertia
   </a>
 </li>
 
@@ -473,13 +473,6 @@
 
 
 <li class="nav-item ">
-  <a class="nav-link nav-internal" href="../../guide/key-concepts.html">
-    Key Concepts
-  </a>
-</li>
-
-
-<li class="nav-item ">
   <a class="nav-link nav-internal" href="../../guide/tutorials.html">
     Tutorials
   </a>
@@ -503,6 +496,13 @@
 <li class="nav-item ">
   <a class="nav-link nav-internal" href="../../concepts/articulations.html">
     Articulations
+  </a>
+</li>
+
+
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../../concepts/mass_inertia.html">
+    Mass and Inertia
   </a>
 </li>
 
@@ -705,7 +705,6 @@
 <li class="toctree-l1"><a class="reference internal" href="../../guide/overview.html">Overview</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../guide/installation.html">Installation</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../guide/visualization.html">Visualization</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../../guide/key-concepts.html">Key Concepts</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../guide/tutorials.html">Tutorials</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../guide/development.html">Development</a></li>
 </ul>
@@ -713,6 +712,7 @@
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../../concepts/worlds.html">Worlds</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../concepts/articulations.html">Articulations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../concepts/mass_inertia.html">Mass and Inertia</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../concepts/sites.html">Sites</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../concepts/sensors.html">Sensors</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../concepts/conventions.html">Conventions</a></li>
@@ -1013,17 +1013,17 @@ collider sources, materials, or to read colliders from a different model.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>collider_meshes</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#list" title="(in Python v3.14)"><em>list</em></a><em>[</em><a class="reference external" href="https://nvidia.github.io/warp/api_reference/_generated/warp.Mesh.html#warp.Mesh" title="(in Warp v1.11.1)"><em>Mesh</em></a><em>] </em><em>| </em><em>None</em>) – Warp triangular meshes used as colliders.</p></li>
+<li><p><strong>collider_meshes</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#list" title="(in Python v3.14)"><em>list</em></a><em>[</em><a class="reference external" href="https://nvidia.github.io/warp/api_reference/_generated/warp.Mesh.html#warp.Mesh" title="(in Warp v1.12.0)"><em>Mesh</em></a><em>] </em><em>| </em><em>None</em>) – Warp triangular meshes used as colliders.</p></li>
 <li><p><strong>collider_body_ids</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#list" title="(in Python v3.14)"><em>list</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a><em>] </em><em>| </em><em>None</em>) – For dynamic colliders, per-mesh body ids.</p></li>
 <li><p><strong>collider_thicknesses</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#list" title="(in Python v3.14)"><em>list</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a><em>] </em><em>| </em><em>None</em>) – Per-mesh signed distance offsets (m).</p></li>
 <li><p><strong>collider_friction</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#list" title="(in Python v3.14)"><em>list</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a><em>] </em><em>| </em><em>None</em>) – Per-mesh Coulomb friction coefficients.</p></li>
 <li><p><strong>collider_adhesion</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#list" title="(in Python v3.14)"><em>list</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a><em>] </em><em>| </em><em>None</em>) – Per-mesh adhesion (Pa).</p></li>
 <li><p><strong>collider_projection_threshold</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#list" title="(in Python v3.14)"><em>list</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a><em>] </em><em>| </em><em>None</em>) – Per-mesh projection threshold (m).</p></li>
 <li><p><strong>model</strong> (<a class="reference internal" href="newton.Model.html#newton.Model" title="newton._src.sim.model.Model"><em>Model</em></a><em> | </em><em>None</em>) – The model to read collider properties from. Default to solver’s model.</p></li>
-<li><p><strong>body_com</strong> (<a class="reference external" href="https://nvidia.github.io/warp/api_reference/_generated/warp.array.html#warp.array" title="(in Warp v1.11.1)"><em>array</em></a><em> | </em><em>None</em>) – For dynamic colliders, per-body center of mass.</p></li>
-<li><p><strong>body_mass</strong> (<a class="reference external" href="https://nvidia.github.io/warp/api_reference/_generated/warp.array.html#warp.array" title="(in Warp v1.11.1)"><em>array</em></a><em> | </em><em>None</em>) – For dynamic colliders, per-body mass. Pass zeros for kinematic bodies.</p></li>
-<li><p><strong>body_inv_inertia</strong> (<a class="reference external" href="https://nvidia.github.io/warp/api_reference/_generated/warp.array.html#warp.array" title="(in Warp v1.11.1)"><em>array</em></a><em> | </em><em>None</em>) – For dynamic colliders, per-body inverse inertia.</p></li>
-<li><p><strong>body_q</strong> (<a class="reference external" href="https://nvidia.github.io/warp/api_reference/_generated/warp.array.html#warp.array" title="(in Warp v1.11.1)"><em>array</em></a><em> | </em><em>None</em>) – For dynamic colliders, per-body initial transform.</p></li>
+<li><p><strong>body_com</strong> (<a class="reference external" href="https://nvidia.github.io/warp/api_reference/_generated/warp.array.html#warp.array" title="(in Warp v1.12.0)"><em>array</em></a><em> | </em><em>None</em>) – For dynamic colliders, per-body center of mass.</p></li>
+<li><p><strong>body_mass</strong> (<a class="reference external" href="https://nvidia.github.io/warp/api_reference/_generated/warp.array.html#warp.array" title="(in Warp v1.12.0)"><em>array</em></a><em> | </em><em>None</em>) – For dynamic colliders, per-body mass. Pass zeros for kinematic bodies.</p></li>
+<li><p><strong>body_inv_inertia</strong> (<a class="reference external" href="https://nvidia.github.io/warp/api_reference/_generated/warp.array.html#warp.array" title="(in Warp v1.12.0)"><em>array</em></a><em> | </em><em>None</em>) – For dynamic colliders, per-body inverse inertia.</p></li>
+<li><p><strong>body_q</strong> (<a class="reference external" href="https://nvidia.github.io/warp/api_reference/_generated/warp.array.html#warp.array" title="(in Warp v1.12.0)"><em>array</em></a><em> | </em><em>None</em>) – For dynamic colliders, per-body initial transform.</p></li>
 </ul>
 </dd>
 </dl>
@@ -1038,7 +1038,7 @@ collider sources, materials, or to read colliders from a different model.</p>
 
 <dl class="py property">
 <dt class="sig sig-object py" id="newton.solvers.SolverImplicitMPM.collider_body_index">
-<em class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">collider_body_index</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://nvidia.github.io/warp/api_reference/_generated/warp.array.html#warp.array" title="(in Warp v1.11.1)"><span class="pre">array</span></a></em><a class="headerlink" href="#newton.solvers.SolverImplicitMPM.collider_body_index" title="Link to this definition">#</a></dt>
+<em class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">collider_body_index</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://nvidia.github.io/warp/api_reference/_generated/warp.array.html#warp.array" title="(in Warp v1.12.0)"><span class="pre">array</span></a></em><a class="headerlink" href="#newton.solvers.SolverImplicitMPM.collider_body_index" title="Link to this definition">#</a></dt>
 <dd><p>Array mapping collider indices to body indices.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Returns<span class="colon">:</span></dt>
@@ -1081,33 +1081,33 @@ collider sources, materials, or to read colliders from a different model.</p>
   <nav class="bd-toc-nav page-toc" aria-labelledby="pst-page-navigation-heading-2">
     <ul class="visible nav section-nav flex-column">
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM"><code class="docutils literal notranslate"><span class="pre">SolverImplicitMPM</span></code></a><ul class="visible nav section-nav flex-column">
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.Config"><code class="docutils literal notranslate"><span class="pre">SolverImplicitMPM.Config</span></code></a><ul class="nav section-nav flex-column">
-<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.Config.__init__"><code class="docutils literal notranslate"><span class="pre">SolverImplicitMPM.Config.__init__()</span></code></a></li>
-<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.Config.air_drag"><code class="docutils literal notranslate"><span class="pre">SolverImplicitMPM.Config.air_drag</span></code></a></li>
-<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.Config.collider_basis"><code class="docutils literal notranslate"><span class="pre">SolverImplicitMPM.Config.collider_basis</span></code></a></li>
-<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.Config.collider_normal_from_sdf_gradient"><code class="docutils literal notranslate"><span class="pre">SolverImplicitMPM.Config.collider_normal_from_sdf_gradient</span></code></a></li>
-<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.Config.collider_velocity_mode"><code class="docutils literal notranslate"><span class="pre">SolverImplicitMPM.Config.collider_velocity_mode</span></code></a></li>
-<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.Config.critical_fraction"><code class="docutils literal notranslate"><span class="pre">SolverImplicitMPM.Config.critical_fraction</span></code></a></li>
-<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.Config.grid_padding"><code class="docutils literal notranslate"><span class="pre">SolverImplicitMPM.Config.grid_padding</span></code></a></li>
-<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.Config.grid_type"><code class="docutils literal notranslate"><span class="pre">SolverImplicitMPM.Config.grid_type</span></code></a></li>
-<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.Config.max_active_cell_count"><code class="docutils literal notranslate"><span class="pre">SolverImplicitMPM.Config.max_active_cell_count</span></code></a></li>
-<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.Config.max_iterations"><code class="docutils literal notranslate"><span class="pre">SolverImplicitMPM.Config.max_iterations</span></code></a></li>
-<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.Config.solver"><code class="docutils literal notranslate"><span class="pre">SolverImplicitMPM.Config.solver</span></code></a></li>
-<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.Config.strain_basis"><code class="docutils literal notranslate"><span class="pre">SolverImplicitMPM.Config.strain_basis</span></code></a></li>
-<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.Config.tolerance"><code class="docutils literal notranslate"><span class="pre">SolverImplicitMPM.Config.tolerance</span></code></a></li>
-<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.Config.transfer_scheme"><code class="docutils literal notranslate"><span class="pre">SolverImplicitMPM.Config.transfer_scheme</span></code></a></li>
-<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.Config.voxel_size"><code class="docutils literal notranslate"><span class="pre">SolverImplicitMPM.Config.voxel_size</span></code></a></li>
-<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.Config.warmstart_mode"><code class="docutils literal notranslate"><span class="pre">SolverImplicitMPM.Config.warmstart_mode</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.Config"><code class="docutils literal notranslate"><span class="pre">Config</span></code></a><ul class="nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.Config.__init__"><code class="docutils literal notranslate"><span class="pre">__init__()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.Config.air_drag"><code class="docutils literal notranslate"><span class="pre">air_drag</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.Config.collider_basis"><code class="docutils literal notranslate"><span class="pre">collider_basis</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.Config.collider_normal_from_sdf_gradient"><code class="docutils literal notranslate"><span class="pre">collider_normal_from_sdf_gradient</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.Config.collider_velocity_mode"><code class="docutils literal notranslate"><span class="pre">collider_velocity_mode</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.Config.critical_fraction"><code class="docutils literal notranslate"><span class="pre">critical_fraction</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.Config.grid_padding"><code class="docutils literal notranslate"><span class="pre">grid_padding</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.Config.grid_type"><code class="docutils literal notranslate"><span class="pre">grid_type</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.Config.max_active_cell_count"><code class="docutils literal notranslate"><span class="pre">max_active_cell_count</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.Config.max_iterations"><code class="docutils literal notranslate"><span class="pre">max_iterations</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.Config.solver"><code class="docutils literal notranslate"><span class="pre">solver</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.Config.strain_basis"><code class="docutils literal notranslate"><span class="pre">strain_basis</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.Config.tolerance"><code class="docutils literal notranslate"><span class="pre">tolerance</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.Config.transfer_scheme"><code class="docutils literal notranslate"><span class="pre">transfer_scheme</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.Config.voxel_size"><code class="docutils literal notranslate"><span class="pre">voxel_size</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.Config.warmstart_mode"><code class="docutils literal notranslate"><span class="pre">warmstart_mode</span></code></a></li>
 </ul>
 </li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.register_custom_attributes"><code class="docutils literal notranslate"><span class="pre">SolverImplicitMPM.register_custom_attributes()</span></code></a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.__init__"><code class="docutils literal notranslate"><span class="pre">SolverImplicitMPM.__init__()</span></code></a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.notify_model_changed"><code class="docutils literal notranslate"><span class="pre">SolverImplicitMPM.notify_model_changed()</span></code></a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.sample_render_grains"><code class="docutils literal notranslate"><span class="pre">SolverImplicitMPM.sample_render_grains()</span></code></a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.setup_collider"><code class="docutils literal notranslate"><span class="pre">SolverImplicitMPM.setup_collider()</span></code></a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.step"><code class="docutils literal notranslate"><span class="pre">SolverImplicitMPM.step()</span></code></a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.collider_body_index"><code class="docutils literal notranslate"><span class="pre">SolverImplicitMPM.collider_body_index</span></code></a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.voxel_size"><code class="docutils literal notranslate"><span class="pre">SolverImplicitMPM.voxel_size</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.register_custom_attributes"><code class="docutils literal notranslate"><span class="pre">register_custom_attributes()</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.__init__"><code class="docutils literal notranslate"><span class="pre">__init__()</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.notify_model_changed"><code class="docutils literal notranslate"><span class="pre">notify_model_changed()</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.sample_render_grains"><code class="docutils literal notranslate"><span class="pre">sample_render_grains()</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.setup_collider"><code class="docutils literal notranslate"><span class="pre">setup_collider()</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.step"><code class="docutils literal notranslate"><span class="pre">step()</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.collider_body_index"><code class="docutils literal notranslate"><span class="pre">collider_body_index</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverImplicitMPM.voxel_size"><code class="docutils literal notranslate"><span class="pre">voxel_size</span></code></a></li>
 </ul>
 </li>
 </ul>
@@ -1138,17 +1138,9 @@ collider sources, materials, or to read colliders from a different model.</p>
 
   <p class="copyright">
     
-      © Copyright 2026, The Newton Developers.
+      © Copyright 2026, The Newton Developers. Documentation licensed under CC-BY-4.0.
       <br/>
     
-  </p>
-</div>
-      
-        <div class="footer-item">
-
-  <p class="sphinx-version">
-    Created using <a href="https://www.sphinx-doc.org/">Sphinx</a> 8.2.3.
-    <br/>
   </p>
 </div>
       

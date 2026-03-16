@@ -168,15 +168,15 @@
 
 
 <li class="nav-item ">
-  <a class="nav-link nav-internal" href="../../guide/key-concepts.html">
-    Key Concepts
+  <a class="nav-link nav-internal" href="../../guide/tutorials.html">
+    Tutorials
   </a>
 </li>
 
 
 <li class="nav-item ">
-  <a class="nav-link nav-internal" href="../../guide/tutorials.html">
-    Tutorials
+  <a class="nav-link nav-internal" href="../../guide/development.html">
+    Development
   </a>
 </li>
 
@@ -189,13 +189,6 @@
                 <ul id="pst-nav-more-links" class="dropdown-menu">
                     
 <li class=" ">
-  <a class="nav-link dropdown-item nav-internal" href="../../guide/development.html">
-    Development
-  </a>
-</li>
-
-
-<li class=" ">
   <a class="nav-link dropdown-item nav-internal" href="../../concepts/worlds.html">
     Worlds
   </a>
@@ -205,6 +198,13 @@
 <li class=" ">
   <a class="nav-link dropdown-item nav-internal" href="../../concepts/articulations.html">
     Articulations
+  </a>
+</li>
+
+
+<li class=" ">
+  <a class="nav-link dropdown-item nav-internal" href="../../concepts/mass_inertia.html">
+    Mass and Inertia
   </a>
 </li>
 
@@ -473,13 +473,6 @@
 
 
 <li class="nav-item ">
-  <a class="nav-link nav-internal" href="../../guide/key-concepts.html">
-    Key Concepts
-  </a>
-</li>
-
-
-<li class="nav-item ">
   <a class="nav-link nav-internal" href="../../guide/tutorials.html">
     Tutorials
   </a>
@@ -503,6 +496,13 @@
 <li class="nav-item ">
   <a class="nav-link nav-internal" href="../../concepts/articulations.html">
     Articulations
+  </a>
+</li>
+
+
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../../concepts/mass_inertia.html">
+    Mass and Inertia
   </a>
 </li>
 
@@ -705,7 +705,6 @@
 <li class="toctree-l1"><a class="reference internal" href="../../guide/overview.html">Overview</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../guide/installation.html">Installation</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../guide/visualization.html">Visualization</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../../guide/key-concepts.html">Key Concepts</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../guide/tutorials.html">Tutorials</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../guide/development.html">Development</a></li>
 </ul>
@@ -713,6 +712,7 @@
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../../concepts/worlds.html">Worlds</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../concepts/articulations.html">Articulations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../concepts/mass_inertia.html">Mass and Inertia</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../concepts/sites.html">Sites</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../concepts/sensors.html">Sensors</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../concepts/conventions.html">Conventions</a></li>
@@ -811,7 +811,7 @@
 <h1>newton.solvers.SolverVBD<a class="headerlink" href="#newton-solvers-solvervbd" title="Link to this heading">#</a></h1>
 <dl class="py class">
 <dt class="sig sig-object py" id="newton.solvers.SolverVBD">
-<em class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">newton.solvers.</span></span><span class="sig-name descname"><span class="pre">SolverVBD</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">iterations</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">10</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">friction_epsilon</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1e-2</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">integrate_with_external_rigid_solver</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">particle_enable_self_contact</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">particle_self_contact_radius</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.2</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">particle_self_contact_margin</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.2</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">particle_conservative_bound_relaxation</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.85</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">particle_vertex_contact_buffer_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">32</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">particle_edge_contact_buffer_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">64</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">particle_collision_detection_interval</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">particle_edge_parallel_epsilon</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1e-5</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">particle_enable_tile_solve</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">particle_topological_contact_filter_threshold</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">2</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">particle_rest_shape_contact_exclusion_radius</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">particle_external_vertex_contact_filtering_map</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">particle_external_edge_contact_filtering_map</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rigid_avbd_beta</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1.0e5</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rigid_avbd_gamma</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.99</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rigid_contact_k_start</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1.0e2</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rigid_joint_linear_k_start</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1.0e4</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rigid_joint_angular_k_start</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1.0e1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rigid_joint_linear_ke</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1.0e9</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rigid_joint_angular_ke</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1.0e9</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rigid_joint_linear_kd</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rigid_joint_angular_kd</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rigid_body_contact_buffer_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">64</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rigid_body_particle_contact_buffer_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">256</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rigid_enable_dahl_friction</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="reference external" href="https://github.com/newton-physics/newton/blob/main/newton/_src/solvers/vbd/solver_vbd.py#L98"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#newton.solvers.SolverVBD" title="Link to this definition">#</a></dt>
+<em class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">newton.solvers.</span></span><span class="sig-name descname"><span class="pre">SolverVBD</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">iterations</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">10</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">friction_epsilon</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1e-2</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">integrate_with_external_rigid_solver</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">particle_enable_self_contact</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">particle_self_contact_radius</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.2</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">particle_self_contact_margin</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.2</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">particle_conservative_bound_relaxation</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.85</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">particle_vertex_contact_buffer_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">32</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">particle_edge_contact_buffer_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">64</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">particle_collision_detection_interval</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">particle_edge_parallel_epsilon</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1e-5</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">particle_enable_tile_solve</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">particle_topological_contact_filter_threshold</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">2</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">particle_rest_shape_contact_exclusion_radius</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">particle_external_vertex_contact_filtering_map</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">particle_external_edge_contact_filtering_map</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rigid_avbd_beta</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1.0e5</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rigid_avbd_gamma</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.99</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rigid_contact_k_start</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1.0e2</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rigid_joint_linear_k_start</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1.0e4</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rigid_joint_angular_k_start</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1.0e1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rigid_joint_linear_ke</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1.0e9</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rigid_joint_angular_ke</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1.0e9</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rigid_joint_linear_kd</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rigid_joint_angular_kd</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rigid_body_contact_buffer_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">64</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rigid_body_particle_contact_buffer_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">256</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rigid_enable_dahl_friction</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="reference external" href="https://github.com/newton-physics/newton/blob/main/newton/_src/solvers/vbd/solver_vbd.py#L99"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#newton.solvers.SolverVBD" title="Link to this definition">#</a></dt>
 <dd><p>Bases: <a class="reference internal" href="newton.solvers.SolverBase.html#newton.solvers.SolverBase" title="newton._src.solvers.solver.SolverBase"><code class="xref py py-class docutils literal notranslate"><span class="pre">SolverBase</span></code></a></p>
 <p>An implicit solver using Vertex Block Descent (VBD) for particles and Augmented VBD (AVBD) for rigid bodies.</p>
 <dl class="simple">
@@ -824,6 +824,20 @@
 </dl>
 <p>For rigid bodies, the AVBD algorithm uses <strong>soft constraints</strong> with adaptive penalty parameters
 for joints and contacts. Hard constraints are not currently enforced.</p>
+<dl>
+<dt>Joint limitations:</dt><dd><ul class="simple">
+<li><p>Supported joint types: BALL, FIXED, FREE, CABLE.
+PRISMATIC, REVOLUTE, DISTANCE, and D6 joints are not supported.</p></li>
+<li><p><a class="reference internal" href="newton.Model.html#newton.Model.joint_target_ke" title="newton.Model.joint_target_ke"><code class="xref py py-attr docutils literal notranslate"><span class="pre">joint_target_ke</span></code></a>/<a class="reference internal" href="newton.Model.html#newton.Model.joint_target_kd" title="newton.Model.joint_target_kd"><code class="xref py py-attr docutils literal notranslate"><span class="pre">joint_target_kd</span></code></a> are used for CABLE
+joints only (as stretch/bend stiffness and damping).</p></li>
+<li><p>Other joint properties (<a class="reference internal" href="newton.Model.html#newton.Model.joint_enabled" title="newton.Model.joint_enabled"><code class="xref py py-attr docutils literal notranslate"><span class="pre">joint_enabled</span></code></a>, <a class="reference internal" href="newton.Model.html#newton.Model.joint_armature" title="newton.Model.joint_armature"><code class="xref py py-attr docutils literal notranslate"><span class="pre">joint_armature</span></code></a>,
+<a class="reference internal" href="newton.Model.html#newton.Model.joint_friction" title="newton.Model.joint_friction"><code class="xref py py-attr docutils literal notranslate"><span class="pre">joint_friction</span></code></a>, <a class="reference internal" href="newton.Model.html#newton.Model.joint_limit_ke" title="newton.Model.joint_limit_ke"><code class="xref py py-attr docutils literal notranslate"><span class="pre">joint_limit_ke</span></code></a>/<a class="reference internal" href="newton.Model.html#newton.Model.joint_limit_kd" title="newton.Model.joint_limit_kd"><code class="xref py py-attr docutils literal notranslate"><span class="pre">joint_limit_kd</span></code></a>,
+<a class="reference internal" href="newton.Model.html#newton.Model.joint_target_mode" title="newton.Model.joint_target_mode"><code class="xref py py-attr docutils literal notranslate"><span class="pre">joint_target_mode</span></code></a>, <a class="reference internal" href="newton.Control.html#newton.Control.joint_f" title="newton.Control.joint_f"><code class="xref py py-attr docutils literal notranslate"><span class="pre">joint_f</span></code></a>) are not supported.</p></li>
+<li><p>Equality and mimic constraints are not supported.</p></li>
+</ul>
+<p>See <a class="reference internal" href="../newton_solvers.html#joint-feature-support"><span class="std std-ref">Joint Feature Support</span></a> for the full comparison across solvers.</p>
+</dd>
+</dl>
 <p class="rubric">References</p>
 <ul class="simple">
 <li><p>Anka He Chen, Ziheng Liu, Yin Yang, and Cem Yuksel. 2024. Vertex Block Descent. ACM Trans. Graph. 43, 4, Article 116 (July 2024), 16 pages.
@@ -996,8 +1010,15 @@ wp.array(dtype=wp.int32),</p>
 </p>
 </dd>
 <dt class="field-odd">Return type<span class="colon">:</span></dt>
-<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.14)">tuple</a>[<a class="reference external" href="https://nvidia.github.io/warp/api_reference/_generated/warp.array.html#warp.array" title="(in Warp v1.11.1)"><em>array</em></a>, <a class="reference external" href="https://nvidia.github.io/warp/api_reference/_generated/warp.array.html#warp.array" title="(in Warp v1.11.1)"><em>array</em></a>, <a class="reference external" href="https://nvidia.github.io/warp/api_reference/_generated/warp.array.html#warp.array" title="(in Warp v1.11.1)"><em>array</em></a>, <a class="reference external" href="https://nvidia.github.io/warp/api_reference/_generated/warp.array.html#warp.array" title="(in Warp v1.11.1)"><em>array</em></a>, <a class="reference external" href="https://nvidia.github.io/warp/api_reference/_generated/warp.array.html#warp.array" title="(in Warp v1.11.1)"><em>array</em></a>, <a class="reference external" href="https://nvidia.github.io/warp/api_reference/_generated/warp.array.html#warp.array" title="(in Warp v1.11.1)"><em>array</em></a>]</p>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.14)">tuple</a>[<a class="reference external" href="https://nvidia.github.io/warp/api_reference/_generated/warp.array.html#warp.array" title="(in Warp v1.12.0)"><em>array</em></a>, <a class="reference external" href="https://nvidia.github.io/warp/api_reference/_generated/warp.array.html#warp.array" title="(in Warp v1.12.0)"><em>array</em></a>, <a class="reference external" href="https://nvidia.github.io/warp/api_reference/_generated/warp.array.html#warp.array" title="(in Warp v1.12.0)"><em>array</em></a>, <a class="reference external" href="https://nvidia.github.io/warp/api_reference/_generated/warp.array.html#warp.array" title="(in Warp v1.12.0)"><em>array</em></a>, <a class="reference external" href="https://nvidia.github.io/warp/api_reference/_generated/warp.array.html#warp.array" title="(in Warp v1.12.0)"><em>array</em></a>, <a class="reference external" href="https://nvidia.github.io/warp/api_reference/_generated/warp.array.html#warp.array" title="(in Warp v1.12.0)"><em>array</em></a>]</p>
 </dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="newton.solvers.SolverVBD.notify_model_changed">
+<span class="sig-name descname"><span class="pre">notify_model_changed</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">flags</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#newton.solvers.SolverVBD.notify_model_changed" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
 </dl>
 </dd></dl>
 
@@ -1082,12 +1103,13 @@ depend on this argument.</p></li>
   <nav class="bd-toc-nav page-toc" aria-labelledby="pst-page-navigation-heading-2">
     <ul class="visible nav section-nav flex-column">
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverVBD"><code class="docutils literal notranslate"><span class="pre">SolverVBD</span></code></a><ul class="visible nav section-nav flex-column">
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverVBD.register_custom_attributes"><code class="docutils literal notranslate"><span class="pre">SolverVBD.register_custom_attributes()</span></code></a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverVBD.__init__"><code class="docutils literal notranslate"><span class="pre">SolverVBD.__init__()</span></code></a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverVBD.collect_rigid_contact_forces"><code class="docutils literal notranslate"><span class="pre">SolverVBD.collect_rigid_contact_forces()</span></code></a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverVBD.rebuild_bvh"><code class="docutils literal notranslate"><span class="pre">SolverVBD.rebuild_bvh()</span></code></a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverVBD.set_rigid_history_update"><code class="docutils literal notranslate"><span class="pre">SolverVBD.set_rigid_history_update()</span></code></a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverVBD.step"><code class="docutils literal notranslate"><span class="pre">SolverVBD.step()</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverVBD.register_custom_attributes"><code class="docutils literal notranslate"><span class="pre">register_custom_attributes()</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverVBD.__init__"><code class="docutils literal notranslate"><span class="pre">__init__()</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverVBD.collect_rigid_contact_forces"><code class="docutils literal notranslate"><span class="pre">collect_rigid_contact_forces()</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverVBD.notify_model_changed"><code class="docutils literal notranslate"><span class="pre">notify_model_changed()</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverVBD.rebuild_bvh"><code class="docutils literal notranslate"><span class="pre">rebuild_bvh()</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverVBD.set_rigid_history_update"><code class="docutils literal notranslate"><span class="pre">set_rigid_history_update()</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.solvers.SolverVBD.step"><code class="docutils literal notranslate"><span class="pre">step()</span></code></a></li>
 </ul>
 </li>
 </ul>
@@ -1118,17 +1140,9 @@ depend on this argument.</p></li>
 
   <p class="copyright">
     
-      © Copyright 2026, The Newton Developers.
+      © Copyright 2026, The Newton Developers. Documentation licensed under CC-BY-4.0.
       <br/>
     
-  </p>
-</div>
-      
-        <div class="footer-item">
-
-  <p class="sphinx-version">
-    Created using <a href="https://www.sphinx-doc.org/">Sphinx</a> 8.2.3.
-    <br/>
   </p>
 </div>
       

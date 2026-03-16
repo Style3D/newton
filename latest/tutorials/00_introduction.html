@@ -170,16 +170,16 @@
 </li>
 
 
-<li class="nav-item ">
-  <a class="nav-link nav-internal" href="../guide/key-concepts.html">
-    Key Concepts
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="../guide/tutorials.html">
+    Tutorials
   </a>
 </li>
 
 
-<li class="nav-item current active">
-  <a class="nav-link nav-internal" href="../guide/tutorials.html">
-    Tutorials
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../guide/development.html">
+    Development
   </a>
 </li>
 
@@ -192,13 +192,6 @@
                 <ul id="pst-nav-more-links" class="dropdown-menu">
                     
 <li class=" ">
-  <a class="nav-link dropdown-item nav-internal" href="../guide/development.html">
-    Development
-  </a>
-</li>
-
-
-<li class=" ">
   <a class="nav-link dropdown-item nav-internal" href="../concepts/worlds.html">
     Worlds
   </a>
@@ -208,6 +201,13 @@
 <li class=" ">
   <a class="nav-link dropdown-item nav-internal" href="../concepts/articulations.html">
     Articulations
+  </a>
+</li>
+
+
+<li class=" ">
+  <a class="nav-link dropdown-item nav-internal" href="../concepts/mass_inertia.html">
+    Mass and Inertia
   </a>
 </li>
 
@@ -475,13 +475,6 @@
 </li>
 
 
-<li class="nav-item ">
-  <a class="nav-link nav-internal" href="../guide/key-concepts.html">
-    Key Concepts
-  </a>
-</li>
-
-
 <li class="nav-item current active">
   <a class="nav-link nav-internal" href="../guide/tutorials.html">
     Tutorials
@@ -506,6 +499,13 @@
 <li class="nav-item ">
   <a class="nav-link nav-internal" href="../concepts/articulations.html">
     Articulations
+  </a>
+</li>
+
+
+<li class="nav-item ">
+  <a class="nav-link nav-internal" href="../concepts/mass_inertia.html">
+    Mass and Inertia
   </a>
 </li>
 
@@ -708,7 +708,6 @@
 <li class="toctree-l1"><a class="reference internal" href="../guide/overview.html">Overview</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../guide/installation.html">Installation</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../guide/visualization.html">Visualization</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../guide/key-concepts.html">Key Concepts</a></li>
 <li class="toctree-l1 current active"><a class="reference internal" href="../guide/tutorials.html">Tutorials</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../guide/development.html">Development</a></li>
 </ul>
@@ -716,6 +715,7 @@
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../concepts/worlds.html">Worlds</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../concepts/articulations.html">Articulations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../concepts/mass_inertia.html">Mass and Inertia</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../concepts/sites.html">Sites</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../concepts/sensors.html">Sensors</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../concepts/conventions.html">Conventions</a></li>
@@ -840,22 +840,22 @@
 <div class="nboutput docutils container">
 <div class="prompt empty docutils container">
 </div>
-<div class="output_area stderr docutils container">
+<div class="output_area docutils container">
 <div class="highlight"><pre>
-Warp CUDA warning: Could not find or load the NVIDIA CUDA driver. GPU execution will not be available.
+Warp 1.12.0 initialized:
+   CUDA Toolkit 12.9, CUDA driver not available (NVRTC compilation available)
+   Devices:
+     &#34;cpu&#34;      : &#34;x86_64&#34;
+   Kernel cache:
+     /home/runner/.cache/warp/1.12.0
 </pre></div></div>
 </div>
 <div class="nboutput nblast docutils container">
 <div class="prompt empty docutils container">
 </div>
-<div class="output_area docutils container">
+<div class="output_area stderr docutils container">
 <div class="highlight"><pre>
-Warp 1.12.0rc2 initialized:
-   CUDA Toolkit 12.9, CUDA driver not available (NVRTC compilation available)
-   Devices:
-     &#34;cpu&#34;      : &#34;x86_64&#34;
-   Kernel cache:
-     /home/runner/.cache/warp/1.12.0rc2
+Warp CUDA warning: Could not find or load the NVIDIA CUDA driver. GPU execution will not be available.
 </pre></div></div>
 </div>
 </section>
@@ -967,7 +967,7 @@ Added 4 bodies with collision shapes
 </div>
 <div class="output_area docutils container">
 <div class="highlight"><pre>
-Module newton._src.geometry.inertia c57c45a load on device &#39;cpu&#39; took 2225.56 ms  (compiled)
+Module newton._src.geometry.inertia c57c45a load on device &#39;cpu&#39; took 2475.09 ms  (compiled)
 Added mesh body with 6102 vertices
 </pre></div></div>
 </div>
@@ -1000,7 +1000,7 @@ Added mesh body with 6102 vertices
 </div>
 <div class="output_area docutils container">
 <div class="highlight"><pre>
-Module validate_and_correct_inertia_kernel_8fd4dd1e 9a64c1c load on device &#39;cpu&#39; took 1814.99 ms  (compiled)
+Module validate_and_correct_inertia_kernel_8fd4dd1e 9a64c1c load on device &#39;cpu&#39; took 2090.51 ms  (compiled)
 Model finalized for device cpu:
   Bodies: 5
   Shapes: 7
@@ -1042,7 +1042,7 @@ Model finalized for device cpu:
 </div>
 <div class="output_area stderr docutils container">
 <div class="highlight"><pre>
-/home/runner/work/newton/newton/newton/_src/sim/collide.py:569: UserWarning: NarrowPhase running on CPU: mesh-mesh contacts will be skipped (SDF-based mesh-mesh collision requires CUDA). Use a CUDA device for full mesh-mesh contact support.
+/home/runner/work/newton/newton/newton/_src/sim/collide.py:595: UserWarning: NarrowPhase running on CPU: mesh-mesh contacts will be skipped (SDF-based mesh-mesh collision requires CUDA). Use a CUDA device for full mesh-mesh contact support.
   self.narrow_phase = NarrowPhase(
 </pre></div></div>
 </div>
@@ -1075,6 +1075,7 @@ State, Contacts and Control objects created
 </div>
 <div class="output_area docutils container">
 <div class="highlight"><pre>
+Module newton._src.solvers.solver 1ba2a2a load on device &#39;cpu&#39; took 2541.02 ms  (compiled)
 Solver created: SolverXPBD
 </pre></div></div>
 </div>
@@ -1214,7 +1215,7 @@ Running on CPU (no CUDA graph)
 </div>
 <div class="output_area docutils container">
 <div class="highlight"><pre>
-Module newton._src.viewer.kernels afa8b9f load on device &#39;cpu&#39; took 2789.52 ms  (compiled)
+Module newton._src.viewer.kernels 62c5639 load on device &#39;cpu&#39; took 3563.49 ms  (compiled)
 </pre></div></div>
 </div>
 </section>
@@ -1257,15 +1258,14 @@ Module newton._src.viewer.kernels afa8b9f load on device &#39;cpu&#39; took 2789
 </div>
 <div class="output_area docutils container">
 <div class="highlight"><pre>
-Module newton._src.sim.collide bd35c25 load on device &#39;cpu&#39; took 2756.41 ms  (compiled)
-Module newton._src.geometry.broad_phase_nxn 99e0260 load on device &#39;cpu&#39; took 2056.43 ms  (compiled)
-Module create_narrow_phase_primitive_kernel__locals__narrow_phase_primitive_kernel_57fc8025 65a2974 load on device &#39;cpu&#39; took 2583.41 ms  (compiled)
-Module create_narrow_phase_kernel_gjk_mpr__locals__narrow_phase_kernel_gjk_mpr_7423debd 6686f96 load on device &#39;cpu&#39; took 4121.65 ms  (compiled)
-Module create_narrow_phase_process_mesh_plane_contacts_kernel__locals__narrow_phase_process_mesh_plane_contacts_kernel_d7160721 8546c44 load on device &#39;cpu&#39; took 1968.48 ms  (compiled)
-Module newton._src.geometry.narrow_phase f458d1d load on device &#39;cpu&#39; took 2330.88 ms  (compiled)
-Module create_narrow_phase_process_mesh_triangle_contacts_kernel__locals__narrow_phase_process_mesh_triangle_contacts_kernel_73f496f8 6ad077f load on device &#39;cpu&#39; took 4676.69 ms  (compiled)
-Module newton._src.solvers.xpbd.kernels fd0af6f load on device &#39;cpu&#39; took 10816.46 ms  (compiled)
-Module newton._src.solvers.solver 85b7f53 load on device &#39;cpu&#39; took 2188.72 ms  (compiled)
+Module newton._src.sim.collide 20550ff load on device &#39;cpu&#39; took 3084.63 ms  (compiled)
+Module newton._src.geometry.broad_phase_nxn 99e0260 load on device &#39;cpu&#39; took 2320.24 ms  (compiled)
+Module create_narrow_phase_primitive_kernel__locals__narrow_phase_primitive_kernel_5a23025b a7834ae load on device &#39;cpu&#39; took 2977.94 ms  (compiled)
+Module create_narrow_phase_kernel_gjk_mpr__locals__narrow_phase_kernel_gjk_mpr_78498819 0c29df9 load on device &#39;cpu&#39; took 4319.65 ms  (compiled)
+Module create_narrow_phase_process_mesh_plane_contacts_kernel__locals__narrow_phase_process_mesh_plane_contacts_kernel_9b8c8a1b b0c7a54 load on device &#39;cpu&#39; took 2188.67 ms  (compiled)
+Module newton._src.geometry.narrow_phase e578d09 load on device &#39;cpu&#39; took 2681.65 ms  (compiled)
+Module create_narrow_phase_process_mesh_triangle_contacts_kernel__locals__narrow_phase_process_mesh_triangle_contacts_kernel_789661cd b6cf815 load on device &#39;cpu&#39; took 4472.38 ms  (compiled)
+Module newton._src.solvers.xpbd.kernels 59ac7de load on device &#39;cpu&#39; took 11365.42 ms  (compiled)
 
 Simulation complete! Total time: 8.33 seconds
 </pre></div></div>
@@ -1364,17 +1364,9 @@ Simulation complete! Total time: 8.33 seconds
 
   <p class="copyright">
     
-      © Copyright 2026, The Newton Developers.
+      © Copyright 2026, The Newton Developers. Documentation licensed under CC-BY-4.0.
       <br/>
     
-  </p>
-</div>
-      
-        <div class="footer-item">
-
-  <p class="sphinx-version">
-    Created using <a href="https://www.sphinx-doc.org/">Sphinx</a> 8.2.3.
-    <br/>
   </p>
 </div>
       
