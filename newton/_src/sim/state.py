@@ -29,41 +29,102 @@ class State:
     store and update the simulation's current configuration and derived data.
     """
 
+    EXTENDED_ATTRIBUTES: frozenset[str] = frozenset(
+        (
+            "body_qdd",
+            "body_parent_f",
+            "mujoco:qfrc_actuator",
+        )
+    )
+    """
+    Names of optional extended state attributes that are not allocated by default.
+
+    These can be requested via :meth:`newton.ModelBuilder.request_state_attributes` or
+    :meth:`newton.Model.request_state_attributes` before calling :meth:`newton.Model.state`.
+
+    See :ref:`extended_state_attributes` for details and usage.
+    """
+
+    @classmethod
+    def validate_extended_attributes(cls, attributes: tuple[str, ...]) -> None:
+        """Validate names passed to request_state_attributes().
+
+        Only extended state attributes listed in :attr:`EXTENDED_ATTRIBUTES` are accepted.
+
+        Args:
+            attributes: Tuple of attribute names to validate.
+
+        Raises:
+            ValueError: If any attribute name is not in :attr:`EXTENDED_ATTRIBUTES`.
+        """
+        if not attributes:
+            return
+
+        invalid = sorted(set(attributes).difference(cls.EXTENDED_ATTRIBUTES))
+        if invalid:
+            allowed = ", ".join(sorted(cls.EXTENDED_ATTRIBUTES))
+            bad = ", ".join(invalid)
+            raise ValueError(f"Unknown extended state attribute(s): {bad}. Allowed: {allowed}.")
+
     def __init__(self) -> None:
+        """
+        Initialize an empty State object.
+        To ensure that the attributes are properly allocated create the State object via :meth:`newton.Model.state` instead.
+        """
+
         self.particle_q: wp.array | None = None
-        """3D positions of particles, shape (particle_count,), dtype :class:`vec3`."""
+        """3D positions of particles [m], shape (particle_count,), dtype :class:`vec3`."""
 
         self.particle_qd: wp.array | None = None
-        """3D velocities of particles, shape (particle_count,), dtype :class:`vec3`."""
+        """3D velocities of particles [m/s], shape (particle_count,), dtype :class:`vec3`."""
 
         self.particle_f: wp.array | None = None
-        """3D forces on particles, shape (particle_count,), dtype :class:`vec3`."""
+        """3D forces on particles [N], shape (particle_count,), dtype :class:`vec3`."""
 
         self.body_q: wp.array | None = None
-        """Rigid body transforms (7-DOF), shape (body_count,), dtype :class:`transform`."""
+        """Rigid body transforms (7-DOF) [m, unitless quaternion], shape (body_count,), dtype :class:`transform`."""
 
         self.body_qd: wp.array | None = None
-        """Rigid body velocities (spatial), shape (body_count,), dtype :class:`spatial_vector`.
-        First three entries: linear velocity; last three: angular velocity."""
+        """Rigid body velocities (spatial) [m/s, rad/s], shape (body_count,), dtype :class:`spatial_vector`.
+        First three entries: linear velocity [m/s] relative to the body's center of mass in world frame;
+        last three: angular velocity [rad/s] in world frame.
+        See :ref:`Twist conventions in Newton <Twist conventions>` for more information."""
 
         self.body_q_prev: wp.array | None = None
-        """Previous rigid body transforms for finite-difference velocity computation."""
+        """Previous rigid body transforms [m, unitless quaternion] for finite-difference velocity computation."""
+
+        self.body_qdd: wp.array | None = None
+        """Rigid body accelerations (spatial) [m/s², rad/s²], shape (body_count,), dtype :class:`spatial_vector`.
+        First three entries: linear acceleration [m/s²] relative to the body's center of mass in world frame;
+        last three: angular acceleration [rad/s²] in world frame.
+
+        This is an extended state attribute; see :ref:`extended_state_attributes` for more information.
+        """
 
         self.body_f: wp.array | None = None
-        """Rigid body forces (spatial), shape (body_count,), dtype :class:`spatial_vector`.
-        First three entries: linear force; last three: torque.
+        """Rigid body forces (spatial) [N, N·m], shape (body_count,), dtype :class:`spatial_vector`.
+        First three entries: linear force [N] in world frame applied at the body's center of mass (COM).
+        Last three: torque (moment) [N·m] in world frame.
 
-        Note:
-            :attr:`body_f` represents external wrenches in world frame, measured at the body's center of mass (COM).
-            The linear force component is applied at the COM, and the torque is about the COM.
-            This convention is consistent across all solvers (XPBD, SemiImplicit, Featherstone, MuJoCo, VBD).
+        .. note::
+            :attr:`body_f` represents an external wrench in world frame with the body's center of mass (COM) as reference point.
+        """
+
+        self.body_parent_f: wp.array | None = None
+        """Parent interaction forces [N, N·m], shape (body_count,), dtype :class:`spatial_vector`.
+        First three entries: linear force [N]; last three: torque [N·m].
+
+        This is an extended state attribute; see :ref:`extended_state_attributes` for more information.
+
+        .. note::
+            :attr:`body_parent_f` represents incoming joint wrenches in world frame, referenced to the body's center of mass (COM).
         """
 
         self.joint_q: wp.array | None = None
-        """Generalized joint position coordinates, shape (joint_coord_count,), dtype float."""
+        """Generalized joint position coordinates [m or rad, depending on joint type], shape (joint_coord_count,), dtype float."""
 
         self.joint_qd: wp.array | None = None
-        """Generalized joint velocity coordinates, shape (joint_dof_count,), dtype float."""
+        """Generalized joint velocity coordinates [m/s or rad/s, depending on joint type], shape (joint_dof_count,), dtype float."""
 
     def clear_forces(self) -> None:
         """
@@ -82,11 +143,30 @@ class State:
         """
         Copies the array attributes of another State object into this one.
 
+        This can be useful for swapping states in a simulation when using CUDA graphs.
+        If the number of substeps is odd, the last state needs to be explicitly copied for the graph to be captured correctly:
+
+        .. code-block:: python
+
+            # Assume we are capturing the following simulation loop in a CUDA graph
+            for i in range(sim_substeps):
+                state_0.clear_forces()
+
+                solver.step(state_0, state_1, control, contacts, sim_dt)
+
+                # Swap states - handle CUDA graph case specially
+                if sim_substeps % 2 == 1 and i == sim_substeps - 1:
+                    # Swap states by copying the state arrays for graph capture
+                    state_0.assign(state_1)
+                else:
+                    # We can just swap the state references
+                    state_0, state_1 = state_1, state_0
+
         Args:
             other: The source State object to copy from.
 
         Raises:
-            ValueError: If the states have mismatched attributes (one has an array where the other is None).
+            ValueError: If the states have mismatched attributes (one has an array allocated where the other is None).
         """
         attributes = set(self.__dict__).union(other.__dict__)
 

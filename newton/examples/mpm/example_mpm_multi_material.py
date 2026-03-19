@@ -22,7 +22,7 @@ from newton.solvers import SolverImplicitMPM
 
 
 class Example:
-    def __init__(self, viewer, options):
+    def __init__(self, viewer, args):
         # setup simulation parameters first
         self.fps = 60.0
         self.frame_dt = 1.0 / self.fps
@@ -35,7 +35,11 @@ class Example:
         # save a reference to the viewer
         self.viewer = viewer
         builder = newton.ModelBuilder()
-        sand_particles, snow_particles, mud_particles = Example.emit_particles(builder, voxel_size=options.voxel_size)
+
+        # Register MPM custom attributes before adding particles
+        SolverImplicitMPM.register_custom_attributes(builder)
+
+        sand_particles, snow_particles, mud_particles = Example.emit_particles(builder, voxel_size=args.voxel_size)
 
         builder.add_ground_plane()
         self.model = builder.finalize()
@@ -44,44 +48,31 @@ class Example:
         snow_particles = wp.array(snow_particles, dtype=int, device=self.model.device)
         mud_particles = wp.array(mud_particles, dtype=int, device=self.model.device)
 
-        self.model.particle_ke = 1.0e15  # non-compliant particles
-        self.model.particle_kd = 0.0
-        self.model.particle_mu = 0.5
+        # Multi-material setup via model.mpm.* custom attributes
+        # Snow: soft, compressible, low friction
+        self.model.mpm.yield_pressure[snow_particles].fill_(2.0e4)
+        self.model.mpm.yield_stress[snow_particles].fill_(1.0e3)
+        self.model.mpm.tensile_yield_ratio[snow_particles].fill_(0.05)
+        self.model.mpm.friction[snow_particles].fill_(0.1)
+        self.model.mpm.hardening[snow_particles].fill_(10.0)
 
-        mpm_options = SolverImplicitMPM.Options()
-        mpm_options.voxel_size = options.voxel_size
-        mpm_options.tolerance = options.tolerance
-        mpm_options.max_iterations = options.max_iterations
+        # Mud: viscous, cohesive
+        self.model.mpm.yield_pressure[mud_particles].fill_(1.0e10)
+        self.model.mpm.yield_stress[mud_particles].fill_(3.0e2)
+        self.model.mpm.tensile_yield_ratio[mud_particles].fill_(1.0)
+        self.model.mpm.hardening[mud_particles].fill_(2.0)
+        self.model.mpm.friction[mud_particles].fill_(0.0)
 
-        # Create MPM model from Newton model
-        mpm_model = SolverImplicitMPM.Model(self.model, mpm_options)
-
-        # multi-material setup
-        # some properties like elastic stiffness, damping, can be adjusted directly on the model,
-        # but not all yet. here we directly adjust the MPM model's material parameters
-
-        mpm_model.material_parameters.yield_pressure[snow_particles].fill_(2.0e4)
-        mpm_model.material_parameters.yield_stress[snow_particles].fill_(1.0e3)
-        mpm_model.material_parameters.tensile_yield_ratio[snow_particles].fill_(0.05)
-        mpm_model.material_parameters.friction[snow_particles].fill_(0.1)
-        mpm_model.material_parameters.hardening[snow_particles].fill_(10.0)
-
-        mpm_model.material_parameters.yield_pressure[mud_particles].fill_(1.0e10)
-        mpm_model.material_parameters.yield_stress[mud_particles].fill_(3.0e2)
-        mpm_model.material_parameters.tensile_yield_ratio[mud_particles].fill_(1.0)
-        mpm_model.material_parameters.hardening[mud_particles].fill_(2.0)
-        mpm_model.material_parameters.friction[mud_particles].fill_(0.0)
-
-        mpm_model.notify_particle_material_changed()
+        mpm_options = SolverImplicitMPM.Config()
+        mpm_options.voxel_size = args.voxel_size
+        mpm_options.tolerance = args.tolerance
+        mpm_options.max_iterations = args.max_iterations
 
         # Initialize MPM solver
-        self.solver = SolverImplicitMPM(mpm_model, mpm_options)
+        self.solver = SolverImplicitMPM(self.model, mpm_options)
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
-
-        self.solver.enrich_state(self.state_0)
-        self.solver.enrich_state(self.state_1)
 
         # Assign different colors to each particle type
         self.particle_colors = wp.full(
@@ -97,7 +88,7 @@ class Example:
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
             self.solver.step(self.state_0, self.state_1, None, None, self.sim_dt)
-            self.solver.project_outside(self.state_1, self.state_1, self.sim_dt)
+            self.solver._project_outside(self.state_1, self.state_1, self.sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
 
     def step(self):
@@ -199,16 +190,18 @@ class Example:
         end_id = len(builder.particle_q)
         return np.arange(begin_id, end_id, dtype=int)
 
+    @staticmethod
+    def create_parser():
+        parser = newton.examples.create_parser()
+        parser.add_argument("--max-iterations", "-it", type=int, default=250)
+        parser.add_argument("--tolerance", "-tol", type=float, default=1.0e-6)
+        parser.add_argument("--voxel-size", "-dx", type=float, default=0.05)
+        return parser
+
 
 if __name__ == "__main__":
-    # Create parser that inherits common arguments and adds example-specific ones
-    parser = newton.examples.create_parser()
+    parser = Example.create_parser()
 
-    parser.add_argument("--max-iterations", "-it", type=int, default=250)
-    parser.add_argument("--tolerance", "-tol", type=float, default=1.0e-6)
-    parser.add_argument("--voxel-size", "-dx", type=float, default=0.05)
-
-    # Parse arguments and initialize viewer
     viewer, args = newton.examples.init(parser)
 
     # Create example and run

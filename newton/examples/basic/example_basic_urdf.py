@@ -34,7 +34,7 @@ import newton.examples
 
 
 class Example:
-    def __init__(self, viewer, num_worlds, args=None):
+    def __init__(self, viewer, args):
         # setup simulation parameters first
         self.fps = 100
         self.frame_dt = 1.0 / self.fps
@@ -42,7 +42,8 @@ class Example:
         self.sim_substeps = 10
         self.sim_dt = self.frame_dt / self.sim_substeps
 
-        self.num_worlds = num_worlds
+        self.world_count = args.world_count
+        self.solver_type = args.solver if hasattr(args, "solver") and args.solver else "xpbd"
 
         self.viewer = viewer
 
@@ -51,12 +52,18 @@ class Example:
         # set default parameters for the quadruped
         quadruped.default_body_armature = 0.01
         quadruped.default_joint_cfg.armature = 0.01
-        quadruped.default_joint_cfg.target_ke = 2000.0
-        quadruped.default_joint_cfg.target_kd = 1.0
-        quadruped.default_shape_cfg.ke = 1.0e4
-        quadruped.default_shape_cfg.kd = 1.0e2
-        quadruped.default_shape_cfg.kf = 1.0e2
-        quadruped.default_shape_cfg.mu = 1.0
+
+        if self.solver_type == "vbd":
+            quadruped.default_joint_cfg.target_ke = 2000.0
+            quadruped.default_joint_cfg.target_kd = 1.0e-3
+            quadruped.default_joint_cfg.limit_kd = 1.0e-5
+            quadruped.default_shape_cfg.ke = 1.0e7
+            quadruped.default_shape_cfg.kd = 1.0e-1
+            quadruped.default_shape_cfg.mu = 1.0
+        else:
+            quadruped.default_joint_cfg.target_ke = 2000.0
+            quadruped.default_joint_cfg.target_kd = 1.0
+            quadruped.default_shape_cfg.mu = 1.0
 
         # parse the URDF file
         quadruped.add_urdf(
@@ -64,6 +71,7 @@ class Example:
             xform=wp.transform(wp.vec3(0.0, 0.0, 0.7), wp.quat_identity()),
             floating=True,
             enable_self_collisions=False,
+            ignore_inertial_definitions=True,  # Use geometry-based inertia for stability
         )
 
         # set initial joint positions
@@ -74,32 +82,27 @@ class Example:
         scene = newton.ModelBuilder()
 
         # use the builder.replicate() function to create N copies of the world
-        scene.replicate(quadruped, self.num_worlds)
-        scene.add_ground_plane()
+        scene.replicate(quadruped, self.world_count)
 
-        # finalize model
+        scene.add_ground_plane(cfg=quadruped.default_shape_cfg)
+        if self.solver_type == "vbd":
+            scene.color()
+
         self.model = scene.finalize()
+        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.model)
 
-        self.solver = newton.solvers.SolverXPBD(self.model)
+        if self.solver_type == "vbd":
+            self.update_step_interval = 10
+            self.solver = newton.solvers.SolverVBD(self.model, iterations=1, rigid_contact_k_start=1.0e6)
+        else:
+            self.update_step_interval = 1
+            self.solver = newton.solvers.SolverXPBD(self.model)
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
 
-        # not required for MuJoCo, but required for other solvers
-        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
-
-        # Create collision pipeline from command-line args
-        # This example uses the standard pipeline by default (unlike other examples that default to unified)
-        # Users can override with --collision-pipeline unified if desired
-        # If no args provided or no collision_pipeline arg, defaults to "standard" for this example
-        if args is None or not hasattr(args, "collision_pipeline"):
-            self.collision_pipeline = newton.examples.create_collision_pipeline(
-                self.model, collision_pipeline_type="standard"
-            )
-        else:
-            self.collision_pipeline = newton.examples.create_collision_pipeline(self.model, args)
-        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
+        self.contacts = self.model.contacts()
 
         self.viewer.set_model(self.model)
 
@@ -115,13 +118,19 @@ class Example:
             self.graph = None
 
     def simulate(self):
-        for _ in range(self.sim_substeps):
+        for substep in range(self.sim_substeps):
             self.state_0.clear_forces()
 
             # apply forces to the model
             self.viewer.apply_forces(self.state_0)
 
-            self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
+            update_step_history = (substep % self.update_step_interval) == 0
+            if update_step_history:
+                self.model.collide(self.state_0, self.contacts)
+
+            if self.solver_type == "vbd":
+                self.solver.set_rigid_history_update(update_step_history)
+
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 
             # swap states
@@ -143,14 +152,14 @@ class Example:
             lambda q, qd: max(abs(qd)) < 0.15,
         )
 
-        bodies_per_world = self.model.body_count // self.num_worlds
+        bodies_per_world = self.model.body_count // self.world_count
         newton.examples.test_body_state(
             self.model,
             self.state_0,
             "quadrupeds have reached the terminal height",
             lambda q, qd: wp.abs(q[2] - 0.46) < 0.01,
             # only select the root body of each world
-            indices=[i * bodies_per_world for i in range(self.num_worlds)],
+            indices=[i * bodies_per_world for i in range(self.world_count)],
         )
 
     def render(self):
@@ -159,16 +168,26 @@ class Example:
         self.viewer.log_contacts(self.contacts, self.state_0)
         self.viewer.end_frame()
 
+    @staticmethod
+    def create_parser():
+        parser = newton.examples.create_parser()
+        newton.examples.add_world_count_arg(parser)
+        parser.set_defaults(world_count=100)
+        parser.add_argument(
+            "--solver",
+            type=str,
+            default="xpbd",
+            choices=["vbd", "xpbd"],
+            help="Solver type: xpbd (default) or vbd",
+        )
+        return parser
+
 
 if __name__ == "__main__":
-    # Create parser that inherits common arguments and adds example-specific ones
-    parser = newton.examples.create_parser()
-    parser.add_argument("--num-worlds", type=int, default=100, help="Total number of simulated worlds.")
+    parser = Example.create_parser()
 
-    # Parse arguments and initialize viewer
     viewer, args = newton.examples.init(parser)
 
-    # Create viewer and run
-    example = Example(viewer, args.num_worlds, args)
+    example = Example(viewer, args)
 
     newton.examples.run(example, args)

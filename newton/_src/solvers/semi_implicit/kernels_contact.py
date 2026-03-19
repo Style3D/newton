@@ -74,13 +74,11 @@ def eval_particle_contact(
     v = particle_v[i]
     radius = particle_radius[i]
 
-    f = wp.vec3()
+    f = wp.vec3(0.0)
 
     # particle contact
     query = wp.hash_grid_query(grid, x, radius + max_radius + k_cohesion)
     index = int(0)
-
-    count = int(0)
 
     while wp.hash_grid_query_next(query, index):
         if (particle_flags[index] & ParticleFlags.ACTIVE) != 0 and index != i:
@@ -89,13 +87,11 @@ def eval_particle_contact(
             d = wp.length(n)
             err = d - radius - particle_radius[index]
 
-            count += 1
-
             if err <= k_cohesion:
                 n = n / d
                 vrel = v - particle_v[index]
 
-                f = f + particle_force(n, vrel, err, k_contact, k_damp, k_friction, k_mu)
+                f += particle_force(n, vrel, err, k_contact, k_damp, k_friction, k_mu)
 
     particle_f[i] = f
 
@@ -411,8 +407,8 @@ def eval_body_contact(
     contact_normal: wp.array(dtype=wp.vec3),
     contact_shape0: wp.array(dtype=int),
     contact_shape1: wp.array(dtype=int),
-    contact_thickness0: wp.array(dtype=float),
-    contact_thickness1: wp.array(dtype=float),
+    contact_margin0: wp.array(dtype=float),
+    contact_margin1: wp.array(dtype=float),
     rigid_contact_stiffness: wp.array(dtype=float),
     rigid_contact_damping: wp.array(dtype=float),
     rigid_contact_friction_scale: wp.array(dtype=float),
@@ -427,15 +423,15 @@ def eval_body_contact(
     if tid >= count:
         return
 
-    # retrieve contact thickness, compute average contact material properties
+    # retrieve contact margins, compute average contact material properties
     ke = 0.0  # contact normal force stiffness
     kd = 0.0  # damping coefficient
     kf = 0.0  # friction force stiffness
     ka = 0.0  # adhesion distance
     mu = 0.0  # friction coefficient
     mat_nonzero = 0
-    thickness_a = contact_thickness0[tid]
-    thickness_b = contact_thickness1[tid]
+    margin_a = contact_margin0[tid]
+    margin_b = contact_margin1[tid]
     shape_a = contact_shape0[tid]
     shape_b = contact_shape1[tid]
     if shape_a == shape_b:
@@ -474,8 +470,9 @@ def eval_body_contact(
         contact_mu = rigid_contact_friction_scale[tid]
         mu = mu * contact_mu if contact_mu > 0.0 else mu
 
-    # contact normal in world space
-    n = contact_normal[tid]
+    # contact normal stored as A-to-B; this spring-damper kernel uses B-to-A
+    # internally so that the existing force-application signs are preserved.
+    n = -contact_normal[tid]
     bx_a = contact_point0[tid]
     bx_b = contact_point1[tid]
     r_a = wp.vec3(0.0)
@@ -483,13 +480,13 @@ def eval_body_contact(
     if body_a >= 0:
         X_wb_a = body_q[body_a]
         X_com_a = body_com[body_a]
-        bx_a = wp.transform_point(X_wb_a, bx_a) - thickness_a * n
+        bx_a = wp.transform_point(X_wb_a, bx_a) - margin_a * n
         r_a = bx_a - wp.transform_point(X_wb_a, X_com_a)
 
     if body_b >= 0:
         X_wb_b = body_q[body_b]
         X_com_b = body_com[body_b]
-        bx_b = wp.transform_point(X_wb_b, bx_b) + thickness_b * n
+        bx_b = wp.transform_point(X_wb_b, bx_b) + margin_b * n
         r_b = bx_b - wp.transform_point(X_wb_b, X_com_b)
 
     d = wp.dot(n, bx_a - bx_b)
@@ -572,7 +569,7 @@ def eval_body_contact(
 
 
 def eval_particle_contact_forces(model: Model, state: State, particle_f: wp.array):
-    if model.particle_count > 1 and model.particle_max_radius > 0.0:
+    if model.particle_count > 1 and model.particle_grid is not None:
         wp.launch(
             kernel=eval_particle_contact,
             dim=model.particle_count,
@@ -643,8 +640,8 @@ def eval_body_contact_forces(
                 contacts.rigid_contact_normal,
                 contacts.rigid_contact_shape0,
                 contacts.rigid_contact_shape1,
-                contacts.rigid_contact_thickness0,
-                contacts.rigid_contact_thickness1,
+                contacts.rigid_contact_margin0,
+                contacts.rigid_contact_margin1,
                 contacts.rigid_contact_stiffness,
                 contacts.rigid_contact_damping,
                 contacts.rigid_contact_friction,

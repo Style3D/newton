@@ -28,11 +28,11 @@
 ###########################################################################
 import numpy as np
 import warp as wp
-import warp.render
 
 import newton
 import newton.examples
 from newton.tests.unittest_utils import most
+from newton.utils import bourke_color_map
 
 
 @wp.kernel
@@ -60,7 +60,7 @@ def step_kernel(x: wp.array(dtype=wp.vec3), grad: wp.array(dtype=wp.vec3), alpha
 
 
 class Example:
-    def __init__(self, viewer, verbose=False):
+    def __init__(self, viewer, args):
         # setup simulation parameters first
         self.fps = 60
         self.frame = 0
@@ -69,7 +69,7 @@ class Example:
         self.sim_substeps = 16
         self.sim_dt = self.frame_dt / self.sim_substeps
 
-        self.verbose = verbose
+        self.verbose = args.verbose
 
         # setup training parameters
         self.train_iter = 0
@@ -188,6 +188,11 @@ class Example:
         assert most(np.diff(self.loss_history[:-1]) < -1.0)
 
     def render(self):
+        if self.viewer.is_paused():
+            self.viewer.begin_frame(self.viewer.time)
+            self.viewer.end_frame()
+            return
+
         if self.frame > 0 and self.train_iter % 4 != 0:
             return
 
@@ -211,23 +216,24 @@ class Example:
                 f"/traj_{self.train_iter - 1}",
                 wp.array(traj_verts[0:-1], dtype=wp.vec3),
                 wp.array(traj_verts[1:], dtype=wp.vec3),
-                wp.render.bourke_color_map(0.0, 269.0, self.loss.numpy()[0]),
+                bourke_color_map(0.0, 269.0, self.loss.numpy()[0]),
             )
             self.viewer.end_frame()
 
             self.frame += 1
 
+    @staticmethod
+    def create_parser():
+        parser = newton.examples.create_parser()
+        parser.add_argument(
+            "--verbose", action="store_true", help="Print out additional status messages during execution."
+        )
+        return parser
+
 
 if __name__ == "__main__":
-    # Create parser that inherits common arguments and adds example-specific ones
-    parser = newton.examples.create_parser()
-    parser.add_argument("--verbose", action="store_true", help="Print out additional status messages during execution.")
-
-    # Parse arguments and initialize viewer
+    parser = Example.create_parser()
     viewer, args = newton.examples.init(parser)
 
-    # Create example
-    example = Example(viewer, verbose=args.verbose)
-
-    # Run example
+    example = Example(viewer, args)
     newton.examples.run(example, args)

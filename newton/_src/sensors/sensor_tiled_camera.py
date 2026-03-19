@@ -15,17 +15,24 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import warp as wp
 
-from ..geometry import ShapeFlags
+from ..geometry import GeoType, Mesh, ShapeFlags
 from ..sim import Model, State
-from .warp_raytrace import ClearData, RenderContext, RenderLightType, RenderShapeType
-
-DEFAULT_CLEAR_DATA = ClearData(0xFF666666)
+from ..utils import load_texture, normalize_texture
+from .warp_raytrace import (
+    ClearData,
+    GaussianRenderMode,
+    MeshData,
+    RenderContext,
+    RenderLightType,
+    RenderOrder,
+    TextureData,
+)
 
 
 @wp.kernel(enable_backward=False)
@@ -48,40 +55,25 @@ def convert_newton_transform(
     out_sizes[tid] = in_scale[tid]
 
 
-@wp.kernel(enable_backward=False)
-def compute_mesh_bounds(in_meshes: wp.array(dtype=wp.uint64), out_bounds: wp.array2d(dtype=wp.vec3f)):
-    tid = wp.tid()
-
-    min_point = wp.vec3(wp.inf)
-    max_point = wp.vec3(-wp.inf)
-
-    if in_meshes[tid] != 0:
-        mesh = wp.mesh_get(in_meshes[tid])
-        for i in range(mesh.points.shape[0]):
-            min_point = wp.min(min_point, mesh.points[i])
-            max_point = wp.max(max_point, mesh.points[i])
-
-    out_bounds[tid, 0] = min_point
-    out_bounds[tid, 1] = max_point
-
-
 @wp.func
 def is_supported_shape_type(shape_type: wp.int32) -> wp.bool:
-    if shape_type == RenderShapeType.BOX:
+    if shape_type == GeoType.BOX:
         return True
-    if shape_type == RenderShapeType.CAPSULE:
+    if shape_type == GeoType.CAPSULE:
         return True
-    if shape_type == RenderShapeType.CYLINDER:
+    if shape_type == GeoType.CYLINDER:
         return True
-    if shape_type == RenderShapeType.ELLIPSOID:
+    if shape_type == GeoType.ELLIPSOID:
         return True
-    if shape_type == RenderShapeType.PLANE:
+    if shape_type == GeoType.PLANE:
         return True
-    if shape_type == RenderShapeType.SPHERE:
+    if shape_type == GeoType.SPHERE:
         return True
-    if shape_type == RenderShapeType.CONE:
+    if shape_type == GeoType.CONE:
         return True
-    if shape_type == RenderShapeType.MESH:
+    if shape_type == GeoType.MESH:
+        return True
+    if shape_type == GeoType.GAUSSIAN:
         return True
     wp.printf("Unsupported shape geom type: %d\n", shape_type)
     return False
@@ -92,12 +84,9 @@ def compute_enabled_shapes(
     shape_type: wp.array(dtype=wp.int32),
     shape_flags: wp.array(dtype=wp.int32),
     out_shape_enabled: wp.array(dtype=wp.uint32),
-    out_mesh_indices: wp.array(dtype=wp.int32),
     out_shape_enabled_count: wp.array(dtype=wp.int32),
 ):
     tid = wp.tid()
-
-    out_mesh_indices[tid] = tid
 
     if not bool(shape_flags[tid] & ShapeFlags.VISIBLE):
         return
@@ -109,151 +98,92 @@ def compute_enabled_shapes(
     out_shape_enabled[index] = wp.uint32(tid)
 
 
-@wp.kernel(enable_backward=False)
-def compute_pinhole_camera_rays(
-    width: int,
-    height: int,
-    camera_fovs: wp.array(dtype=wp.float32),
-    out_rays: wp.array(dtype=wp.vec3f, ndim=4),
-):
-    camera_index, py, px = wp.tid()
-    aspect_ratio = float(width) / float(height)
-    u = (float(px) + 0.5) / float(width) - 0.5
-    v = (float(py) + 0.5) / float(height) - 0.5
-    h = wp.tan(camera_fovs[camera_index] / 2.0)
-    ray_direction_camera_space = wp.vec3f(u * 2.0 * h * aspect_ratio, -v * 2.0 * h, -1.0)
-    out_rays[camera_index, py, px, 0] = wp.vec3f(0.0)
-    out_rays[camera_index, py, px, 1] = wp.normalize(ray_direction_camera_space)
-
-
-@wp.kernel(enable_backward=False)
-def flatten_color_image(
-    color_image: wp.array(dtype=wp.uint32, ndim=3),
-    buffer: wp.array(dtype=wp.uint8, ndim=3),
-    width: wp.int32,
-    height: wp.int32,
-    num_cameras: wp.int32,
-    num_worlds_per_row: wp.int32,
-):
-    world_id, camera_id, y, x = wp.tid()
-
-    view_id = world_id * num_cameras + camera_id
-
-    row = view_id // num_worlds_per_row
-    col = view_id % num_worlds_per_row
-
-    px = col * width + x
-    py = row * height + y
-    color = color_image[world_id, camera_id, y * width + x]
-
-    buffer[py, px, 0] = wp.uint8((color >> wp.uint32(0)) & wp.uint32(0xFF))
-    buffer[py, px, 1] = wp.uint8((color >> wp.uint32(8)) & wp.uint32(0xFF))
-    buffer[py, px, 2] = wp.uint8((color >> wp.uint32(16)) & wp.uint32(0xFF))
-    buffer[py, px, 3] = wp.uint8((color >> wp.uint32(24)) & wp.uint32(0xFF))
-
-
-@wp.kernel(enable_backward=False)
-def flatten_normal_image(
-    normal_image: wp.array(dtype=wp.vec3f, ndim=3),
-    buffer: wp.array(dtype=wp.uint8, ndim=3),
-    width: wp.int32,
-    height: wp.int32,
-    num_cameras: wp.int32,
-    num_worlds_per_row: wp.int32,
-):
-    world_id, camera_id, y, x = wp.tid()
-
-    view_id = world_id * num_cameras + camera_id
-
-    row = view_id // num_worlds_per_row
-    col = view_id % num_worlds_per_row
-
-    px = col * width + x
-    py = row * height + y
-    normal = normal_image[world_id, camera_id, y * width + x] * 0.5 + wp.vec3f(0.5)
-
-    buffer[py, px, 0] = wp.uint8(normal[0] * 255.0)
-    buffer[py, px, 1] = wp.uint8(normal[1] * 255.0)
-    buffer[py, px, 2] = wp.uint8(normal[2] * 255.0)
-    buffer[py, px, 3] = wp.uint8(255)
-
-
-@wp.kernel(enable_backward=False)
-def find_depth_range(depth_image: wp.array(dtype=wp.float32, ndim=3), depth_range: wp.array(dtype=wp.float32)):
-    world_id, camera_id, yx = wp.tid()
-    depth = depth_image[world_id, camera_id, yx]
-    if depth > 0:
-        wp.atomic_min(depth_range, 0, depth)
-        wp.atomic_max(depth_range, 1, depth)
-
-
-@wp.kernel(enable_backward=False)
-def flatten_depth_image(
-    depth_image: wp.array(dtype=wp.float32, ndim=3),
-    buffer: wp.array(dtype=wp.uint8, ndim=3),
-    depth_range: wp.array(dtype=wp.float32),
-    width: wp.int32,
-    height: wp.int32,
-    num_cameras: wp.int32,
-    num_worlds_per_row: wp.int32,
-):
-    world_id, camera_id, y, x = wp.tid()
-
-    view_id = world_id * num_cameras + camera_id
-
-    row = view_id // num_worlds_per_row
-    col = view_id % num_worlds_per_row
-
-    px = col * width + x
-    py = row * height + y
-
-    value = wp.uint8(0)
-    depth = depth_image[world_id, camera_id, y * width + x]
-    if depth > 0:
-        denom = wp.max(depth_range[1] - depth_range[0], 1e-6)
-        value = wp.uint8(255.0 - ((depth - depth_range[0]) / denom) * 205.0)
-
-    buffer[py, px, 0] = value
-    buffer[py, px, 1] = value
-    buffer[py, px, 2] = value
-    buffer[py, px, 3] = value
-
-
 class SensorTiledCamera:
-    """
-    A Warp-based tiled camera sensor for raytraced rendering across multiple worlds.
+    """Warp-based tiled camera sensor for raytraced rendering across multiple worlds.
 
-    Renders color and depth images for multiple cameras and worlds, organizing the
-    output as tiles in a grid layout.
+    Renders up to five image channels per (world, camera) pair:
 
-    Args:
-        model: The Newton Model containing shapes to render.
-        num_cameras: Number of cameras per world.
-        width: Image width in pixels for each camera.
-        height: Image height in pixels for each camera.
+    - **color** -- RGBA shaded image (``uint32``).
+    - **depth** -- ray-hit distance [m] (``float32``); negative means no hit.
+    - **normal** -- surface normal at hit point (``vec3f``).
+    - **albedo** -- unshaded surface color (``uint32``).
+    - **shape_index** -- shape id per pixel (``uint32``).
+
+    All output arrays have shape ``(world_count, camera_count, height, width)``. Use the ``flatten_*`` helpers to
+    rearrange them into tiled RGBA buffers for display, with one tile per (world, camera) pair laid out in a grid.
+
+    Shapes without the ``VISIBLE`` flag are excluded.
+
+    Example:
+        ::
+
+            sensor = SensorTiledCamera(model)
+            rays = sensor.compute_pinhole_camera_rays(width, height, fov)
+            color = sensor.create_color_image_output(width, height)
+
+            # each step
+            sensor.update(state, camera_transforms, rays, color_image=color)
+
+    See :class:`Config` for optional rendering settings and :attr:`ClearData` / :attr:`DEFAULT_CLEAR_DATA` /
+    :attr:`GRAY_CLEAR_DATA` for image-clear presets.
     """
 
     RenderContext = RenderContext
     RenderLightType = RenderLightType
-    RenderShapeType = RenderShapeType
+    RenderOrder = RenderOrder
+    GaussianRenderMode = GaussianRenderMode
+    ClearData = ClearData
+
+    DEFAULT_CLEAR_DATA = ClearData()
+    GRAY_CLEAR_DATA = ClearData(clear_color=0xFF666666, clear_albedo=0xFF000000)
 
     @dataclass
-    class Options:
-        checkerboard_texture: bool = False
-        default_light: bool = False
-        default_light_shadows: bool = False
-        colors_per_world: bool = False
-        colors_per_shape: bool = False
+    class Config:
+        """Rendering configuration."""
 
-    def __init__(self, model: Model, num_cameras: int, width: int, height: int, options: Options | None = None):
+        checkerboard_texture: bool = False
+        """Apply a checkerboard texture to all shapes."""
+
+        default_light: bool = False
+        """Add a default directional light to the scene."""
+
+        default_light_shadows: bool = False
+        """Enable shadows for the default light (requires ``default_light``)."""
+
+        colors_per_world: bool = False
+        """Assign a random color palette per world."""
+
+        colors_per_shape: bool = False
+        """Assign a random color per shape (ignored when ``colors_per_world`` is True)."""
+
+        backface_culling: bool = True
+        """Cull back-facing triangles."""
+
+        enable_textures: bool = False
+        """Enable texturing."""
+
+    def __init__(self, model: Model, *, config: Config | None = None):
         self.model = model
 
+        if config is None:
+            config = SensorTiledCamera.Config()
+
         self.render_context = RenderContext(
-            width, height, False, False, True, True, self.model.num_worlds, num_cameras, True
+            world_count=self.model.world_count,
+            config=RenderContext.Config(
+                enable_global_world=True,
+                enable_textures=config.enable_textures,
+                enable_shadows=False,
+                enable_ambient_lighting=True,
+                enable_particles=True,
+                enable_backface_culling=True,
+            ),
+            device=self.model.device,
         )
-        self.render_context.mesh_ids = model.shape_source_ptr
-        self.render_context.shape_mesh_indices = wp.empty(self.model.shape_count, dtype=wp.int32)
-        self.render_context.mesh_bounds = wp.empty((self.model.shape_count, 2), dtype=wp.vec3f, ndim=2)
+        self.render_context.shape_source_ptr = model.shape_source_ptr
+        self.render_context.shape_bounds = wp.empty(
+            (self.model.shape_count, 2), dtype=wp.vec3f, ndim=2, device=self.render_context.device
+        )
 
         if model.particle_q is not None and model.particle_q.shape[0]:
             self.render_context.particles_position = model.particle_q
@@ -262,21 +192,28 @@ class SensorTiledCamera:
             if model.tri_indices is not None and model.tri_indices.shape[0]:
                 self.render_context.triangle_points = model.particle_q
                 self.render_context.triangle_indices = model.tri_indices.flatten()
-                self.render_context.enable_particles = False
+                self.render_context.config.enable_particles = False
 
-        self.render_context.shape_enabled = wp.empty(self.model.shape_count, dtype=wp.uint32)
+        self.render_context.shape_enabled = wp.empty(
+            self.model.shape_count, dtype=wp.uint32, device=self.render_context.device
+        )
         self.render_context.shape_types = model.shape_type
-        self.render_context.shape_sizes = wp.empty(self.model.shape_count, dtype=wp.vec3f)
-        self.render_context.shape_transforms = wp.empty(self.model.shape_count, dtype=wp.transformf)
-        self.render_context.shape_materials = wp.array(
-            np.full(self.model.shape_count, fill_value=-1, dtype=np.int32), dtype=wp.int32
+        self.render_context.shape_sizes = wp.empty(
+            self.model.shape_count, dtype=wp.vec3f, device=self.render_context.device
         )
-        self.render_context.shape_colors = wp.array(
-            np.full((self.model.shape_count, 4), fill_value=1.0, dtype=wp.float32), dtype=wp.vec4f
+        self.render_context.shape_transforms = wp.empty(
+            self.model.shape_count, dtype=wp.transformf, device=self.render_context.device
         )
-        self.render_context.shape_world_index = self.model.shape_world
 
-        num_enabled_shapes = wp.zeros(1, dtype=wp.int32)
+        self.render_context.shape_world_index = self.model.shape_world
+        self.render_context.gaussians_data = self.model.gaussians_data
+
+        self.__load_texture_and_mesh_data(config)
+
+        colors = [(*self.__get_shape_color(i, shape), 1.0) for i, shape in enumerate(self.model.shape_source)]
+        self.render_context.shape_colors = wp.array(colors, dtype=wp.vec4f, device=self.render_context.device)
+
+        num_enabled_shapes = wp.zeros(1, dtype=wp.int32, device=self.render_context.device)
         wp.launch(
             kernel=compute_enabled_shapes,
             dim=self.model.shape_count,
@@ -284,31 +221,29 @@ class SensorTiledCamera:
                 model.shape_type,
                 model.shape_flags,
                 self.render_context.shape_enabled,
-                self.render_context.shape_mesh_indices,
                 num_enabled_shapes,
             ],
+            device=self.render_context.device,
         )
-        self.render_context.num_shapes = int(num_enabled_shapes.numpy()[0])
+        self.render_context.shape_count_total = self.model.shape_count
+        self.render_context.shape_count_enabled = int(num_enabled_shapes.numpy()[0])
 
-        wp.launch(
-            kernel=compute_mesh_bounds,
-            dim=self.model.shape_count,
-            inputs=[self.render_context.mesh_ids, self.render_context.mesh_bounds],
-        )
+        self.render_context.utils.compute_shape_bounds()
 
-        if options is not None:
-            if options.checkerboard_texture:
-                self.assign_checkerboard_material_to_all_shapes()
-            if options.default_light:
-                self.create_default_light(options.default_light_shadows)
-            if options.colors_per_world:
-                self.assign_random_colors_per_world()
-            elif options.colors_per_shape:
-                self.assign_random_colors_per_shape()
+        self.render_context.config.enable_backface_culling = config.backface_culling
+        if config.checkerboard_texture:
+            self.assign_checkerboard_material_to_all_shapes()
+        if config.default_light:
+            self.create_default_light(config.default_light_shadows)
+        if config.colors_per_world:
+            self.assign_random_colors_per_world()
+        elif config.colors_per_shape:
+            self.assign_random_colors_per_shape()
 
-    def update_from_state(self, state: State):
-        """
-        Update data from Newton State.
+    def sync_transforms(self, state: State):
+        """Synchronize shape transforms from the simulation state.
+
+        :meth:`update` calls this automatically when *state* is not None.
 
         Args:
             state: The current simulation state containing body transforms.
@@ -325,6 +260,7 @@ class SensorTiledCamera:
                     self.render_context.shape_transforms,
                     self.render_context.shape_sizes,
                 ],
+                device=self.render_context.device,
             )
 
         if self.render_context.has_triangle_mesh:
@@ -333,38 +269,42 @@ class SensorTiledCamera:
         if self.render_context.has_particles:
             self.render_context.particles_position = state.particle_q
 
-    def render(
+    def update(
         self,
         state: State | None,
         camera_transforms: wp.array(dtype=wp.transformf, ndim=2),
         camera_rays: wp.array(dtype=wp.vec3f, ndim=4),
-        color_image: wp.array(dtype=wp.uint32, ndim=3) | None = None,
-        depth_image: wp.array(dtype=wp.float32, ndim=3) | None = None,
-        shape_index_image: wp.array(dtype=wp.uint32, ndim=3) | None = None,
-        normal_image: wp.array(dtype=wp.vec3f, ndim=3) | None = None,
+        *,
+        color_image: wp.array(dtype=wp.uint32, ndim=4) | None = None,
+        depth_image: wp.array(dtype=wp.float32, ndim=4) | None = None,
+        shape_index_image: wp.array(dtype=wp.uint32, ndim=4) | None = None,
+        normal_image: wp.array(dtype=wp.vec3f, ndim=4) | None = None,
+        albedo_image: wp.array(dtype=wp.uint32, ndim=4) | None = None,
         refit_bvh: bool = True,
         clear_data: ClearData | None = DEFAULT_CLEAR_DATA,
     ):
-        """
-        Render color and depth images for all worlds and cameras.
+        """Render output images for all worlds and cameras.
+
+        Each output array has shape ``(world_count, camera_count, height, width)`` where element
+        ``[world_id, camera_id, y, x]`` corresponds to the ray in ``camera_rays[camera_id, y, x]``. Each output
+        channel is optional -- pass None to skip that channel's rendering entirely.
 
         Args:
-            state: The current simulation state containing body transforms.
-            camera_transforms: Array of camera transforms in world space, shape (num_cameras, num_worlds).
-            camera_rays: Array of camera rays in camera space, shape (num_cameras, height, width, 2).
-            color_image: Optional output array for color data (num_worlds, num_cameras, width*height).
-                        If None, no color rendering is performed.
-            depth_image: Optional output array for depth data (num_worlds, num_cameras, width*height).
-                        If None, no depth rendering is performed.
-            shape_index_image: Optional output array for shape index data (num_worlds, num_cameras, width*height).
-                        If None, no shape index rendering is performed.
-            normal_image: Optional output array for normal data (num_worlds, num_cameras, width*height).
-                        If None, no normal rendering is performed.
-            refit_bvh: Whether to refit the BVH or not.
-            clear_data: The data to clear the image buffers with (or skip if None).
+            state: Simulation state with body transforms. If not None, calls :meth:`sync_transforms` first.
+            camera_transforms: Camera-to-world transforms, shape ``(camera_count, world_count)``.
+            camera_rays: Camera-space rays from :meth:`compute_pinhole_camera_rays`, shape
+                ``(camera_count, height, width, 2)``.
+            color_image: Output for RGBA color. None to skip.
+            depth_image: Output for ray-hit distance [m]. None to skip.
+            shape_index_image: Output for per-pixel shape id. None to skip.
+            normal_image: Output for surface normals. None to skip.
+            albedo_image: Output for unshaded surface color. None to skip.
+            refit_bvh: Refit the BVH before rendering.
+            clear_data: Values to clear output buffers with. None to skip clearing.
+                See :attr:`DEFAULT_CLEAR_DATA`, :attr:`GRAY_CLEAR_DATA`.
         """
         if state is not None:
-            self.update_from_state(state)
+            self.sync_transforms(state)
 
         self.render_context.render(
             camera_transforms,
@@ -373,239 +313,116 @@ class SensorTiledCamera:
             depth_image,
             shape_index_image,
             normal_image,
+            albedo_image,
             refit_bvh=refit_bvh,
             clear_data=clear_data,
         )
 
     def compute_pinhole_camera_rays(
-        self, camera_fovs: float | list[float] | np.ndarray | wp.array(dtype=wp.float32)
+        self, width: int, height: int, camera_fovs: float | list[float] | np.ndarray | wp.array(dtype=wp.float32)
     ) -> wp.array(dtype=wp.vec3f, ndim=4):
-        """
-        Compute camera-space ray directions for pinhole cameras.
+        """Compute camera-space ray directions for pinhole cameras.
 
-        Generates rays in camera space (origin at [0,0,0], direction normalized) for each
-        pixel in each camera based on the specified field-of-view angles.
+        Generates rays in camera space (origin at the camera center, direction normalized) for each pixel based on the
+        vertical field of view.
 
         Args:
-            camera_fovs: Array of vertical FOV angles in radians, shape (num_cameras,).
+            width: Image width [px].
+            height: Image height [px].
+            camera_fovs: Vertical FOV angles [rad], shape ``(camera_count,)``.
 
         Returns:
-            camera_rays: Array of camera rays in camera space, shape (num_cameras, height, width, 2).
+            camera_rays: Shape ``(camera_count, height, width, 2)``, dtype ``vec3f``.
         """
 
-        camera_rays = wp.empty(
-            (self.render_context.num_cameras, self.render_context.height, self.render_context.width, 2), dtype=wp.vec3f
-        )
-
         if isinstance(camera_fovs, float):
-            camera_fovs = wp.array([camera_fovs] * self.render_context.num_cameras, dtype=wp.float32)
+            camera_fovs = wp.array([camera_fovs], dtype=wp.float32, device=self.render_context.device)
         elif isinstance(camera_fovs, list):
-            assert len(camera_fovs) == self.render_context.num_cameras, (
-                "Length of camera_fovs does not match the number of cameras"
-            )
-            camera_fovs = wp.array(camera_fovs, dtype=wp.float32)
+            camera_fovs = wp.array(camera_fovs, dtype=wp.float32, device=self.render_context.device)
         elif isinstance(camera_fovs, np.ndarray):
-            assert camera_fovs.size == self.render_context.num_cameras, (
-                "Length of camera_fovs does not match the number of cameras"
-            )
-            camera_fovs = wp.array(camera_fovs, dtype=wp.float32)
-
-        wp.launch(
-            kernel=compute_pinhole_camera_rays,
-            dim=(self.render_context.num_cameras, self.render_context.height, self.render_context.width),
-            inputs=[
-                self.render_context.width,
-                self.render_context.height,
-                camera_fovs,
-                camera_rays,
-            ],
-        )
-
-        return camera_rays
-
-    def __reshape_buffer_for_flatten(self, out_buffer: wp.array | None = None, num_worlds_per_row: int | None = None):
-        num_worlds_and_cameras = self.render_context.num_worlds * self.render_context.num_cameras
-        if not num_worlds_per_row:
-            num_worlds_per_row = math.ceil(math.sqrt(num_worlds_and_cameras))
-        num_worlds_per_col = math.ceil(num_worlds_and_cameras / num_worlds_per_row)
-
-        if out_buffer is None:
-            return wp.empty(
-                (num_worlds_per_col * self.render_context.height, num_worlds_per_row * self.render_context.width, 4),
-                dtype=wp.uint8,
-            ), num_worlds_per_row
-
-        return out_buffer.reshape(
-            (num_worlds_per_col * self.render_context.height, num_worlds_per_row * self.render_context.width, 4)
-        ), num_worlds_per_row
+            camera_fovs = wp.array(camera_fovs, dtype=wp.float32, device=self.render_context.device)
+        return self.render_context.utils.compute_pinhole_camera_rays(width, height, camera_fovs)
 
     def flatten_color_image_to_rgba(
         self,
-        image: wp.array(dtype=wp.uint32, ndim=3),
+        image: wp.array(dtype=wp.uint32, ndim=4),
         out_buffer: wp.array(dtype=wp.uint8, ndim=3) | None = None,
-        num_worlds_per_row: int | None = None,
+        worlds_per_row: int | None = None,
     ):
-        """
-        Flatten rendered color image to a tiled image buffer.
+        """Flatten rendered color image to a tiled RGBA buffer.
 
-        Arranges (num_worlds x num_cameras) tiles in a grid layout. Each tile
-        shows one camera's view of one world.
+        Arranges ``(world_count * camera_count)`` tiles in a grid. Each tile shows one camera's view of one world.
 
         Args:
-            image: Color output array from render(), shape (num_worlds, num_cameras, width*height).
-            out_buffer: Optional output array
-            num_worlds_per_row: Optional number of rows
+            image: Color output from :meth:`update`, shape ``(world_count, camera_count, height, width)``.
+            out_buffer: Pre-allocated RGBA buffer. If None, allocates a new one.
+            worlds_per_row: Tiles per row in the grid. If None, picks a square-ish layout.
         """
-
-        out_buffer, num_worlds_per_row = self.__reshape_buffer_for_flatten(out_buffer, num_worlds_per_row)
-
-        wp.launch(
-            flatten_color_image,
-            (
-                self.render_context.num_worlds,
-                self.render_context.num_cameras,
-                self.render_context.height,
-                self.render_context.width,
-            ),
-            [
-                image,
-                out_buffer,
-                self.render_context.width,
-                self.render_context.height,
-                self.render_context.num_cameras,
-                num_worlds_per_row,
-            ],
-        )
-        return out_buffer
+        return self.render_context.utils.flatten_color_image_to_rgba(image, out_buffer, worlds_per_row)
 
     def flatten_normal_image_to_rgba(
         self,
-        image: wp.array(dtype=wp.vec3f, ndim=3),
+        image: wp.array(dtype=wp.vec3f, ndim=4),
         out_buffer: wp.array(dtype=wp.uint8, ndim=3) | None = None,
-        num_worlds_per_row: int | None = None,
+        worlds_per_row: int | None = None,
     ):
-        """
-        Flatten rendered normal image to a tiled image buffer.
+        """Flatten rendered normal image to a tiled RGBA buffer.
 
-        Arranges (num_worlds x num_cameras) tiles in a grid layout. Each tile
-        shows one camera's view of one world.
+        Arranges ``(world_count * camera_count)`` tiles in a grid. Each tile shows one camera's view of one world.
 
         Args:
-            image: Normal output array from render(), shape (num_worlds, num_cameras, width*height).
-            out_buffer: Optional output array
-            num_worlds_per_row: Optional number of rows
+            image: Normal output from :meth:`update`, shape ``(world_count, camera_count, height, width)``.
+            out_buffer: Pre-allocated RGBA buffer. If None, allocates a new one.
+            worlds_per_row: Tiles per row in the grid. If None, picks a square-ish layout.
         """
-
-        out_buffer, num_worlds_per_row = self.__reshape_buffer_for_flatten(out_buffer, num_worlds_per_row)
-
-        wp.launch(
-            flatten_normal_image,
-            (
-                self.render_context.num_worlds,
-                self.render_context.num_cameras,
-                self.render_context.height,
-                self.render_context.width,
-            ),
-            [
-                image,
-                out_buffer,
-                self.render_context.width,
-                self.render_context.height,
-                self.render_context.num_cameras,
-                num_worlds_per_row,
-            ],
-        )
-        return out_buffer
+        return self.render_context.utils.flatten_normal_image_to_rgba(image, out_buffer, worlds_per_row)
 
     def flatten_depth_image_to_rgba(
         self,
-        image: wp.array(dtype=wp.float32, ndim=3),
+        image: wp.array(dtype=wp.float32, ndim=4),
         out_buffer: wp.array(dtype=wp.uint8, ndim=3) | None = None,
-        num_worlds_per_row: int | None = None,
+        worlds_per_row: int | None = None,
+        depth_range: wp.array(dtype=wp.float32) | None = None,
     ):
-        """
-        Flatten rendered depth image to a tiled grayscale image buffer.
+        """Flatten rendered depth image to a tiled RGBA buffer.
 
-        Arranges (num_worlds x num_cameras) tiles in a grid. Depth values are
-        inverted (closer = brighter) and normalized to [50, 255] range. Background (depth < 0
-        or no hit) remains black.
+        Encodes depth as grayscale: inverts values (closer = brighter) and normalizes to the ``[50, 255]``
+        range. Background pixels (no hit) remain black.
 
         Args:
-            image: Depth output array from render(), shape (num_worlds, num_cameras, width*height).
-            out_buffer: Optional output array
-            num_worlds_per_row: Optional number of rows
+            image: Depth output from :meth:`update`, shape ``(world_count, camera_count, height, width)``.
+            out_buffer: Pre-allocated RGBA buffer. If None, allocates a new one.
+            worlds_per_row: Tiles per row in the grid. If None, picks a square-ish layout.
+            depth_range: Depth range to normalize to, shape ``(2,)`` ``[near, far]``. If None, computes from *image*.
         """
-
-        out_buffer, num_worlds_per_row = self.__reshape_buffer_for_flatten(out_buffer, num_worlds_per_row)
-
-        depth_range = wp.array([100000000.0, 0.0], dtype=wp.float32)
-        wp.launch(find_depth_range, image.shape, [image, depth_range])
-        wp.launch(
-            flatten_depth_image,
-            (
-                self.render_context.num_worlds,
-                self.render_context.num_cameras,
-                self.render_context.height,
-                self.render_context.width,
-            ),
-            [
-                image,
-                out_buffer,
-                depth_range,
-                self.render_context.width,
-                self.render_context.height,
-                self.render_context.num_cameras,
-                num_worlds_per_row,
-            ],
-        )
-        return out_buffer
+        return self.render_context.utils.flatten_depth_image_to_rgba(image, out_buffer, worlds_per_row, depth_range)
 
     def assign_random_colors_per_world(self, seed: int = 100):
-        """
-        Assign a random color to all shapes, per world.
+        """Assign each world a random color, applied to all its shapes.
 
         Args:
-            seed: The seed to use for the randomizer.
+            seed: Random seed.
         """
-
-        colors = np.random.default_rng(seed).random((self.model.shape_count, 4)) * 0.5 + 0.5
-        colors[:, -1] = 1.0
-        self.render_context.shape_colors = wp.array(
-            colors[self.model.shape_world.numpy() % len(colors)], dtype=wp.vec4f
-        )
+        self.render_context.utils.assign_random_colors_per_world(seed)
 
     def assign_random_colors_per_shape(self, seed: int = 100):
-        """
-        Assign a random color to all shapes.
+        """Assign a random color to each shape.
 
         Args:
-            seed: The seed to use for the randomizer.
+            seed: Random seed.
         """
-
-        colors = np.random.default_rng(seed).random((self.model.shape_count, 4)) * 0.5 + 0.5
-        colors[:, -1] = 1.0
-        self.render_context.shape_colors = wp.array(colors, dtype=wp.vec4f)
+        self.render_context.utils.assign_random_colors_per_shape(seed)
 
     def create_default_light(self, enable_shadows: bool = True):
-        """
-        Create a default directional light for the scene.
+        """Create a default directional light oriented at ``(-1, 1, -1)``.
 
-        Sets up a single directional light oriented at (-1, 1, -1) with shadow casting enabled.
+        Args:
+            enable_shadows: Enable shadow casting for this light.
         """
-
-        self.render_context.enable_shadows = enable_shadows
-        self.render_context.lights_active = wp.array([True], dtype=wp.bool)
-        self.render_context.lights_type = wp.array([RenderLightType.DIRECTIONAL], dtype=wp.int32)
-        self.render_context.lights_cast_shadow = wp.array([True], dtype=wp.bool)
-        self.render_context.lights_position = wp.array([wp.vec3f(0.0)], dtype=wp.vec3f)
-        self.render_context.lights_orientation = wp.array(
-            [wp.vec3f(-0.57735026, 0.57735026, -0.57735026)], dtype=wp.vec3f
-        )
+        self.render_context.utils.create_default_light(enable_shadows)
 
     def assign_checkerboard_material_to_all_shapes(self, resolution: int = 64, checker_size: int = 32):
-        """
-        Assign a checkerboard texture material to all shapes.
-
+        """Assign a gray checkerboard texture material to all shapes.
         Creates a gray checkerboard pattern texture and applies it to all shapes
         in the scene.
 
@@ -613,58 +430,178 @@ class SensorTiledCamera:
             resolution: Texture resolution in pixels (square texture).
             checker_size: Size of each checkerboard square in pixels.
         """
+        self.render_context.utils.assign_checkerboard_material_to_all_shapes(resolution, checker_size)
 
-        checkerboard = (
-            (np.arange(resolution) // checker_size)[:, None] + (np.arange(resolution) // checker_size)
-        ) % 2 == 0
-        pixels = np.where(checkerboard, 0xFF808080, 0xFFBFBFBF).astype(np.uint32).flatten()
+    def create_color_image_output(self, width: int, height: int, camera_count: int = 1) -> wp.array(
+        dtype=wp.uint32, ndim=4
+    ):
+        """Create a color output array for :meth:`update`.
 
-        self.render_context.enable_textures = True
-        self.render_context.texture_data = wp.array(pixels, dtype=wp.uint32)
-        self.render_context.texture_offsets = wp.array([0], dtype=wp.int32)
-        self.render_context.texture_width = wp.array([resolution], dtype=wp.int32)
-        self.render_context.texture_height = wp.array([resolution], dtype=wp.int32)
+        Args:
+            width: Image width [px].
+            height: Image height [px].
+            camera_count: Number of cameras.
 
-        self.render_context.material_texture_ids = wp.array([0], dtype=wp.int32)
-        self.render_context.material_texture_repeat = wp.array([wp.vec2f(1.0)], dtype=wp.vec2f)
-        self.render_context.material_rgba = wp.array([wp.vec4f(1.0)], dtype=wp.vec4f)
+        Returns:
+            Array of shape ``(world_count, camera_count, height, width)``, dtype ``uint32``.
+        """
+        return self.render_context.create_color_image_output(width, height, camera_count)
 
-        self.render_context.shape_materials = wp.array(
-            np.full(self.model.shape_count, fill_value=0, dtype=np.int32), dtype=wp.int32
+    def create_depth_image_output(self, width: int, height: int, camera_count: int = 1) -> wp.array(
+        dtype=wp.float32, ndim=4
+    ):
+        """Create a depth output array for :meth:`update`.
+
+        Args:
+            width: Image width [px].
+            height: Image height [px].
+            camera_count: Number of cameras.
+
+        Returns:
+            Array of shape ``(world_count, camera_count, height, width)``, dtype ``float32``.
+        """
+        return self.render_context.create_depth_image_output(width, height, camera_count)
+
+    def create_shape_index_image_output(self, width: int, height: int, camera_count: int = 1) -> wp.array(
+        dtype=wp.uint32, ndim=4
+    ):
+        """Create a shape-index output array for :meth:`update`.
+
+        Args:
+            width: Image width [px].
+            height: Image height [px].
+            camera_count: Number of cameras.
+
+        Returns:
+            Array of shape ``(world_count, camera_count, height, width)``, dtype ``uint32``.
+        """
+        return self.render_context.create_shape_index_image_output(width, height, camera_count)
+
+    def create_normal_image_output(self, width: int, height: int, camera_count: int = 1) -> wp.array(
+        dtype=wp.vec3f, ndim=4
+    ):
+        """Create a normal output array for :meth:`update`.
+
+        Args:
+            width: Image width [px].
+            height: Image height [px].
+            camera_count: Number of cameras.
+
+        Returns:
+            Array of shape ``(world_count, camera_count, height, width)``, dtype ``vec3f``.
+        """
+        return self.render_context.create_normal_image_output(width, height, camera_count)
+
+    def create_albedo_image_output(self, width: int, height: int, camera_count: int = 1) -> wp.array(
+        dtype=wp.uint32, ndim=4
+    ):
+        """Create an albedo output array for :meth:`update`.
+
+        Args:
+            width: Image width [px].
+            height: Image height [px].
+            camera_count: Number of cameras.
+
+        Returns:
+            Array of shape ``(world_count, camera_count, height, width)``, dtype ``uint32``.
+        """
+        return self.render_context.create_albedo_image_output(width, height, camera_count)
+
+    def __get_shape_color(self, index: int, shape: Any):
+        SHAPE_COLOR_MAP = [
+            (68 / 255.0, 119 / 255.0, 170 / 255.0),  # blue
+            (102 / 255.0, 204 / 255.0, 238 / 255.0),  # cyan
+            (34 / 255.0, 136 / 255.0, 51 / 255.0),  # green
+            (204 / 255.0, 187 / 255.0, 68 / 255.0),  # yellow
+            (238 / 255.0, 102 / 255.0, 119 / 255.0),  # red
+            (170 / 255.0, 51 / 255.0, 119 / 255.0),  # magenta
+            (187 / 255.0, 187 / 255.0, 187 / 255.0),  # grey
+            (238 / 255.0, 153 / 255.0, 51 / 255.0),  # orange
+            (0 / 255.0, 153 / 255.0, 136 / 255.0),  # teal
+        ]
+
+        if color := getattr(shape, "color", None):
+            return color
+        return SHAPE_COLOR_MAP[index % len(SHAPE_COLOR_MAP)]
+
+    def __load_texture_and_mesh_data(self, config: Config):
+        """Load textures and mesh data into the render context.
+
+        Deduplicates textures by hash and meshes by identity, storing each
+        unique texture as a :class:`TextureData` struct and each unique Mesh
+        as a :class:`MeshData` struct.  Per-shape index arrays map each
+        shape to its texture and mesh data entry (``-1`` when absent).
+
+        Args:
+            config: Sensor configuration controlling whether textures are enabled.
+        """
+        self.__mesh_data = []
+        self.__texture_data = []
+
+        texture_hashes = {}
+        mesh_hashes = {}
+
+        mesh_data_ids = []
+        texture_data_ids = []
+
+        for shape in self.model.shape_source:
+            if isinstance(shape, Mesh):
+                if shape.texture is not None and config.enable_textures and not config.checkerboard_texture:
+                    if shape.texture_hash not in texture_hashes:
+                        pixels = load_texture(shape.texture)
+                        if pixels is None:
+                            raise ValueError(f"Failed to load texture: {shape.texture}")
+
+                        # Normalize texture to ensure a consistent channel layout and dtype
+                        pixels = normalize_texture(pixels, require_channels=True)
+                        if pixels.dtype != np.uint8:
+                            pixels = pixels.astype(np.uint8, copy=False)
+
+                        texture_hashes[shape.texture_hash] = len(self.__texture_data)
+
+                        data = TextureData()
+                        data.texture = wp.Texture2D(
+                            pixels,
+                            filter_mode=wp.TextureFilterMode.LINEAR,
+                            address_mode=wp.TextureAddressMode.WRAP,
+                            normalized_coords=True,
+                            dtype=wp.uint8,
+                            num_channels=4,
+                            device=self.render_context.device,
+                        )
+                        data.repeat = wp.vec2f(1.0, 1.0)
+                        self.__texture_data.append(data)
+
+                    texture_data_ids.append(texture_hashes[shape.texture_hash])
+                else:
+                    texture_data_ids.append(-1)
+
+                if shape.uvs is not None or shape.normals is not None:
+                    if shape not in mesh_hashes:
+                        mesh_hashes[shape] = len(self.__mesh_data)
+
+                        data = MeshData()
+                        if shape.uvs is not None:
+                            data.uvs = wp.array(shape.uvs, dtype=wp.vec2f, device=self.render_context.device)
+                        if shape.normals is not None:
+                            data.normals = wp.array(shape.normals, dtype=wp.vec3f, device=self.render_context.device)
+                        self.__mesh_data.append(data)
+
+                    mesh_data_ids.append(mesh_hashes[shape])
+                else:
+                    mesh_data_ids.append(-1)
+            else:
+                texture_data_ids.append(-1)
+                mesh_data_ids.append(-1)
+
+        self.render_context.texture_data = wp.array(
+            self.__texture_data, dtype=TextureData, device=self.render_context.device
+        )
+        self.render_context.shape_texture_ids = wp.array(
+            texture_data_ids, dtype=wp.int32, device=self.render_context.device
         )
 
-    def create_color_image_output(self):
-        """
-        Create a Warp array for color image output.
-
-        Returns:
-            wp.array of shape (num_worlds, num_cameras, width*height) with dtype uint32.
-        """
-        return self.render_context.create_color_image_output()
-
-    def create_depth_image_output(self):
-        """
-        Create a Warp array for depth image output.
-
-        Returns:
-            wp.array of shape (num_worlds, num_cameras, width*height) with dtype float32.
-        """
-        return self.render_context.create_depth_image_output()
-
-    def create_shape_index_image_output(self):
-        """
-        Create a Warp array for shape index image output.
-
-        Returns:
-            wp.array of shape (num_worlds, num_cameras, width*height) with dtype uint32.
-        """
-        return self.render_context.create_shape_index_image_output()
-
-    def create_normal_image_output(self):
-        """
-        Create a Warp array for normal image output.
-
-        Returns:
-            wp.array of shape (num_worlds, num_cameras, width*height) with dtype vec3f.
-        """
-        return self.render_context.create_normal_image_output()
+        self.render_context.mesh_data = wp.array(self.__mesh_data, dtype=MeshData, device=self.render_context.device)
+        self.render_context.shape_mesh_data_ids = wp.array(
+            mesh_data_ids, dtype=wp.int32, device=self.render_context.device
+        )

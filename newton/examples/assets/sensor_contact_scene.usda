@@ -37,9 +37,6 @@ def Xform "env" (
         double3 xformOp:translate = (0, 0, 0.01)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
 
-        float3 physics:diagonalInertia = (10, 10, 10)
-        float physics:mass = 100
-
     }
 
     def Cube "Flap" (
@@ -70,7 +67,7 @@ def Xform "env" (
 
     def PhysicsFixedJoint "AnchorJoint" {
         rel physics:body1 = </env/Anchor>
-        point3f physics:localPos0 = (0, 0, 0)
+        point3f physics:localPos0 = (0, 0, 0.01)
         point3f physics:localPos1 = (0, 0, 0)
     }
 

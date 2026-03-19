@@ -13,10 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
 
+import time as _time
+from typing import Any
+
+import numpy as np
 import warp as wp
 
-from ..core.types import override
+import newton
+
+from ..core.types import nparray, override
 from .viewer import ViewerBase
 
 
@@ -30,28 +37,48 @@ class ViewerNull(ViewerBase):
     stub implementations for all logging and frame management methods.
     """
 
-    def __init__(self, num_frames=1000):
+    def __init__(
+        self,
+        num_frames: int = 1000,
+        benchmark: bool = False,
+        benchmark_timeout: float | None = None,
+        benchmark_start_frame: int = 3,
+    ):
         """
         Initialize a no-op Viewer that runs for a fixed number of frames.
 
         Args:
-            num_frames (int): The number of frames to run before stopping.
+            num_frames: The number of frames to run before stopping.
+            benchmark: Enable benchmark timing (FPS measurement after warmup).
+            benchmark_timeout: If set, stop after this many seconds of
+                steady-state simulation (measured after warmup). Implicitly
+                enables *benchmark*.
+            benchmark_start_frame: Number of warmup frames before benchmark
+                timing starts.
         """
         super().__init__()
 
         self.num_frames = num_frames
         self.frame_count = 0
 
+        self.benchmark = benchmark or benchmark_timeout is not None
+        self.benchmark_timeout = benchmark_timeout
+        self.benchmark_start_frame = benchmark_start_frame
+        self._bench_start_time: float | None = None
+        self._bench_frames = 0
+        self._bench_elapsed = 0.0
+
     @override
     def log_mesh(
         self,
-        name,
-        points: wp.array,
-        indices: wp.array,
-        normals: wp.array | None = None,
-        uvs: wp.array | None = None,
-        hidden=False,
-        backface_culling=True,
+        name: str,
+        points: wp.array(dtype=wp.vec3),
+        indices: wp.array(dtype=wp.int32) | wp.array(dtype=wp.uint32),
+        normals: wp.array(dtype=wp.vec3) | None = None,
+        uvs: wp.array(dtype=wp.vec2) | None = None,
+        texture: np.ndarray | str | None = None,
+        hidden: bool = False,
+        backface_culling: bool = True,
     ):
         """
         No-op implementation for logging a mesh.
@@ -62,12 +89,23 @@ class ViewerNull(ViewerBase):
             indices: Mesh indices.
             normals: Vertex normals (optional).
             uvs: Texture coordinates (optional).
+            texture: Optional texture path/URL or image array.
             hidden: Whether the mesh is hidden.
             backface_culling: Whether to enable backface culling.
         """
         pass
 
-    def log_instances(self, name, mesh, xforms, scales, colors, materials, hidden=False):
+    @override
+    def log_instances(
+        self,
+        name: str,
+        mesh: str,
+        xforms: wp.array(dtype=wp.transform) | None,
+        scales: wp.array(dtype=wp.vec3) | None,
+        colors: wp.array(dtype=wp.vec3) | None,
+        materials: wp.array(dtype=wp.vec4) | None,
+        hidden: bool = False,
+    ):
         """
         No-op implementation for logging mesh instances.
 
@@ -82,7 +120,8 @@ class ViewerNull(ViewerBase):
         """
         pass
 
-    def begin_frame(self, time):
+    @override
+    def begin_frame(self, time: float):
         """
         No-op implementation for beginning a frame.
 
@@ -91,29 +130,77 @@ class ViewerNull(ViewerBase):
         """
         pass
 
+    @override
     def end_frame(self):
         """
         Increment the frame count at the end of each frame.
         """
         self.frame_count += 1
 
+        if self.benchmark:
+            if self.frame_count == self.benchmark_start_frame:
+                wp.synchronize()
+                self._bench_start_time = _time.perf_counter()
+            elif self._bench_start_time is not None:
+                wp.synchronize()
+                self._bench_frames = self.frame_count - self.benchmark_start_frame
+                self._bench_elapsed = _time.perf_counter() - self._bench_start_time
+
+    @override
     def is_running(self) -> bool:
         """
         Check if the viewer should continue running.
 
         Returns:
-            bool: True if the frame count is less than the maximum number of frames.
+            bool: True if the frame count is less than the maximum number of frames
+            and the benchmark timeout (if any) has not been reached.
         """
-        return self.frame_count < self.num_frames
+        if self.frame_count >= self.num_frames:
+            return False
+        if (
+            self.benchmark_timeout is not None
+            and self._bench_start_time is not None
+            and self._bench_elapsed >= self.benchmark_timeout
+        ):
+            return False
+        return True
 
+    def benchmark_result(self) -> dict[str, float | int] | None:
+        """Return benchmark results, or ``None`` if benchmarking was not enabled.
+
+        Returns:
+            Dictionary with ``fps``, ``frames``, and ``elapsed`` keys,
+            or ``None`` if benchmarking is not enabled.
+        """
+        if not self.benchmark:
+            return None
+        if self._bench_frames == 0 or self._bench_elapsed == 0.0:
+            return {"fps": 0.0, "frames": 0, "elapsed": 0.0}
+        return {
+            "fps": self._bench_frames / self._bench_elapsed,
+            "frames": self._bench_frames,
+            "elapsed": self._bench_elapsed,
+        }
+
+    @override
     def close(self):
         """
         No-op implementation for closing the viewer.
         """
         pass
 
-    # Not implemented yet - placeholder methods from ViewerBase
-    def log_lines(self, name, starts, ends, colors, width: float = 0.01, hidden=False):
+    @override
+    def log_lines(
+        self,
+        name: str,
+        starts: wp.array(dtype=wp.vec3) | None,
+        ends: wp.array(dtype=wp.vec3) | None,
+        colors: (
+            wp.array(dtype=wp.vec3) | wp.array(dtype=wp.float32) | tuple[float, float, float] | list[float] | None
+        ),
+        width: float = 0.01,
+        hidden: bool = False,
+    ):
         """
         No-op implementation for logging lines.
 
@@ -122,11 +209,22 @@ class ViewerNull(ViewerBase):
             starts: Line start points.
             ends: Line end points.
             colors: Line colors.
+            width: Line width hint.
             hidden: Whether the lines are hidden.
         """
         pass
 
-    def log_points(self, name, points, radii, colors, width: float = 0.01, hidden=False):
+    @override
+    def log_points(
+        self,
+        name: str,
+        points: wp.array(dtype=wp.vec3) | None,
+        radii: wp.array(dtype=wp.float32) | float | None = None,
+        colors: (
+            wp.array(dtype=wp.vec3) | wp.array(dtype=wp.float32) | tuple[float, float, float] | list[float] | None
+        ) = None,
+        hidden: bool = False,
+    ):
         """
         No-op implementation for logging points.
 
@@ -139,7 +237,8 @@ class ViewerNull(ViewerBase):
         """
         pass
 
-    def log_array(self, name, array):
+    @override
+    def log_array(self, name: str, array: wp.array(dtype=Any) | nparray):
         """
         No-op implementation for logging a generic array.
 
@@ -149,12 +248,22 @@ class ViewerNull(ViewerBase):
         """
         pass
 
-    def log_scalar(self, name, value):
+    @override
+    def log_scalar(self, name: str, value: int | float | bool | np.number):
         """
         No-op implementation for logging a scalar value.
 
         Args:
             name: Name of the scalar.
             value: The scalar value.
+        """
+        pass
+
+    @override
+    def apply_forces(self, state: newton.State):
+        """Null backend does not apply interactive forces.
+
+        Args:
+            state: Current simulation state.
         """
         pass

@@ -81,9 +81,9 @@ def add_example_test(
 ):
     """Registers a Newton example to run on ``devices`` as a TestCase."""
 
-    # verify the module exists
-    file_exists = os.path.exists(f"newton/examples/{name.replace('.', '/')}.py")
-    if not file_exists:
+    # verify the module exists (use package-relative path so this works from any CWD)
+    _examples_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "examples")
+    if not os.path.exists(os.path.join(_examples_dir, f"{name.replace('.', '/')}.py")):
         raise ValueError(f"Example {name} does not exist")
 
     if test_options is None:
@@ -103,7 +103,7 @@ def add_example_test(
         torch_required = options.pop("torch_required", False)
         if torch_required:
             try:
-                import torch  # noqa: PLC0415
+                import torch
 
                 if wp.get_device(device).is_cuda and not torch.cuda.is_available():
                     # Ensure torch has CUDA support
@@ -140,7 +140,7 @@ def add_example_test(
             command = [sys.executable]
 
         # Append Warp commands
-        command.extend(["-m", f"newton.examples.{name}", "--device", str(device), "--test"])
+        command.extend(["-m", f"newton.examples.{name}", "--device", str(device), "--test", "--quiet"])
 
         if not use_viewer:
             stage_path = (
@@ -159,15 +159,12 @@ def add_example_test(
                 except OSError:
                     pass
         else:
-            # new-style example, setup viewer type and output path
-            if USD_AVAILABLE:
-                stage_path = os.path.join(
-                    os.path.dirname(__file__), f"outputs/{name}_{sanitize_identifier(device)}.usd"
-                )
-                command.extend(["--viewer", "usd", "--output-path", stage_path])
-            else:
-                stage_path = "None"
-                command.extend(["--viewer", "null"])
+            # new-style example, use null viewer for tests (no disk I/O needed)
+            stage_path = "None"
+            command.extend(["--viewer", "null"])
+            # Remove viewer/stage_path from options so they can't override the null viewer
+            options.pop("viewer", None)
+            options.pop("stage_path", None)
 
         command.extend(_build_command_line_options(options))
 
@@ -192,8 +189,8 @@ def add_example_test(
             msg=f"Failed with return code {result.returncode}, command: {' '.join(command)}\n\nOutput:\n{result.stdout}\n{result.stderr}",
         )
 
-        # If the test succeeded, try to clean up the output by default
-        if stage_path and result.returncode == 0:
+        # Clean up output file for old-style examples that may have created one
+        if stage_path and stage_path != "None" and result.returncode == 0:
             try:
                 os.remove(stage_path)
             except OSError:
@@ -218,9 +215,20 @@ add_example_test(
     name="basic.example_basic_urdf",
     devices=test_devices,
     test_options={"num-frames": 200},
-    test_options_cpu={"num_worlds": 16},
-    test_options_cuda={"num_worlds": 64},
+    test_options_cpu={"world_count": 16},
+    test_options_cuda={"world_count": 64},
     use_viewer=True,
+    test_suffix="xpbd",
+)
+add_example_test(
+    TestBasicExamples,
+    name="basic.example_basic_urdf",
+    devices=test_devices,
+    test_options={"num-frames": 200, "solver": "vbd"},
+    test_options_cpu={"world_count": 16},
+    test_options_cuda={"world_count": 64},
+    use_viewer=True,
+    test_suffix="vbd",
 )
 
 add_example_test(TestBasicExamples, name="basic.example_basic_viewer", devices=test_devices, use_viewer=True)
@@ -242,20 +250,6 @@ class TestCableExamples(unittest.TestCase):
 
 add_example_test(
     TestCableExamples,
-    name="cable.example_cable_bend",
-    devices=test_devices,
-    use_viewer=True,
-    test_options={"num-frames": 20},
-)
-add_example_test(
-    TestCableExamples,
-    name="cable.example_cable_bend_damping",
-    devices=test_devices,
-    use_viewer=True,
-    test_options={"num-frames": 20},
-)
-add_example_test(
-    TestCableExamples,
     name="cable.example_cable_twist",
     devices=test_devices,
     use_viewer=True,
@@ -263,7 +257,14 @@ add_example_test(
 )
 add_example_test(
     TestCableExamples,
-    name="cable.example_cable_helix",
+    name="cable.example_cable_y_junction",
+    devices=test_devices,
+    use_viewer=True,
+    test_options={"num-frames": 20},
+)
+add_example_test(
+    TestCableExamples,
+    name="cable.example_cable_bundle_hysteresis",
     devices=test_devices,
     use_viewer=True,
     test_options={"num-frames": 20},
@@ -285,7 +286,7 @@ add_example_test(
     TestClothExamples,
     name="cloth.example_cloth_bending",
     devices=test_devices,
-    test_options={"num-frames": 200},
+    test_options={"num-frames": 400},
     use_viewer=True,
 )
 add_example_test(
@@ -336,6 +337,13 @@ add_example_test(
     test_options={"num-frames": 100},
     use_viewer=True,
 )
+add_example_test(
+    TestClothExamples,
+    name="cloth.example_cloth_rollers",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 200},
+    use_viewer=True,
+)
 
 
 class TestRobotExamples(unittest.TestCase):
@@ -381,14 +389,6 @@ add_example_test(
 )
 add_example_test(
     TestRobotExamples,
-    name="robot.example_robot_humanoid",
-    devices=cuda_test_devices,
-    test_options={"num-frames": 500},
-    test_options_cpu={"num-frames": 10},
-    use_viewer=True,
-)
-add_example_test(
-    TestRobotExamples,
     name="robot.example_robot_ur10",
     devices=test_devices,
     test_options={"usd_required": True, "num-frames": 500},
@@ -406,7 +406,7 @@ add_example_test(
     TestRobotExamples,
     name="robot.example_robot_panda_hydro",
     devices=cuda_test_devices,
-    test_options={"usd_required": True, "num-frames": 600},
+    test_options={"usd_required": True, "num-frames": 720},
     use_viewer=True,
 )
 
@@ -501,16 +501,8 @@ add_example_test(TestIKExamples, name="ik.example_ik_custom", devices=cuda_test_
 
 add_example_test(
     TestIKExamples,
-    name="ik.example_ik_benchmark",
-    devices=test_devices,
-    test_options_cpu={"batch_sizes": [1, 10]},
-    use_viewer=True,
-)
-
-add_example_test(
-    TestIKExamples,
     name="ik.example_ik_cube_stacking",
-    test_options_cuda={"num-worlds": 16, "cube-count": 2, "num-frames": 1400},  # "cube-count": 3, "num-frames": 2000
+    test_options_cuda={"world-count": 16, "num-frames": 2000},
     devices=cuda_test_devices,
     use_viewer=True,
 )
@@ -539,6 +531,14 @@ add_example_test(
 add_example_test(
     TestSelectionAPIExamples,
     name="selection.example_selection_materials",
+    devices=test_devices,
+    test_options={"num-frames": 100},
+    test_options_cpu={"num-frames": 10},
+    use_viewer=True,
+)
+add_example_test(
+    TestSelectionAPIExamples,
+    name="selection.example_selection_multiple",
     devices=test_devices,
     test_options={"num-frames": 100},
     test_options_cpu={"num-frames": 10},
@@ -625,6 +625,14 @@ add_example_test(
     use_viewer=True,
 )
 
+add_example_test(
+    TestSensorExamples,
+    name="sensors.example_sensor_imu",
+    devices=test_devices,
+    test_options={"num-frames": 200},  # allow cubes to settle
+    use_viewer=True,
+)
+
 
 class TestMPMExamples(unittest.TestCase):
     pass
@@ -634,7 +642,7 @@ add_example_test(
     TestMPMExamples,
     name="mpm.example_mpm_granular",
     devices=cuda_test_devices,
-    test_options={"viewer": "null", "num-frames": 100},
+    test_options={"num-frames": 100},
     use_viewer=True,
 )
 
@@ -642,7 +650,7 @@ add_example_test(
     TestMPMExamples,
     name="mpm.example_mpm_multi_material",
     devices=cuda_test_devices,
-    test_options={"viewer": "null", "num-frames": 10},
+    test_options={"num-frames": 10},
     use_viewer=True,
 )
 
@@ -650,7 +658,7 @@ add_example_test(
     TestMPMExamples,
     name="mpm.example_mpm_grain_rendering",
     devices=cuda_test_devices,
-    test_options={"viewer": "null", "num-frames": 10},
+    test_options={"num-frames": 10},
     use_viewer=True,
 )
 
@@ -658,9 +666,93 @@ add_example_test(
     TestMPMExamples,
     name="mpm.example_mpm_twoway_coupling",
     devices=cuda_test_devices,
-    test_options={"viewer": "null", "num-frames": 80},
+    test_options={"num-frames": 80},
     use_viewer=True,
 )
+
+
+add_example_test(
+    TestBasicExamples,
+    name="basic.example_basic_plotting",
+    devices=test_devices,
+    test_options={"num-frames": 200},
+    use_viewer=True,
+)
+
+
+class TestContactsExamples(unittest.TestCase):
+    pass
+
+
+add_example_test(
+    TestContactsExamples,
+    name="contacts.example_nut_bolt_sdf",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 120, "world-count": 1},
+    use_viewer=True,
+)
+add_example_test(
+    TestContactsExamples,
+    name="contacts.example_nut_bolt_hydro",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 120, "world-count": 1},
+    use_viewer=True,
+)
+add_example_test(
+    TestContactsExamples,
+    name="contacts.example_brick_stacking",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 1200},
+    use_viewer=True,
+)
+add_example_test(
+    TestContactsExamples,
+    name="contacts.example_pyramid",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 120, "num-pyramids": 3, "pyramid-size": 5},
+    use_viewer=True,
+)
+
+
+class TestMultiphysicsExamples(unittest.TestCase):
+    pass
+
+
+add_example_test(
+    TestMultiphysicsExamples,
+    name="multiphysics.example_softbody_gift",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 200},
+    use_viewer=True,
+)
+add_example_test(
+    TestMultiphysicsExamples,
+    name="cloth.example_cloth_poker_cards",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 30},
+    use_viewer=True,
+)
+add_example_test(
+    TestMultiphysicsExamples,
+    name="multiphysics.example_softbody_dropping_to_cloth",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 200},
+    use_viewer=True,
+)
+
+
+class TestSoftbodyExamples(unittest.TestCase):
+    pass
+
+
+add_example_test(
+    TestSoftbodyExamples,
+    name="softbody.example_softbody_hanging",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 120},
+    use_viewer=True,
+)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

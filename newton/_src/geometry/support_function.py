@@ -21,9 +21,8 @@ geometric primitives. A support mapping finds the furthest point of a shape in a
 given direction, which is a fundamental operation for collision detection algorithms
 like GJK, MPR, and EPA.
 
-The support mapping operates in the shape's local coordinate frame and returns:
-- The support point (furthest point in the given direction)
-- A feature ID that identifies which geometric feature (vertex, edge, face) the point lies on
+The support mapping operates in the shape's local coordinate frame and returns the
+support point (furthest point in the given direction).
 
 Supported primitives:
 - Box (axis-aligned rectangular prism)
@@ -110,11 +109,9 @@ class GenericShapeData:
 
 
 @wp.func
-def support_map(
-    geom: GenericShapeData, direction: wp.vec3, data_provider: SupportMapDataProvider
-) -> tuple[wp.vec3, int]:
+def support_map(geom: GenericShapeData, direction: wp.vec3, data_provider: SupportMapDataProvider) -> wp.vec3:
     """
-    Return the support point of a primitive in its local frame, with a feature id.
+    Return the support point of a primitive in its local frame.
 
     Conventions for `geom.scale` and `geom.auxiliary`:
     - BOX: half-extents in x/y/z
@@ -128,141 +125,113 @@ def support_map(
     - TRIANGLE: scale contains vector B-A, auxiliary contains vector C-A (relative to vertex A at origin)
     """
 
-    # handle zero direction robustly
     eps = 1.0e-12
-    dir_len_sq = wp.length_sq(direction)
-    dir_safe = wp.vec3(1.0, 0.0, 0.0)
-    if dir_len_sq > eps:
-        dir_safe = direction
 
     result = wp.vec3(0.0, 0.0, 0.0)
-    feature_id = int(0)
 
-    if geom.shape_type == int(GeoType.CONVEX_MESH):
+    if geom.shape_type == GeoType.CONVEX_MESH:
         # Convex hull support: find the furthest point in the direction
         mesh_ptr = unpack_mesh_ptr(geom.auxiliary)
         mesh = wp.mesh_get(mesh_ptr)
 
-        # The shape scale is stored in geom.scale
         mesh_scale = geom.scale
-
-        # Find the vertex with the maximum dot product with the direction
-        max_dot = float(-1.0e10)
-        best_vertex = wp.vec3(0.0, 0.0, 0.0)
-        best_idx = int(0)
-
         num_verts = mesh.points.shape[0]
 
+        # Pre-scale direction: dot(scale*v, d) == dot(v, scale*d)
+        # This moves the per-vertex cw_mul out of the loop (only 1 at the end)
+        scaled_dir = wp.cw_mul(direction, mesh_scale)
+
+        max_dot = float(-1.0e10)
+        best_idx = int(0)
         for i in range(num_verts):
-            # Get vertex position (applying scale)
-            vertex = wp.cw_mul(mesh.points[i], mesh_scale)
-
-            # Compute dot product with direction
-            dot_val = wp.dot(vertex, dir_safe)
-
-            # Track the maximum
+            dot_val = wp.dot(mesh.points[i], scaled_dir)
             if dot_val > max_dot:
                 max_dot = dot_val
-                best_vertex = vertex
                 best_idx = i
-        result = best_vertex
-        feature_id = best_idx
+        result = wp.cw_mul(mesh.points[best_idx], mesh_scale)
 
-    elif geom.shape_type == int(GeoTypeEx.TRIANGLE):
+    elif geom.shape_type == GeoTypeEx.TRIANGLE:
         # Triangle vertices: a at origin, b at scale, c at auxiliary
         tri_a = wp.vec3(0.0, 0.0, 0.0)
         tri_b = geom.scale
         tri_c = geom.auxiliary
 
         # Compute dot products with direction for each vertex
-        dot_a = wp.dot(tri_a, dir_safe)
-        dot_b = wp.dot(tri_b, dir_safe)
-        dot_c = wp.dot(tri_c, dir_safe)
+        dot_a = wp.dot(tri_a, direction)
+        dot_b = wp.dot(tri_b, direction)
+        dot_c = wp.dot(tri_c, direction)
 
         # Find the vertex with maximum dot product (furthest in the direction)
         if dot_a >= dot_b and dot_a >= dot_c:
             result = tri_a
-            feature_id = 0  # vertex A
         elif dot_b >= dot_c:
             result = tri_b
-            feature_id = 1  # vertex B
         else:
             result = tri_c
-            feature_id = 2  # vertex C
-    elif geom.shape_type == int(GeoType.BOX):
-        sx = 1.0 if dir_safe[0] >= 0.0 else -1.0
-        sy = 1.0 if dir_safe[1] >= 0.0 else -1.0
-        sz = 1.0 if dir_safe[2] >= 0.0 else -1.0
+    elif geom.shape_type == GeoType.BOX:
+        sx = 1.0 if direction[0] >= 0.0 else -1.0
+        sy = 1.0 if direction[1] >= 0.0 else -1.0
+        sz = 1.0 if direction[2] >= 0.0 else -1.0
 
         result = wp.vec3(sx * geom.scale[0], sy * geom.scale[1], sz * geom.scale[2])
 
-        # Bit mask consistent with reference: x->4, y->2, z->1
-        feature_id = 0
-        if sx >= 0.0:
-            feature_id |= 4
-        if sy >= 0.0:
-            feature_id |= 2
-        if sz >= 0.0:
-            feature_id |= 1
-
-    elif geom.shape_type == int(GeoType.SPHERE):
+    elif geom.shape_type == GeoType.SPHERE:
         radius = geom.scale[0]
+        dir_len_sq = wp.length_sq(direction)
         if dir_len_sq > eps:
-            n = wp.normalize(dir_safe)
+            n = wp.normalize(direction)
         else:
             n = wp.vec3(1.0, 0.0, 0.0)
         result = n * radius
-        feature_id = 0
 
-    elif geom.shape_type == int(GeoType.CAPSULE):
+    elif geom.shape_type == GeoType.CAPSULE:
         radius = geom.scale[0]
         half_height = geom.scale[1]
 
         # Capsule = segment + sphere (adapted from C# code to Z-axis convention)
         # Sphere part: support in normalized direction
+        dir_len_sq = wp.length_sq(direction)
         if dir_len_sq > eps:
-            n = wp.normalize(dir_safe)
+            n = wp.normalize(direction)
         else:
             n = wp.vec3(1.0, 0.0, 0.0)
         result = n * radius
 
         # Segment endpoints are at (0, 0, +half_height) and (0, 0, -half_height)
         # Use sign of Z-component to pick the correct endpoint
-        if dir_safe[2] >= 0.0:
+        if direction[2] >= 0.0:
             result = result + wp.vec3(0.0, 0.0, half_height)
-            feature_id = 1  # top cap
         else:
             result = result + wp.vec3(0.0, 0.0, -half_height)
-            feature_id = 2  # bottom cap
 
-    elif geom.shape_type == int(GeoType.ELLIPSOID):
+    elif geom.shape_type == GeoType.ELLIPSOID:
         # Ellipsoid support for semi-axes a, b, c in direction d:
         # p* = (a^2 dx, b^2 dy, c^2 dz) / sqrt((a dx)^2 + (b dy)^2 + (c dz)^2)
         a = geom.scale[0]
         b = geom.scale[1]
         c = geom.scale[2]
+        dir_len_sq = wp.length_sq(direction)
         if dir_len_sq > eps:
-            adx = a * dir_safe[0]
-            bdy = b * dir_safe[1]
-            cdz = c * dir_safe[2]
+            adx = a * direction[0]
+            bdy = b * direction[1]
+            cdz = c * direction[2]
             denom_sq = adx * adx + bdy * bdy + cdz * cdz
             if denom_sq > eps:
                 denom = wp.sqrt(denom_sq)
                 result = wp.vec3(
-                    (a * a) * dir_safe[0] / denom, (b * b) * dir_safe[1] / denom, (c * c) * dir_safe[2] / denom
+                    (a * a) * direction[0] / denom, (b * b) * direction[1] / denom, (c * c) * direction[2] / denom
                 )
             else:
                 result = wp.vec3(a, 0.0, 0.0)
         else:
             result = wp.vec3(a, 0.0, 0.0)
-        feature_id = 0
 
-    elif geom.shape_type == int(GeoType.CYLINDER):
+    elif geom.shape_type == GeoType.CYLINDER:
         radius = geom.scale[0]
         half_height = geom.scale[1]
 
         # Cylinder support: project direction to XY plane for lateral surface
-        dir_xy = wp.vec3(dir_safe[0], dir_safe[1], 0.0)
+        dir_xy = wp.vec3(direction[0], direction[1], 0.0)
         dir_xy_len_sq = wp.length_sq(dir_xy)
 
         if dir_xy_len_sq > eps:
@@ -272,17 +241,14 @@ def support_map(
             lateral_point = wp.vec3(radius, 0.0, 0.0)
 
         # Choose between top cap, bottom cap, or lateral surface
-        if dir_safe[2] > 0.0:
+        if direction[2] > 0.0:
             result = wp.vec3(lateral_point[0], lateral_point[1], half_height)
-            feature_id = 1  # top cap
-        elif dir_safe[2] < 0.0:
+        elif direction[2] < 0.0:
             result = wp.vec3(lateral_point[0], lateral_point[1], -half_height)
-            feature_id = 2  # bottom cap
         else:
             result = lateral_point
-            feature_id = 0  # lateral surface
 
-    elif geom.shape_type == int(GeoType.CONE):
+    elif geom.shape_type == GeoType.CONE:
         radius = geom.scale[0]
         half_height = geom.scale[1]
 
@@ -290,50 +256,126 @@ def support_map(
         # Using slope k = radius / (2*half_height), the optimal support is:
         #   apex if dz >= k * ||d_xy||, otherwise base rim in d_xy direction.
         apex = wp.vec3(0.0, 0.0, half_height)
-        dir_xy = wp.vec3(dir_safe[0], dir_safe[1], 0.0)
+        dir_xy = wp.vec3(direction[0], direction[1], 0.0)
         dir_xy_len = wp.length(dir_xy)
         k = radius / (2.0 * half_height) if half_height > eps else 0.0
 
         if dir_xy_len <= eps:
             # Purely vertical direction
-            if dir_safe[2] >= 0.0:
+            if direction[2] >= 0.0:
                 result = apex
-                feature_id = 1  # apex
             else:
                 result = wp.vec3(radius, 0.0, -half_height)
-                feature_id = 2  # base edge
         else:
-            if dir_safe[2] >= k * dir_xy_len:
+            if direction[2] >= k * dir_xy_len:
                 result = apex
-                feature_id = 1  # apex
             else:
                 n_xy = dir_xy / dir_xy_len
                 result = wp.vec3(n_xy[0] * radius, n_xy[1] * radius, -half_height)
-                feature_id = 2  # base edge
 
-    elif geom.shape_type == int(GeoType.PLANE):
+    elif geom.shape_type == GeoType.PLANE:
         # Finite plane support: rectangular plane in XY, extents in scale[0] (half-width X) and scale[1] (half-length Y)
         # The plane lies at z=0 with normal along +Z
         half_width = geom.scale[0]
         half_length = geom.scale[1]
 
         # Clamp the direction to the plane boundaries
-        sx = 1.0 if dir_safe[0] >= 0.0 else -1.0
-        sy = 1.0 if dir_safe[1] >= 0.0 else -1.0
+        sx = 1.0 if direction[0] >= 0.0 else -1.0
+        sy = 1.0 if direction[1] >= 0.0 else -1.0
 
         # The support point is at the corner in the XY plane (z=0)
         result = wp.vec3(sx * half_width, sy * half_length, 0.0)
 
-        # Feature ID based on which corner
-        feature_id = 0
-        if sx >= 0.0:
-            feature_id |= 1
-        if sy >= 0.0:
-            feature_id |= 2
-
     else:
-        # Unhandled type: return origin and feature 0
+        # Unhandled type: return origin
         result = wp.vec3(0.0, 0.0, 0.0)
-        feature_id = 0
 
-    return result, feature_id
+    return result
+
+
+@wp.func
+def support_map_lean(geom: GenericShapeData, direction: wp.vec3, data_provider: SupportMapDataProvider) -> wp.vec3:
+    """
+    Lean support function for common shape types only: CONVEX_MESH, BOX, SPHERE.
+
+    This is a specialized version of support_map with reduced code size to improve
+    GPU instruction cache utilization. It omits support for CAPSULE, ELLIPSOID,
+    CYLINDER, CONE, PLANE, and TRIANGLE shapes.
+    """
+    result = wp.vec3(0.0, 0.0, 0.0)
+
+    if geom.shape_type == GeoType.CONVEX_MESH:
+        mesh_ptr = unpack_mesh_ptr(geom.auxiliary)
+        mesh = wp.mesh_get(mesh_ptr)
+        scaled_dir = wp.cw_mul(direction, geom.scale)
+        max_dot = float(-1.0e10)
+        best_idx = int(0)
+        for i in range(mesh.points.shape[0]):
+            dot_val = wp.dot(mesh.points[i], scaled_dir)
+            if dot_val > max_dot:
+                max_dot = dot_val
+                best_idx = i
+        result = wp.cw_mul(mesh.points[best_idx], geom.scale)
+
+    elif geom.shape_type == GeoType.BOX:
+        sx = 1.0 if direction[0] >= 0.0 else -1.0
+        sy = 1.0 if direction[1] >= 0.0 else -1.0
+        sz = 1.0 if direction[2] >= 0.0 else -1.0
+        result = wp.vec3(sx * geom.scale[0], sy * geom.scale[1], sz * geom.scale[2])
+
+    elif geom.shape_type == GeoType.SPHERE:
+        radius = geom.scale[0]
+        dir_len_sq = wp.length_sq(direction)
+        if dir_len_sq > 1.0e-12:
+            n = wp.normalize(direction)
+        else:
+            n = wp.vec3(1.0, 0.0, 0.0)
+        result = n * radius
+
+    return result
+
+
+@wp.func
+def extract_shape_data(
+    shape_idx: int,
+    shape_transform: wp.array(dtype=wp.transform),
+    shape_types: wp.array(dtype=int),
+    shape_data: wp.array(dtype=wp.vec4),  # scale (xyz), margin_offset (w) or other data
+    shape_source: wp.array(dtype=wp.uint64),
+):
+    """
+    Extract shape data from the narrow phase API arrays.
+
+    Args:
+        shape_idx: Index of the shape
+        shape_transform: World space transforms (already computed)
+        shape_types: Shape types
+        shape_data: Shape data (vec4 - scale xyz, margin_offset w)
+        shape_source: Source pointers (mesh IDs etc.)
+
+    Returns:
+        tuple: (position, orientation, shape_data, scale, margin_offset)
+    """
+    # Get shape's world transform (already in world space)
+    X_ws = shape_transform[shape_idx]
+
+    position = wp.transform_get_translation(X_ws)
+    orientation = wp.transform_get_rotation(X_ws)
+
+    # Extract scale and margin offset from shape_data.
+    # shape_data stores scale in xyz and margin offset in w.
+    data = shape_data[shape_idx]
+    scale = wp.vec3(data[0], data[1], data[2])
+    margin_offset = data[3]
+
+    # Create generic shape data
+    result = GenericShapeData()
+    result.shape_type = shape_types[shape_idx]
+    result.scale = scale
+    result.auxiliary = wp.vec3(0.0, 0.0, 0.0)
+
+    # For CONVEX_MESH, pack the mesh pointer into auxiliary
+    if shape_types[shape_idx] == GeoType.CONVEX_MESH:
+        result.auxiliary = pack_mesh_ptr(shape_source[shape_idx])
+
+    return position, orientation, result, scale, margin_offset

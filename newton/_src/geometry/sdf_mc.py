@@ -27,6 +27,8 @@ triangles per voxel along the zero-crossing.
 import numpy as np
 import warp as wp
 
+from newton._src.core.types import MAXVAL
+
 #: Corner values for a single voxel (8 corners)
 vec8f = wp.types.vector(length=8, dtype=wp.float32)
 
@@ -60,9 +62,9 @@ def get_mc_tables(device):
         ]
     )
 
-    tri_range_table = wp.marching_cubes._get_mc_case_to_tri_range_table(device)
-    tri_local_inds_table = wp.marching_cubes._get_mc_tri_local_inds_table(device)
-    corner_offsets_table = wp.array(wp.marching_cubes.mc_cube_corner_offsets, dtype=wp.vec3ub, device=device)
+    tri_range_table = wp._src.marching_cubes._get_mc_case_to_tri_range_table(device)
+    tri_local_inds_table = wp._src.marching_cubes._get_mc_tri_local_inds_table(device)
+    corner_offsets_table = wp.array(wp._src.marching_cubes.mc_cube_corner_offsets, dtype=wp.vec3ub, device=device)
     edge_to_verts_table = wp.array(edge_to_verts, dtype=wp.vec2ub, device=device)
 
     # Create flattened table:
@@ -106,16 +108,20 @@ def get_triangle_fraction(vert_depths: wp.vec3f, num_inside: wp.int32) -> wp.flo
     if num_inside == 0:
         return 0.0
 
+    # Find the vertex with different inside/outside status
+    # With standard convention: negative depth = inside (penetrating)
     idx = wp.int32(0)
     if num_inside == 1:
-        if vert_depths[1] > 0.0:
+        # Find the one vertex that IS inside (negative depth)
+        if vert_depths[1] < 0.0:
             idx = 1
-        elif vert_depths[2] > 0.0:
+        elif vert_depths[2] < 0.0:
             idx = 2
     else:  # num_inside == 2
-        if vert_depths[1] <= 0.0:
+        # Find the one vertex that is NOT inside (non-negative depth)
+        if vert_depths[1] >= 0.0:
             idx = 1
-        elif vert_depths[2] <= 0.0:
+        elif vert_depths[2] >= 0.0:
             idx = 2
 
     d0 = vert_depths[idx]
@@ -158,7 +164,7 @@ def mc_calc_face(
         - area: Triangle area scaled by fraction inside the object
         - normal: Outward-facing unit normal
         - center: Triangle centroid in world space
-        - penetration_depth: Average depth of vertices below surface
+        - penetration_depth: Average SDF depth (negative = penetrating, standard convention)
         - vertices: 3x3 matrix with vertex positions as rows
     """
     face_verts = wp.mat33f()
@@ -183,9 +189,9 @@ def mc_calc_face(
         p_scaled = wp.volume_index_to_world(sdf_a, vol_idx)
         face_verts[vi] = p_scaled
         depth = wp.volume_sample_f(sdf_a, vol_idx, wp.Volume.LINEAR)
-        if depth >= wp.inf or wp.isnan(depth):
+        if depth >= wp.static(MAXVAL * 0.99) or wp.isnan(depth):
             depth = 0.0
-        vert_depths[vi] = -depth
+        vert_depths[vi] = depth  # Keep SDF convention: negative = inside/penetrating
         if depth < 0.0:
             num_inside += 1
 

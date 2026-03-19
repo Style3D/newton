@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 import inspect
 import typing as _t
 import unittest
@@ -112,6 +113,14 @@ class TestApi(unittest.TestCase):
         from newton._src.utils.import_usd import parse_usd  # noqa: PLC0415
 
         _check_builder_method_matches_importer_function_signature(parse_usd, ModelBuilder.add_usd)
+
+    def test_tetmesh_create_from_usd_docstring_parity(self):
+        from newton import TetMesh  # noqa: PLC0415
+        from newton._src.usd.utils import get_tetmesh  # noqa: PLC0415
+
+        doc_func = "\n".join(line.strip() for line in (get_tetmesh.__doc__ or "").splitlines()).strip()
+        doc_method = "\n".join(line.strip() for line in (TetMesh.create_from_usd.__doc__ or "").splitlines()).strip()
+        assert doc_func == doc_method, "Docstring mismatch between get_tetmesh and TetMesh.create_from_usd"
 
 
 if __name__ == "__main__":

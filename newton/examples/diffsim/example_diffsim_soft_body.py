@@ -26,14 +26,15 @@
 # Command: python -m newton.examples diffsim_soft_body
 #
 ###########################################################################
+
 import numpy as np
 import warp as wp
 import warp.optim
-import warp.render
 
 import newton
 import newton.examples
 from newton.tests.unittest_utils import most
+from newton.utils import bourke_color_map
 
 
 @wp.kernel
@@ -76,7 +77,7 @@ def enforce_constraint_kernel(lower_bound: wp.float32, upper_bound: wp.float32, 
 
 
 class Example:
-    def __init__(self, viewer, material_behavior="anisotropic", verbose=False):
+    def __init__(self, viewer, args):
         # setup simulation parameters first
         self.fps = 60
         self.frame = 0
@@ -85,8 +86,8 @@ class Example:
         self.sim_substeps = 16
         self.sim_dt = self.frame_dt / self.sim_substeps
 
-        self.verbose = verbose
-        self.material_behavior = material_behavior
+        self.verbose = args.verbose
+        self.material_behavior = args.material_behavior
 
         # setup training parameters
         self.train_iter = 0
@@ -108,7 +109,13 @@ class Example:
         # allocate sim states for trajectory, control and contacts
         self.states = [self.model.state() for _ in range(self.sim_steps * self.sim_substeps + 1)]
         self.control = self.model.control()
-        self.contacts = self.model.collide(self.states[0], soft_contact_margin=0.001)
+        # Create collision pipeline with soft contact margin (requires_grad for differentiable simulation)
+        self.collision_pipeline = newton.CollisionPipeline(
+            self.model,
+            broad_phase="explicit",
+            soft_contact_margin=0.001,
+            requires_grad=True,
+        )
 
         # Initialize material parameters to be optimized from model
         if self.material_behavior == "anisotropic":
@@ -272,8 +279,10 @@ class Example:
         for i in range(self.sim_substeps):
             t = sim_step * self.sim_substeps + i
             self.states[t].clear_forces()
-            self.contacts = self.model.collide(self.states[t], soft_contact_margin=0.001)
-            self.solver.step(self.states[t], self.states[t + 1], self.control, self.contacts, self.sim_dt)
+            # Allocate fresh contacts each substep for gradient tracking
+            contacts = self.collision_pipeline.contacts()
+            self.collision_pipeline.collide(self.states[t], contacts)
+            self.solver.step(self.states[t], self.states[t + 1], self.control, contacts, self.sim_dt)
 
     def step(self):
         if self.graph:
@@ -329,6 +338,11 @@ class Example:
         assert most(np.diff(self.loss_history) < -0.0, min_ratio=0.8)
 
     def render(self):
+        if self.viewer.is_paused():
+            self.viewer.begin_frame(self.viewer.time)
+            self.viewer.end_frame()
+            return
+
         if self.frame > 0 and self.train_iter % 10 != 0:
             return
 
@@ -352,29 +366,30 @@ class Example:
                 f"/traj_{self.train_iter - 1}",
                 wp.array(traj_verts[0:-1], dtype=wp.vec3),
                 wp.array(traj_verts[1:], dtype=wp.vec3),
-                wp.render.bourke_color_map(0.0, self.loss_history[0], self.loss_history[-1]),
+                bourke_color_map(0.0, self.loss_history[0], self.loss_history[-1]),
             )
             self.viewer.end_frame()
 
             self.frame += 1
 
+    @staticmethod
+    def create_parser():
+        parser = newton.examples.create_parser()
+        parser.add_argument(
+            "--verbose", action="store_true", help="Print out additional status messages during execution."
+        )
+        parser.add_argument(
+            "--material-behavior",
+            default="anisotropic",
+            choices=["anisotropic", "isotropic"],
+            help="Set material behavior to be Anisotropic or Isotropic.",
+        )
+        return parser
+
 
 if __name__ == "__main__":
-    # Create parser that inherits common arguments and adds example-specific ones
-    parser = newton.examples.create_parser()
-    parser.add_argument("--verbose", action="store_true", help="Print out additional status messages during execution.")
-    parser.add_argument(
-        "--material_behavior",
-        default="anisotropic",
-        choices=["anisotropic", "isotropic"],
-        help="Set material behavior to be Anisotropic or Isotropic.",
-    )
-
-    # Parse arguments and initialize viewer
+    parser = Example.create_parser()
     viewer, args = newton.examples.init(parser)
 
-    # Create example
-    example = Example(viewer, material_behavior=args.material_behavior, verbose=args.verbose)
-
-    # Run example
+    example = Example(viewer, args)
     newton.examples.run(example, args)

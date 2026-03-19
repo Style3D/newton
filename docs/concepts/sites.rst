@@ -1,3 +1,6 @@
+.. SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
+.. SPDX-License-Identifier: CC-BY-4.0
+
 Sites (Abstract Markers)
 ========================
 
@@ -34,7 +37,7 @@ Sites are created using the ``add_site()`` method on ModelBuilder:
    # Add a site at body origin
    imu_site = builder.add_site(
        body=body,
-       key="imu"
+       label="imu"
    )
    
    # Add a site with offset and rotation
@@ -47,7 +50,7 @@ Sites are created using the ``add_site()`` method on ModelBuilder:
        type=newton.GeoType.BOX,
        scale=(0.05, 0.05, 0.02),
        visible=True,
-       key="camera"
+       label="camera"
    )
 
 Sites can also be attached to the world frame (body=-1) to create fixed reference points:
@@ -60,13 +63,13 @@ Sites can also be attached to the world frame (body=-1) to create fixed referenc
    world_origin = builder.add_site(
        body=-1,
        xform=wp.transform(wp.vec3(0, 0, 0), wp.quat_identity()),
-       key="world_origin"
+       label="world_origin"
    )
 
 Alternative: Using Shape Methods with ``as_site=True``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Sites can also be created using shape creation methods (``add_shape_sphere``, ``add_shape_box``, ``add_shape_capsule``, ``add_shape_cylinder``) by passing ``as_site=True``. This is particularly useful when programmatically generating shapes or conditionally creating sites:
+Sites can also be created using shape creation methods (``add_shape_sphere``, ``add_shape_box``, ``add_shape_capsule``, ``add_shape_cylinder``, ``add_shape_ellipsoid``, ``add_shape_cone``) by passing ``as_site=True``. This is particularly useful when programmatically generating shapes or conditionally creating sites:
 
 .. testcode:: sites-shape-methods
 
@@ -78,14 +81,14 @@ Sites can also be created using shape creation methods (``add_shape_sphere``, ``
        body=body,
        radius=0.05,
        as_site=True,
-       key="sphere_marker"
+       label="sphere_marker"
    )
    
    box_site = builder.add_shape_box(
        body=body,
        hx=0.1, hy=0.1, hz=0.1,
        as_site=True,
-       key="box_marker"
+       label="box_marker"
    )
    
    # Useful for conditional creation
@@ -94,10 +97,10 @@ Sites can also be created using shape creation methods (``add_shape_sphere``, ``
        body=body,
        radius=0.05,
        as_site=is_sensor_point,  # Conditionally a site
-       key="measurement_point"
+       label="measurement_point"
    )
 
-When ``as_site=True``, the shape is automatically configured with all site invariants (no collision, zero density, collision_group=0), regardless of any custom configuration passed
+When ``as_site=True``, the shape is automatically configured with all site invariants (no collision, zero density, collision_group=0), regardless of any custom configuration passed.
 
 Importing Sites
 ---------------
@@ -170,7 +173,7 @@ By default, both ``load_sites`` and ``load_visual_shapes`` are set to ``True``.
 Using Sites with Sensors
 ------------------------
 
-Sites are commonly used as reference frames for sensors, particularly the ``SensorFrameTransform`` which computes relative poses between objects and reference frames.
+Sites are commonly used as reference frames for sensors, particularly :class:`~newton.sensors.SensorFrameTransform` which computes relative poses between objects and reference frames.
 
 For detailed information on using sites with sensors, see :doc:`sensors`.
 
@@ -185,23 +188,23 @@ When using ``SolverMuJoCo``, Newton sites are automatically exported to MuJoCo's
    
    # Create a simple model with a site
    builder = newton.ModelBuilder()
-   body = builder.add_body(mass=1.0, I_m=wp.mat33(np.eye(3)))
-   site = builder.add_site(body=body, key="sensor")
+   body = builder.add_body(mass=1.0, inertia=wp.mat33(np.eye(3)))
+   site = builder.add_site(body=body, label="sensor")
    model = builder.finalize()
    
    # Create MuJoCo solver (sites are exported by default)
    solver = SolverMuJoCo(model)
 
-Sites are exported with their visual properties (color, size) and can be used with MuJoCo's native sensors and actuators. To disable site export, pass ``include_sites=False`` to the ``convert_to_mjc()`` method if calling it manually.
+Sites are exported with their visual properties (color, size) and can be used with MuJoCo's native sensors and actuators. To disable site export, pass ``include_sites=False`` to :class:`~newton.solvers.SolverMuJoCo`.
 
 Implementation Details
 ----------------------
 
-Sites are internally represented as shapes with the ``ShapeFlags.SITE`` flag set. This allows them to leverage Newton's existing shape infrastructure while maintaining distinct behavior:
+Sites are internally represented as shapes with the :attr:`~newton.ShapeFlags.SITE` flag set. This allows them to leverage Newton's existing shape infrastructure while maintaining distinct behavior:
 
 * Sites are filtered out from collision detection pipelines
 * Site density is automatically set to zero during creation
-* Sites can be queried and filtered using the Selection API with shape-frequency operations
+* Sites can be identified at runtime by checking the :attr:`~newton.ShapeFlags.SITE` flag on ``model.shape_flags``
 
 This implementation approach provides maximum flexibility while keeping the codebase maintainable and avoiding duplication.
 

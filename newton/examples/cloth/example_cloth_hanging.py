@@ -27,12 +27,14 @@ import warp as wp
 
 import newton
 import newton.examples
+from newton.solvers import style3d
 
 
 class Example:
     def __init__(
         self,
         viewer,
+        args=None,
         solver_type: str = "vbd",
         height=32,
         width=64,
@@ -60,7 +62,8 @@ class Example:
         self.viewer = viewer
 
         if self.solver_type == "style3d":
-            builder = newton.Style3DModelBuilder()
+            builder = newton.ModelBuilder()
+            newton.solvers.SolverStyle3D.register_custom_attributes(builder)
         else:
             builder = newton.ModelBuilder()
 
@@ -107,7 +110,7 @@ class Example:
             solver_params = {
                 "add_springs": True,
                 "spring_ke": 1.0e3,
-                "spring_kd": 1.0e1,
+                "spring_kd": 1.0e0,
             }
 
         else:  # self.solver_type == "vbd"
@@ -118,7 +121,7 @@ class Example:
             }
 
         if self.solver_type == "style3d":
-            builder.add_aniso_cloth_grid(**common_params, **solver_params)
+            style3d.add_cloth_grid(builder, **common_params, **solver_params)
         else:
             builder.add_cloth_grid(**common_params, **solver_params)
 
@@ -137,19 +140,26 @@ class Example:
                 model=self.model,
                 iterations=self.iterations,
             )
-            self.solver.precompute(builder)
+            self.solver._precompute(builder)
         elif self.solver_type == "xpbd":
             self.solver = newton.solvers.SolverXPBD(
                 model=self.model,
                 iterations=self.iterations,
             )
         else:  # self.solver_type == "vbd"
-            self.solver = newton.solvers.SolverVBD(model=self.model, iterations=self.iterations)
+            self.solver = newton.solvers.SolverVBD(
+                model=self.model,
+                iterations=self.iterations,
+                particle_enable_self_contact=True,
+                particle_self_contact_radius=0.02,
+                particle_self_contact_margin=0.03,
+            )
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.contacts = self.model.collide(self.state_0)
+
+        self.contacts = self.model.contacts()
 
         self.viewer.set_model(self.model)
 
@@ -170,7 +180,7 @@ class Example:
             # apply forces to the model
             self.viewer.apply_forces(self.state_0)
 
-            self.contacts = self.model.collide(self.state_0)
+            self.model.collide(self.state_0, self.contacts)
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 
             # swap states
@@ -198,7 +208,7 @@ class Example:
         newton.examples.test_particle_state(
             self.state_0,
             "particles are within a reasonable volume",
-            lambda q, qd: newton.utils.vec_inside_limits(q, p_lower, p_upper),
+            lambda q, qd: newton.math.vec_inside_limits(q, p_lower, p_upper),
         )
 
     def render(self):
@@ -229,6 +239,7 @@ if __name__ == "__main__":
     # Create example and run
     example = Example(
         viewer=viewer,
+        args=args,
         solver_type=args.solver,
         height=args.height,
         width=args.width,

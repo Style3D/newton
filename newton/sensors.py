@@ -15,9 +15,7 @@
 
 # Contact sensors
 from ._src.sensors.sensor_contact import (
-    MatchKind,
     SensorContact,
-    populate_contacts,
 )
 
 # Frame transform sensors
@@ -25,19 +23,25 @@ from ._src.sensors.sensor_frame_transform import (
     SensorFrameTransform,
 )
 
+# IMU sensors
+from ._src.sensors.sensor_imu import (
+    SensorIMU,
+)
+
 # Raycast sensors
 from ._src.sensors.sensor_raycast import (
     SensorRaycast,
 )
+
+# Tiled camera sensors
 from ._src.sensors.sensor_tiled_camera import (
     SensorTiledCamera,
 )
 
 __all__ = [
-    "MatchKind",
     "SensorContact",
     "SensorFrameTransform",
+    "SensorIMU",
     "SensorRaycast",
     "SensorTiledCamera",
-    "populate_contacts",
 ]

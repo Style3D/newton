@@ -35,7 +35,6 @@ The algorithm works by:
 Key features:
 - Distance computation between separated shapes
 - Collision detection when shapes overlap (returns signed_distance = 0)
-- Feature ID tracking for contact persistence
 - Barycentric coordinates (stored as vec4) for witness points
 - Numerically stable simplex reduction using Johnson's distance subalgorithm
 
@@ -54,7 +53,7 @@ EPSILON = 1e-8
 Mat83f = wp.types.matrix(shape=(8, 3), dtype=wp.float32)
 
 
-def create_solve_closest_distance(support_func: Any):
+def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None):
     """
     Factory function to create GJK distance solver with specific support and center functions.
 
@@ -70,13 +69,22 @@ def create_solve_closest_distance(support_func: Any):
     - Reduced function call overhead compared to wrapping field access in functions
 
     Args:
-        support_func: Support mapping function for shapes
+        support_func: Support mapping function for shapes.
+        _support_funcs: Pre-built support functions tuple from
+            :func:`create_support_map_function`. When provided, these are reused
+            instead of creating new ones, allowing multiple solvers to share
+            compiled support code.
 
     Returns:
-        GJK distance solver function
+        ``solve_closest_distance`` wrapper function.  The core function is
+        available as ``solve_closest_distance.core`` for callers that want to
+        handle the relative-frame transform themselves.
     """
 
-    _support_map_b, minkowski_support, geometric_center = create_support_map_function(support_func)
+    if _support_funcs is not None:
+        _support_map_b, minkowski_support, geometric_center = _support_funcs
+    else:
+        _support_map_b, minkowski_support, geometric_center = create_support_map_function(support_func)
 
     @wp.func
     def simplex_get_vertex(v: Mat83f, i: int) -> Vert:
@@ -394,9 +402,7 @@ def create_solve_closest_distance(support_func: Any):
             last_search_dir = search_dir
 
             # Get support point in search direction
-            w, _feature_a_id, _feature_b_id = minkowski_support(
-                geom_a, geom_b, search_dir, orientation_b, position_b, extend, data_provider
-            )
+            w = minkowski_support(geom_a, geom_b, search_dir, orientation_b, position_b, extend, data_provider)
 
             # Check for convergence using Frank-Wolfe duality gap
             # Skip check when using fallback direction to avoid premature exit
@@ -563,4 +569,5 @@ def create_solve_closest_distance(support_func: Any):
 
         return collision, distance, point, normal
 
+    solve_closest_distance.core = solve_closest_distance_core
     return solve_closest_distance

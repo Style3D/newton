@@ -28,11 +28,11 @@
 ###########################################################################
 import numpy as np
 import warp as wp
-from warp.render import bourke_color_map
 
 import newton
 import newton.examples
 from newton.tests.unittest_utils import assert_np_equal
+from newton.utils import bourke_color_map
 
 
 @wp.kernel
@@ -51,7 +51,7 @@ def step_kernel(x: wp.array(dtype=wp.vec3), grad: wp.array(dtype=wp.vec3), alpha
 
 
 class Example:
-    def __init__(self, viewer, verbose=False):
+    def __init__(self, viewer, args):
         # setup simulation parameters first
         self.fps = 60
         self.frame = 0
@@ -60,7 +60,7 @@ class Example:
         self.sim_substeps = 8
         self.sim_dt = self.frame_dt / self.sim_substeps
 
-        self.verbose = verbose
+        self.verbose = args.verbose
 
         self.train_iter = 0
         self.train_rate = 0.02
@@ -108,7 +108,16 @@ class Example:
         # allocate sim states, initialize control and one-shot contacts (valid for simple collisions against constant plane)
         self.states = [self.model.state() for _ in range(self.sim_steps * self.sim_substeps + 1)]
         self.control = self.model.control()
-        self.contacts = self.model.collide(self.states[0], soft_contact_margin=10.0)
+
+        # Create collision pipeline (requires_grad for differentiable simulation)
+        self.collision_pipeline = newton.CollisionPipeline(
+            self.model,
+            broad_phase="explicit",
+            soft_contact_margin=10.0,
+            requires_grad=True,
+        )
+        self.contacts = self.collision_pipeline.contacts()
+        self.collision_pipeline.collide(self.states[0], self.contacts)
 
         self.viewer.set_model(self.model)
 
@@ -174,6 +183,11 @@ class Example:
         assert all(np.diff(self.loss_history[:-1]) < -1e-3)
 
     def render(self):
+        if self.viewer.is_paused():
+            self.viewer.begin_frame(self.viewer.time)
+            self.viewer.end_frame()
+            return
+
         if self.frame > 0 and self.train_iter % 16 != 0:
             return
 
@@ -252,20 +266,19 @@ class Example:
 
         return x_grad_numeric, x_grad_analytic
 
+    @staticmethod
+    def create_parser():
+        parser = newton.examples.create_parser()
+        parser.add_argument(
+            "--verbose", action="store_true", help="Print out additional status messages during execution."
+        )
+        return parser
+
 
 if __name__ == "__main__":
-    # Create parser that inherits common arguments and adds example-specific ones
-    parser = newton.examples.create_parser()
-    parser.add_argument("--verbose", action="store_true", help="Print out additional status messages during execution.")
-
-    # Parse arguments and initialize viewer
+    parser = Example.create_parser()
     viewer, args = newton.examples.init(parser)
 
-    # Create example
-    example = Example(viewer, verbose=args.verbose)
-
-    # Check gradients
+    example = Example(viewer, args)
     example.check_grad()
-
-    # Run example
     newton.examples.run(example, args)

@@ -1,3 +1,6 @@
+.. SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
+.. SPDX-License-Identifier: CC-BY-4.0
+
 newton.utils
 ============
 
@@ -10,8 +13,7 @@ newton.utils
    :nosignatures:
 
    EventTracer
-   RecorderBasic
-   RecorderModelAndState
+   MeshAdjacency
 
 .. rubric:: Functions
 
@@ -19,39 +21,19 @@ newton.utils
    :toctree: _generated
    :signatures: long
 
-   boltzmann
+   bourke_color_map
    color_graph
    compute_world_offsets
-   create_box_mesh
-   create_capsule_mesh
-   create_cone_mesh
-   create_cylinder_mesh
-   create_ellipsoid_mesh
-   create_plane_mesh
-   create_sphere_mesh
+   create_cable_stiffness_from_elastic_moduli
+   create_parallel_transport_cable_quaternions
+   create_straight_cable_points
+   create_straight_cable_points_and_quaternions
    download_asset
    event_scope
-   leaky_max
-   leaky_min
-   parse_warp_value_from_string
+   load_texture
+   normalize_texture
    plot_graph
-   quat_between_axes
-   quat_decompose
-   quat_from_euler
-   quat_to_euler
-   quat_to_rpy
-   quat_twist
-   quat_twist_angle
+   remesh_mesh
    run_benchmark
-   smooth_max
-   smooth_min
-   transform_twist
-   transform_wrench
-   vec_abs
-   vec_allclose
-   vec_inside_limits
-   vec_leaky_max
-   vec_leaky_min
-   vec_max
-   vec_min
-   velocity_at_point
+   solidify_mesh
+   string_to_warp

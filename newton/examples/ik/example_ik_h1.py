@@ -19,8 +19,9 @@
 # Inverse kinematics on H1 with four interactive end-effector
 # targets (left/right hands + left/right feet) controlled via ViewerGL.log_gizmo().
 #
-# - Uses both IKPositionObjective and IKRotationObjective per end-effector
+# - Uses both IKObjectivePosition and IKObjectiveRotation per end-effector
 # - Re-solves IK every frame from the latest gizmo transforms
+# - On gizmo release, snaps each target back to the solved link pose
 #
 # Command: python -m newton.examples ik_h1
 ###########################################################################
@@ -34,7 +35,7 @@ import newton.utils
 
 
 class Example:
-    def __init__(self, viewer):
+    def __init__(self, viewer, args):
         # frame timing
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
@@ -55,6 +56,7 @@ class Example:
         self.graph = None
         self.model = h1.finalize()
         self.viewer.set_model(self.model)
+        self.viewer.set_camera(wp.vec3(3.0, 1.3, 1.7), -12.0, -153.0)
 
         # states
         self.state = self.model.state()
@@ -89,7 +91,7 @@ class Example:
             tf = self.ee_tfs[ee_i]
 
             self.pos_objs.append(
-                ik.IKPositionObjective(
+                ik.IKObjectivePosition(
                     link_index=link_idx,
                     link_offset=wp.vec3(0.0, 0.0, 0.0),
                     target_positions=wp.array([wp.transform_get_translation(tf)], dtype=wp.vec3),
@@ -97,7 +99,7 @@ class Example:
             )
 
             self.rot_objs.append(
-                ik.IKRotationObjective(
+                ik.IKObjectiveRotation(
                     link_index=link_idx,
                     link_offset_rotation=wp.quat_identity(),
                     target_rotations=wp.array([_q2v4(wp.transform_get_rotation(tf))], dtype=wp.vec4),
@@ -105,14 +107,14 @@ class Example:
             )
 
         # Joint limit objective
-        self.obj_joint_limits = ik.IKJointLimitObjective(
+        self.obj_joint_limits = ik.IKObjectiveJointLimit(
             joint_limit_lower=self.model.joint_limit_lower,
             joint_limit_upper=self.model.joint_limit_upper,
             weight=10.0,
         )
 
         # Variables the solver will update
-        self.joint_q = wp.array(self.model.joint_q, shape=(1, self.model.joint_coord_count))
+        self.joint_q = self.model.joint_q.reshape((1, self.model.joint_coord_count))
 
         self.ik_iters = 24
         self.solver = ik.IKSolver(
@@ -120,7 +122,7 @@ class Example:
             n_problems=1,
             objectives=[*self.pos_objs, *self.rot_objs, self.obj_joint_limits],
             lambda_initial=0.1,
-            jacobian_mode=ik.IKJacobianMode.ANALYTIC,
+            jacobian_mode=ik.IKJacobianType.ANALYTIC,
         )
 
         self.capture()
@@ -162,12 +164,14 @@ class Example:
     def render(self):
         self.viewer.begin_frame(self.sim_time)
 
-        # Register gizmos (the viewer will draw & mutate transforms in-place)
-        for (name, _), tf in zip(self.ee, self.ee_tfs, strict=False):
-            self.viewer.log_gizmo(f"target_{name}", tf)
-
-        # Visualize the current articulated state
+        # Visualize the current articulated state.
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state)
+        body_q_np = self.state.body_q.numpy()
+
+        # Register gizmos (the viewer will draw & mutate transforms in-place)
+        for (name, link_idx), tf in zip(self.ee, self.ee_tfs, strict=False):
+            self.viewer.log_gizmo(f"target_{name}", tf, snap_to=wp.transform(*body_q_np[link_idx]))
+
         self.viewer.log_state(self.state)
 
         self.viewer.end_frame()
@@ -177,5 +181,5 @@ class Example:
 if __name__ == "__main__":
     # Parse arguments and initialize viewer
     viewer, args = newton.examples.init()
-    example = Example(viewer)
+    example = Example(viewer, args)
     newton.examples.run(example, args)

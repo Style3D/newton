@@ -15,14 +15,15 @@
 
 """Common enums and utility kernels shared across IK components."""
 
-from enum import Enum as _Enum
+from enum import Enum
 
 import warp as wp
 
 from ..articulation import eval_single_articulation_fk
+from ..enums import BodyFlags
 
 
-class IKJacobianMode(_Enum):
+class IKJacobianType(Enum):
     """
     Specifies the backend used for Jacobian computation in inverse kinematics.
     """
@@ -40,6 +41,7 @@ class IKJacobianMode(_Enum):
 @wp.kernel
 def _eval_fk_articulation_batched(
     articulation_start: wp.array1d(dtype=wp.int32),
+    joint_articulation: wp.array(dtype=int),
     joint_q: wp.array2d(dtype=wp.float32),
     joint_qd: wp.array2d(dtype=wp.float32),
     joint_q_start: wp.array1d(dtype=wp.int32),
@@ -52,6 +54,7 @@ def _eval_fk_articulation_batched(
     joint_axis: wp.array1d(dtype=wp.vec3),
     joint_dof_dim: wp.array2d(dtype=wp.int32),
     body_com: wp.array1d(dtype=wp.vec3),
+    body_flags: wp.array1d(dtype=wp.int32),
     body_q: wp.array2d(dtype=wp.transform),
     body_qd: wp.array2d(dtype=wp.spatial_vector),
 ):
@@ -63,6 +66,7 @@ def _eval_fk_articulation_batched(
     eval_single_articulation_fk(
         joint_start,
         joint_end,
+        joint_articulation,
         joint_q[problem_idx],
         joint_qd[problem_idx],
         joint_q_start,
@@ -75,12 +79,14 @@ def _eval_fk_articulation_batched(
         joint_axis,
         joint_dof_dim,
         body_com,
+        body_flags,
+        int(BodyFlags.ALL),
         body_q[problem_idx],
         body_qd[problem_idx],
     )
 
 
-def _eval_fk_batched(model, joint_q, joint_qd, body_q, body_qd):
+def eval_fk_batched(model, joint_q, joint_qd, body_q, body_qd):
     """Compute batched forward kinematics for a set of articulations."""
     n_problems = joint_q.shape[0]
     wp.launch(
@@ -88,6 +94,7 @@ def _eval_fk_batched(model, joint_q, joint_qd, body_q, body_qd):
         dim=[n_problems, model.articulation_count],
         inputs=[
             model.articulation_start,
+            model.joint_articulation,
             joint_q,
             joint_qd,
             model.joint_q_start,
@@ -100,6 +107,7 @@ def _eval_fk_batched(model, joint_q, joint_qd, body_q, body_qd):
             model.joint_axis,
             model.joint_dof_dim,
             model.body_com,
+            model.body_flags,
         ],
         outputs=[body_q, body_qd],
         device=model.device,
@@ -107,7 +115,7 @@ def _eval_fk_batched(model, joint_q, joint_qd, body_q, body_qd):
 
 
 @wp.kernel
-def _fk_accum(
+def fk_accum(
     joint_parent: wp.array1d(dtype=wp.int32),
     X_local: wp.array2d(dtype=wp.transform),
     body_q: wp.array2d(dtype=wp.transform),
@@ -122,7 +130,7 @@ def _fk_accum(
 
 
 @wp.kernel
-def _compute_costs(
+def compute_costs(
     residuals: wp.array2d(dtype=wp.float32),
     num_residuals: int,
     costs: wp.array1d(dtype=wp.float32),

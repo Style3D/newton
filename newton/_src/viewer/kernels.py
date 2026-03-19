@@ -23,25 +23,32 @@ import warp as wp
 import newton
 
 
+@wp.struct
+class PickingState:
+    picked_point_local: wp.vec3
+    picked_point_world: wp.vec3
+    picking_target_world: wp.vec3
+    pick_stiffness: float
+    pick_damping: float
+
+
 @wp.kernel
 def compute_pick_state_kernel(
     body_q: wp.array(dtype=wp.transform),
+    body_flags: wp.array(dtype=int),
     body_index: int,
     hit_point_world: wp.vec3,
     # output
     pick_body: wp.array(dtype=int),
-    pick_state: wp.array(dtype=float),
+    pick_state: wp.array(dtype=PickingState),
 ):
     """
     Initialize the pick state when a body is first picked.
-
-    This kernel stores:
-    - The local space attachment point on the body
-    - The initial world space target position
-    - The original mouse cursor target
-    - The current world space picked point on geometry (for visualization)
     """
     if body_index < 0:
+        return
+    if body_flags[body_index] & newton.BodyFlags.KINEMATIC:
+        pick_body[0] = -1
         return
 
     # store body index
@@ -54,28 +61,13 @@ def compute_pick_state_kernel(
     # Compute local space attachment point from the hit point
     pick_pos_local = wp.transform_point(X_bw, hit_point_world)
 
-    pick_state[0] = pick_pos_local[0]
-    pick_state[1] = pick_pos_local[1]
-    pick_state[2] = pick_pos_local[2]
-
-    # IMPORTANT: Initialize target to current attachment point position, not hit point
-    # This prevents jumps if the body moved between raycast and first force application
-    pick_pos_world = wp.transform_point(X_wb, pick_pos_local)
+    pick_state[0].picked_point_local = pick_pos_local
 
     # store target world (current attachment point position)
-    pick_state[3] = pick_pos_world[0]
-    pick_state[4] = pick_pos_world[1]
-    pick_state[5] = pick_pos_world[2]
-
-    # store original mouse cursor target (where user clicked)
-    pick_state[8] = hit_point_world[0]
-    pick_state[9] = hit_point_world[1]
-    pick_state[10] = hit_point_world[2]
+    pick_state[0].picking_target_world = hit_point_world
 
     # store current world space picked point on geometry (for visualization)
-    pick_state[11] = pick_pos_world[0]
-    pick_state[12] = pick_pos_world[1]
-    pick_state[13] = pick_pos_world[2]
+    pick_state[0].picked_point_world = hit_point_world
 
 
 @wp.kernel
@@ -84,89 +76,50 @@ def apply_picking_force_kernel(
     body_qd: wp.array(dtype=wp.spatial_vector),
     body_f: wp.array(dtype=wp.spatial_vector),
     pick_body_arr: wp.array(dtype=int),
-    pick_state: wp.array(dtype=float),
+    pick_state: wp.array(dtype=PickingState),
+    body_flags: wp.array(dtype=int),
     body_com: wp.array(dtype=wp.vec3),
     body_mass: wp.array(dtype=float),
 ):
     pick_body = pick_body_arr[0]
     if pick_body < 0:
         return
+    if body_flags[pick_body] & newton.BodyFlags.KINEMATIC:
+        return
 
-    pick_pos_local = wp.vec3(pick_state[0], pick_state[1], pick_state[2])
-    current_target = wp.vec3(pick_state[3], pick_state[4], pick_state[5])
-    pick_stiffness = pick_state[6]
-    # pick_damping from pick_state[7] is ignored - we compute critical damping
-
-    # Get the original mouse cursor target
-    mouse_cursor_target = wp.vec3(pick_state[8], pick_state[9], pick_state[10])
-
-    # Apply smooth movement towards the mouse cursor target
-    desired_delta = mouse_cursor_target - current_target
-    desired_distance = wp.length(desired_delta)
-
-    # Use adaptive movement speed based on distance (gentle movement)
-    max_delta_per_frame = 0.02  # Doubled for more responsive movement
-
-    if desired_distance > 0.001:  # Avoid division by zero
-        # Scale movement speed based on distance (gentler scaling)
-        adaptive_speed = wp.min(desired_distance * 1.0, max_delta_per_frame * 3.0)
-        movement_speed = wp.min(adaptive_speed, desired_distance)  # Don't overshoot
-
-        # Move toward the mouse cursor target
-        direction = desired_delta / desired_distance
-        pick_target_world = current_target + direction * movement_speed
-
-        # Update the current target in pick_state
-        pick_state[3] = pick_target_world[0]
-        pick_state[4] = pick_target_world[1]
-        pick_state[5] = pick_target_world[2]
-    else:
-        pick_target_world = current_target
-
-    # Get body properties for stability
-    mass = body_mass[pick_body]
-
-    # Compute critical damping to avoid oscillations: c_critical = 2 * sqrt(k * m)
-    pick_damping = 2.0 * wp.sqrt(pick_stiffness * mass)
+    pick_pos_local = pick_state[0].picked_point_local
+    pick_target_world = pick_state[0].picking_target_world
 
     # world space attachment point
     X_wb = body_q[pick_body]
     pick_pos_world = wp.transform_point(X_wb, pick_pos_local)
 
     # update current world space picked point on geometry (for visualization)
-    pick_state[11] = pick_pos_world[0]
-    pick_state[12] = pick_pos_world[1]
-    pick_state[13] = pick_pos_world[2]
+    pick_state[0].picked_point_world = pick_pos_world
 
-    # center of mass (corrected calculation)
-    com = wp.transform_point(X_wb, body_com[pick_body])
-
-    # get velocity of attachment point
+    # Linear velocity at COM
     vel_com = wp.spatial_top(body_qd[pick_body])
+    # Angular velocity
+    angular_vel = wp.spatial_bottom(body_qd[pick_body])
 
-    # compute spring force with critical damping (only damp linear velocity, not rotational)
-    f = pick_stiffness * (pick_target_world - pick_pos_world) - pick_damping * vel_com
+    # Offset from COM to pick point (in world space)
+    offset = pick_pos_world - wp.transform_point(X_wb, body_com[pick_body])
 
-    # Force limiting to prevent instability
-    max_force = mass * 10000.0
-    force_magnitude = wp.length(f)
-    if force_magnitude > max_force:
-        f = f * (max_force / force_magnitude)
+    # Velocity at the picked point
+    vel_at_offset = vel_com + wp.cross(angular_vel, offset)
 
-    # Add velocity damping to linear motion only
-    velocity_damping_factor = 50.0 * mass  # Mass-dependent velocity damping
-    linear_vel = wp.spatial_top(body_qd[pick_body])
-    velocity_damping_force = -velocity_damping_factor * linear_vel
+    # Adjust force to mass for more adaptive manipulation of picked bodies.
+    force_multiplier = 10.0 + body_mass[pick_body]
 
-    # Combine spring force with velocity damping
-    total_force = f + velocity_damping_force
+    # Compute the force to apply
+    force_at_offset = force_multiplier * (
+        pick_state[0].pick_stiffness * (pick_target_world - pick_pos_world)
+        - (pick_state[0].pick_damping * vel_at_offset)
+    )
+    # Compute the resulting torque given the offset from COM to the picked point.
+    torque_at_offset = wp.cross(offset, force_at_offset)
 
-    # Compute natural torque from off-center force application
-    # When pick point != COM, this creates a torque that rotates the object
-    t = wp.cross(pick_pos_world - com, total_force)
-
-    # Apply force at pick point with natural torque
-    wp.atomic_add(body_f, pick_body, wp.spatial_vector(total_force, t))
+    wp.atomic_add(body_f, pick_body, wp.spatial_vector(force_at_offset, torque_at_offset))
 
 
 @wp.kernel
@@ -175,10 +128,10 @@ def update_pick_target_kernel(
     d: wp.vec3,
     world_offset: wp.vec3,
     # read-write
-    pick_state: wp.array(dtype=float),
+    pick_state: wp.array(dtype=PickingState),
 ):
     # get original mouse cursor target (in physics space)
-    original_target = wp.vec3(pick_state[8], pick_state[9], pick_state[10])
+    original_target = pick_state[0].picking_target_world
 
     # Add world offset to convert to offset space for distance calculation
     original_target_offset = original_target + world_offset
@@ -193,9 +146,7 @@ def update_pick_target_kernel(
     new_mouse_target = new_mouse_target_offset - world_offset
 
     # Update the original mouse cursor target (no smoothing here)
-    pick_state[8] = new_mouse_target[0]
-    pick_state[9] = new_mouse_target[1]
-    pick_state[10] = new_mouse_target[2]
+    pick_state[0].picking_target_world = new_mouse_target
 
 
 @wp.kernel
@@ -233,8 +184,8 @@ def estimate_world_extents(
     shape_collision_radius: wp.array(dtype=float),
     shape_world: wp.array(dtype=int),
     body_q: wp.array(dtype=wp.transform),
-    num_worlds: int,
-    # outputs (num_worlds x 3 arrays for min/max xyz per world)
+    world_count: int,
+    # outputs (world_count x 3 arrays for min/max xyz per world)
     world_bounds_min: wp.array(dtype=float, ndim=2),
     world_bounds_max: wp.array(dtype=float, ndim=2),
 ):
@@ -244,7 +195,7 @@ def estimate_world_extents(
     world_idx = shape_world[tid]
 
     # Skip global shapes (world -1) or invalid world indices
-    if world_idx < 0 or world_idx >= num_worlds:
+    if world_idx < 0 or world_idx >= world_count:
         return
 
     # Get collision radius and skip shapes with unreasonably large radii
@@ -380,7 +331,13 @@ def compute_joint_basis_lines(
         return
 
     joint_t = joint_type[joint_id]
-    if joint_t != int(newton.JointType.REVOLUTE) and joint_t != int(newton.JointType.D6):
+    if (
+        joint_t != int(newton.JointType.PRISMATIC)
+        and joint_t != int(newton.JointType.REVOLUTE)
+        and joint_t != int(newton.JointType.D6)
+        and joint_t != int(newton.JointType.CABLE)
+        and joint_t != int(newton.JointType.BALL)
+    ):
         # Set NaN for unsupported joints to hide them
         line_starts[tid] = wp.vec3(wp.nan, wp.nan, wp.nan)
         line_ends[tid] = wp.vec3(wp.nan, wp.nan, wp.nan)
@@ -401,7 +358,7 @@ def compute_joint_basis_lines(
         world_rot = wp.mul(wp.transform_get_rotation(parent_tf), joint_rot)
         # Apply world offset
         parent_body_world = body_world[parent_body]
-        if parent_body_world >= 0:
+        if world_offsets and parent_body_world >= 0:
             world_pos += world_offsets[parent_body_world]
     else:
         world_pos = joint_pos
@@ -424,6 +381,196 @@ def compute_joint_basis_lines(
     # Set line endpoints
     line_starts[tid] = world_pos
     line_ends[tid] = world_pos + axis_vec * scale_factor
+    line_colors[tid] = color
+
+
+@wp.kernel
+def compute_com_positions(
+    body_q: wp.array(dtype=wp.transform),
+    body_com: wp.array(dtype=wp.vec3),
+    body_world: wp.array(dtype=int),
+    world_offsets: wp.array(dtype=wp.vec3),
+    com_positions: wp.array(dtype=wp.vec3),
+):
+    tid = wp.tid()
+    body_tf = body_q[tid]
+    world_com = wp.transform_point(body_tf, body_com[tid])
+    world_idx = body_world[tid]
+    if world_offsets and world_idx >= 0 and world_idx < world_offsets.shape[0]:
+        world_com = world_com + world_offsets[world_idx]
+    com_positions[tid] = world_com
+
+
+@wp.kernel
+def compute_inertia_box_lines(
+    body_q: wp.array(dtype=wp.transform),
+    body_com: wp.array(dtype=wp.vec3),
+    body_inertia: wp.array(dtype=wp.mat33),
+    body_inv_mass: wp.array(dtype=float),
+    body_world: wp.array(dtype=int),
+    world_offsets: wp.array(dtype=wp.vec3),
+    max_worlds: int,
+    color: wp.vec3,
+    # outputs: 12 lines per body
+    line_starts: wp.array(dtype=wp.vec3),
+    line_ends: wp.array(dtype=wp.vec3),
+    line_colors: wp.array(dtype=wp.vec3),
+):
+    """Compute wireframe edges for inertia boxes. 12 edges per body."""
+    tid = wp.tid()
+    body_id = tid // 12
+    edge_id = tid % 12
+
+    nan_line = wp.vec3(wp.nan, wp.nan, wp.nan)
+    zero_color = wp.vec3(0.0, 0.0, 0.0)
+
+    # Skip bodies from worlds beyond max_worlds limit
+    world_idx = body_world[body_id]
+    if max_worlds >= 0 and world_idx >= 0 and world_idx >= max_worlds:
+        line_starts[tid] = nan_line
+        line_ends[tid] = nan_line
+        line_colors[tid] = zero_color
+        return
+
+    inv_m = body_inv_mass[body_id]
+    if inv_m == 0.0:
+        line_starts[tid] = nan_line
+        line_ends[tid] = nan_line
+        line_colors[tid] = zero_color
+        return
+
+    # Compute principal inertia axes and extents
+    rot, principal_inertia = wp.eig3(body_inertia[body_id])
+
+    box_inertia = principal_inertia * inv_m * (12.0 / 8.0)
+    sx = wp.sqrt(wp.abs(box_inertia[2] + box_inertia[1] - box_inertia[0]))
+    sy = wp.sqrt(wp.abs(box_inertia[0] + box_inertia[2] - box_inertia[1]))
+    sz = wp.sqrt(wp.abs(box_inertia[1] + box_inertia[0] - box_inertia[2]))
+
+    # Box edges: pairs of corner indices
+    # Corners: 0=(-,-,-) 1=(+,-,-) 2=(+,+,-) 3=(-,+,-)
+    #          4=(-,-,+) 5=(+,-,+) 6=(+,+,+) 7=(-,+,+)
+    # Bottom face edges (0-3), top face edges (4-7), vertical edges (8-11)
+    c0x = float(0.0)
+    c0y = float(0.0)
+    c0z = float(0.0)
+    c1x = float(0.0)
+    c1y = float(0.0)
+    c1z = float(0.0)
+
+    if edge_id == 0:  # 0-1
+        c0x = -sx
+        c0y = -sy
+        c0z = -sz
+        c1x = sx
+        c1y = -sy
+        c1z = -sz
+    elif edge_id == 1:  # 1-2
+        c0x = sx
+        c0y = -sy
+        c0z = -sz
+        c1x = sx
+        c1y = sy
+        c1z = -sz
+    elif edge_id == 2:  # 2-3
+        c0x = sx
+        c0y = sy
+        c0z = -sz
+        c1x = -sx
+        c1y = sy
+        c1z = -sz
+    elif edge_id == 3:  # 3-0
+        c0x = -sx
+        c0y = sy
+        c0z = -sz
+        c1x = -sx
+        c1y = -sy
+        c1z = -sz
+    elif edge_id == 4:  # 4-5
+        c0x = -sx
+        c0y = -sy
+        c0z = sz
+        c1x = sx
+        c1y = -sy
+        c1z = sz
+    elif edge_id == 5:  # 5-6
+        c0x = sx
+        c0y = -sy
+        c0z = sz
+        c1x = sx
+        c1y = sy
+        c1z = sz
+    elif edge_id == 6:  # 6-7
+        c0x = sx
+        c0y = sy
+        c0z = sz
+        c1x = -sx
+        c1y = sy
+        c1z = sz
+    elif edge_id == 7:  # 7-4
+        c0x = -sx
+        c0y = sy
+        c0z = sz
+        c1x = -sx
+        c1y = -sy
+        c1z = sz
+    elif edge_id == 8:  # 0-4
+        c0x = -sx
+        c0y = -sy
+        c0z = -sz
+        c1x = -sx
+        c1y = -sy
+        c1z = sz
+    elif edge_id == 9:  # 1-5
+        c0x = sx
+        c0y = -sy
+        c0z = -sz
+        c1x = sx
+        c1y = -sy
+        c1z = sz
+    elif edge_id == 10:  # 2-6
+        c0x = sx
+        c0y = sy
+        c0z = -sz
+        c1x = sx
+        c1y = sy
+        c1z = sz
+    elif edge_id == 11:  # 3-7
+        c0x = -sx
+        c0y = sy
+        c0z = -sz
+        c1x = -sx
+        c1y = sy
+        c1z = sz
+
+    local0 = wp.vec3(c0x, c0y, c0z)
+    local1 = wp.vec3(c1x, c1y, c1z)
+
+    # Transform from inertia-principal frame to body COM frame
+    inertia_rot = wp.quat_from_matrix(rot)
+    local0 = wp.quat_rotate(inertia_rot, local0)
+    local1 = wp.quat_rotate(inertia_rot, local1)
+
+    # Transform from COM frame to world frame
+    body_tf = body_q[body_id]
+    body_rot = wp.transform_get_rotation(body_tf)
+    body_pos = wp.transform_get_translation(body_tf)
+    com = body_com[body_id]
+
+    # COM offset in world frame
+    world_com = body_pos + wp.quat_rotate(body_rot, com)
+
+    world0 = world_com + wp.quat_rotate(body_rot, local0)
+    world1 = world_com + wp.quat_rotate(body_rot, local1)
+
+    # Apply world offset
+    if world_offsets and world_idx >= 0 and world_idx < world_offsets.shape[0]:
+        offset = world_offsets[world_idx]
+        world0 = world0 + offset
+        world1 = world1 + offset
+
+    line_starts[tid] = world0
+    line_ends[tid] = world1
     line_colors[tid] = color
 
 
@@ -472,11 +619,11 @@ def compute_hydro_contact_surface_lines(
     v1 = triangle_vertices[tid * 3 + 1]
     v2 = triangle_vertices[tid * 3 + 2]
 
-    # Compute color from depth
+    # Compute color from depth (standard convention: negative = penetrating)
     depth = face_depths[tid]
 
-    # Skip non-penetrating contacts if requested (only render depth > 0)
-    if penetrating_only and depth <= 0.0:
+    # Skip non-penetrating contacts if requested (only render depth < 0)
+    if penetrating_only and depth >= 0.0:
         zero = wp.vec3(0.0, 0.0, 0.0)
         line_starts[tid * 3 + 0] = zero
         line_ends[tid * 3 + 0] = zero
@@ -502,8 +649,9 @@ def compute_hydro_contact_surface_lines(
     v1 = v1 + offset
     v2 = v2 + offset
 
-    if depth > 0.0:
-        color = depth_to_color(depth, min_depth, max_depth)
+    # Use penetration magnitude (negated depth) for color - deeper = more red
+    if depth < 0.0:
+        color = depth_to_color(-depth, min_depth, max_depth)
     else:
         color = wp.vec3(0.0, 0.0, 0.0)
 

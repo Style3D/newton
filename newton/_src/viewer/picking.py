@@ -19,7 +19,7 @@ import warp as wp
 import newton
 
 from ..geometry import raycast
-from .kernels import apply_picking_force_kernel, compute_pick_state_kernel, update_pick_target_kernel
+from .kernels import PickingState, apply_picking_force_kernel, compute_pick_state_kernel, update_pick_target_kernel
 
 
 class Picking:
@@ -34,18 +34,18 @@ class Picking:
     def __init__(
         self,
         model: newton.Model,
-        pick_stiffness: float = 500.0,
-        pick_damping: float = 50.0,
+        pick_stiffness: float = 50.0,
+        pick_damping: float = 5.0,
         world_offsets: wp.array | None = None,
     ) -> None:
         """
         Initializes the picking system.
 
         Args:
-            model (newton.Model): The model to pick from.
-            pick_stiffness (float): The stiffness that will be used to compute the force applied to the picked body.
-            pick_damping (float): The damping that will be used to compute the force applied to the picked body.
-            world_offsets (wp.array | None): Optional warp array of world offsets (dtype=wp.vec3) for multi-world picking support.
+            model: The model to pick from.
+            pick_stiffness: The stiffness that will be used to compute the force applied to the picked body.
+            pick_damping: The damping that will be used to compute the force applied to the picked body.
+            world_offsets: Optional warp array of world offsets (dtype=wp.vec3) for multi-world picking support.
         """
         self.model = model
         self.pick_stiffness = pick_stiffness
@@ -62,21 +62,14 @@ class Picking:
 
         # picking state
         if model and model.device.is_cuda:
-            self.pick_body = wp.array([-1], dtype=int, pinned=True)
+            self.pick_body = wp.array([-1], dtype=int, pinned=True, device=model.device)
         else:
             self.pick_body = wp.array([-1], dtype=int, device="cpu")
-        # pick_state array format (stored in a warp array for graph capture support):
-        # [0:3] - pick point in local space (vec3)
-        # [3:6] - pick target point in world space (vec3)
-        # [6] - pick spring stiffness
-        # [7] - pick spring damping
-        # [8:11] - original mouse cursor target in world space (vec3)
-        # [11:14] - current world space picked point on geometry (vec3)
-        pick_state_np = np.zeros(14, dtype=np.float32)
-        if model:
-            pick_state_np[6] = pick_stiffness
-            pick_state_np[7] = pick_damping
-        self.pick_state = wp.array(pick_state_np, dtype=float, device=model.device if model else "cpu")
+
+        pick_state_np = np.empty(1, dtype=PickingState.numpy_dtype())
+        pick_state_np[0]["pick_stiffness"] = pick_stiffness
+        pick_state_np[0]["pick_damping"] = pick_damping
+        self.pick_state = wp.array(pick_state_np, dtype=PickingState, device=model.device if model else "cpu", ndim=1)
 
         self.pick_dist = 0.0
         self.picking_active = False
@@ -88,7 +81,7 @@ class Picking:
         Applies a force to the picked body.
 
         Args:
-            state (newton.State): The simulation state.
+            state: The simulation state.
         """
         if self.model is None:
             return
@@ -103,6 +96,7 @@ class Picking:
                 state.body_f,
                 self.pick_body,
                 self.pick_state,
+                self.model.body_flags,
                 self.model.body_com,
                 self.model.body_mass,
             ],
@@ -129,8 +123,8 @@ class Picking:
         This function is used to track the force that needs to be applied to the picked body as the mouse is dragged.
 
         Args:
-            ray_start (wp.vec3f): The start point of the ray.
-            ray_dir (wp.vec3f): The direction of the ray.
+            ray_start: The start point of the ray.
+            ray_dir: The direction of the ray.
         """
         if not self.is_picking():
             return
@@ -165,9 +159,9 @@ class Picking:
         will be applied to the picked body.
 
         Args:
-            state (newton.State): The simulation state.
-            ray_start (wp.vec3f): The start point of the ray.
-            ray_dir (wp.vec3f): The direction of the ray.
+            state: The simulation state.
+            ray_start: The start point of the ray.
+            ray_dir: The direction of the ray.
         """
 
         if self.model is None:
@@ -248,7 +242,7 @@ class Picking:
             wp.launch(
                 kernel=compute_pick_state_kernel,
                 dim=1,
-                inputs=[state.body_q, body_index, hit_point_world],
+                inputs=[state.body_q, self.model.body_flags, body_index, hit_point_world],
                 outputs=[self.pick_body, self.pick_state],
                 device=self.model.device,
             )

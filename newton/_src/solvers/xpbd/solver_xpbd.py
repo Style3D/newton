@@ -17,6 +17,7 @@ import warp as wp
 
 from ...core.types import override
 from ...sim import Contacts, Control, Model, State
+from ..flags import SolverNotifyFlags
 from ..solver import SolverBase
 from .kernels import (
     apply_body_delta_velocities,
@@ -26,6 +27,7 @@ from .kernels import (
     apply_particle_shape_restitution,
     apply_rigid_restitution,
     bending_constraint,
+    copy_kinematic_body_state_kernel,
     solve_body_contact_positions,
     solve_body_joints,
     solve_particle_particle_contacts,
@@ -46,6 +48,20 @@ class SolverXPBD(SolverBase):
 
     After constructing :class:`Model`, :class:`State`, and :class:`Control` (optional) objects, this time-integrator
     may be used to advance the simulation state forward in time.
+
+    Joint limitations:
+        - Supported joint types: PRISMATIC, REVOLUTE, BALL, FIXED, FREE, DISTANCE, D6.
+          CABLE joints are not supported.
+        - :attr:`~newton.Model.joint_enabled`,
+          :attr:`~newton.Model.joint_target_ke`/:attr:`~newton.Model.joint_target_kd`, and
+          :attr:`~newton.Control.joint_f` are supported.
+          Joint limits are enforced as hard positional constraints (``joint_limit_ke``/``joint_limit_kd`` are not used).
+        - :attr:`~newton.Model.joint_armature`, :attr:`~newton.Model.joint_friction`,
+          :attr:`~newton.Model.joint_effort_limit`, :attr:`~newton.Model.joint_velocity_limit`,
+          and :attr:`~newton.Model.joint_target_mode` are not supported.
+        - Equality and mimic constraints are not supported.
+
+        See :ref:`Joint feature support` for the full comparison across solvers.
 
     Example
     -------
@@ -96,11 +112,34 @@ class SolverXPBD(SolverBase):
 
         self.compute_body_velocity_from_position_delta = False
 
+        self._init_kinematic_state()
+
         # helper variables to track constraint resolution vars
         self._particle_delta_counter = 0
         self._body_delta_counter = 0
 
-    def apply_particle_deltas(
+        if model.particle_count > 1 and model.particle_grid is not None:
+            # reserve space for the particle hash grid
+            with wp.ScopedDevice(model.device):
+                model.particle_grid.reserve(model.particle_count)
+
+    @override
+    def notify_model_changed(self, flags: int) -> None:
+        if flags & (SolverNotifyFlags.BODY_PROPERTIES | SolverNotifyFlags.BODY_INERTIAL_PROPERTIES):
+            self._refresh_kinematic_state()
+
+    def copy_kinematic_body_state(self, model: Model, state_in: State, state_out: State):
+        if model.body_count == 0:
+            return
+        wp.launch(
+            kernel=copy_kinematic_body_state_kernel,
+            dim=model.body_count,
+            inputs=[model.body_flags, state_in.body_q, state_in.body_qd],
+            outputs=[state_out.body_q, state_out.body_qd],
+            device=model.device,
+        )
+
+    def _apply_particle_deltas(
         self,
         model: Model,
         state_in: State,
@@ -146,7 +185,7 @@ class SolverXPBD(SolverBase):
 
         return new_particle_q, new_particle_qd
 
-    def apply_body_deltas(
+    def _apply_body_deltas(
         self,
         model: Model,
         state_in: State,
@@ -183,8 +222,8 @@ class SolverXPBD(SolverBase):
                     body_qd,
                     model.body_com,
                     model.body_inertia,
-                    model.body_inv_mass,
-                    model.body_inv_inertia,
+                    self.body_inv_mass_effective,
+                    self.body_inv_inertia_effective,
                     body_deltas,
                     rigid_contact_inv_weight,
                     dt,
@@ -203,7 +242,7 @@ class SolverXPBD(SolverBase):
         return new_body_q, new_body_qd
 
     @override
-    def step(self, state_in: State, state_out: State, control: Control, contacts: Contacts, dt: float):
+    def step(self, state_in: State, state_out: State, control: Control, contacts: Contacts, dt: float) -> None:
         requires_grad = state_in.requires_grad
         self._particle_delta_counter = 0
         self._body_delta_counter = 0
@@ -216,13 +255,15 @@ class SolverXPBD(SolverBase):
 
         body_q = None
         body_qd = None
+        body_q_init = None
+        body_qd_init = None
         body_deltas = None
 
         rigid_contact_inv_weight = None
 
         if contacts:
             if self.rigid_contact_con_weighting:
-                rigid_contact_inv_weight = wp.zeros_like(contacts.rigid_contact_thickness0)
+                rigid_contact_inv_weight = wp.zeros(model.body_count, dtype=float, device=model.device)
             rigid_contact_inv_weight_init = None
 
         if control is None:
@@ -240,6 +281,13 @@ class SolverXPBD(SolverBase):
 
                 self.integrate_particles(model, state_in, state_out, dt)
 
+                # Build/update the particle hash grid for particle-particle contact queries
+                if model.particle_count > 1 and model.particle_grid is not None:
+                    # Search radius must cover the maximum interaction distance used by the contact query
+                    search_radius = model.particle_max_radius * 2.0 + model.particle_cohesion
+                    with wp.ScopedDevice(model.device):
+                        model.particle_grid.build(state_out.particle_q, radius=search_radius)
+
             if model.body_count:
                 body_q = state_out.body_q
                 body_qd = state_out.body_qd
@@ -250,7 +298,10 @@ class SolverXPBD(SolverBase):
 
                 body_deltas = wp.empty_like(state_out.body_qd)
 
+                body_f_tmp = state_in.body_f
                 if model.joint_count:
+                    # Avoid accumulating joint_f into the persistent state body_f buffer.
+                    body_f_tmp = wp.clone(state_in.body_f)
                     wp.launch(
                         kernel=apply_joint_forces,
                         dim=model.joint_count,
@@ -258,19 +309,27 @@ class SolverXPBD(SolverBase):
                             state_in.body_q,
                             model.body_com,
                             model.joint_type,
+                            model.joint_enabled,
                             model.joint_parent,
                             model.joint_child,
                             model.joint_X_p,
+                            model.joint_X_c,
                             model.joint_qd_start,
                             model.joint_dof_dim,
                             model.joint_axis,
                             control.joint_f,
                         ],
-                        outputs=[state_in.body_f],
+                        outputs=[body_f_tmp],
                         device=model.device,
                     )
 
-                self.integrate_bodies(model, state_in, state_out, dt, self.angular_damping)
+                if body_f_tmp is state_in.body_f:
+                    self.integrate_bodies(model, state_in, state_out, dt, self.angular_damping)
+                else:
+                    body_f_prev = state_in.body_f
+                    state_in.body_f = body_f_tmp
+                    self.integrate_bodies(model, state_in, state_out, dt, self.angular_damping)
+                    state_in.body_f = body_f_prev
 
             spring_constraint_lambdas = None
             if model.spring_count:
@@ -307,8 +366,8 @@ class SolverXPBD(SolverBase):
                                     body_q,
                                     body_qd,
                                     model.body_com,
-                                    model.body_inv_mass,
-                                    model.body_inv_inertia,
+                                    self.body_inv_mass_effective,
+                                    self.body_inv_inertia_effective,
                                     model.shape_body,
                                     model.shape_material_mu,
                                     model.soft_contact_mu,
@@ -330,6 +389,7 @@ class SolverXPBD(SolverBase):
 
                         if model.particle_max_radius > 0.0 and model.particle_count > 1:
                             # assert model.particle_grid.reserved, "model.particle_grid must be built, see HashGrid.build()"
+                            assert model.particle_grid is not None
                             wp.launch(
                                 kernel=solve_particle_particle_contacts,
                                 dim=model.particle_count,
@@ -411,89 +471,17 @@ class SolverXPBD(SolverBase):
                                 device=model.device,
                             )
 
-                        particle_q, particle_qd = self.apply_particle_deltas(
+                        particle_q, particle_qd = self._apply_particle_deltas(
                             model, state_in, state_out, particle_deltas, dt
                         )
 
                     # handle rigid bodies
                     # ----------------------------
 
-                    if model.joint_count:
-                        # wp.launch(
-                        #     kernel=solve_simple_body_joints,
-                        #     dim=model.joint_count,
-                        #     inputs=[
-                        #         body_q,
-                        #         body_qd,
-                        #         model.body_com,
-                        #         model.body_inv_mass,
-                        #         model.body_inv_inertia,
-                        #         model.joint_type,
-                        #         model.joint_enabled,
-                        #         model.joint_parent,
-                        #         model.joint_child,
-                        #         model.joint_X_p,
-                        #         model.joint_X_c,
-                        #         model.joint_limit_lower,
-                        #         model.joint_limit_upper,
-                        #         model.joint_qd_start,
-                        #         model.joint_dof_dim,
-                        #         model.joint_dof_mode,
-                        #         model.joint_axis,
-                        #         control.joint_target,
-                        #         model.joint_target_ke,
-                        #         model.joint_target_kd,
-                        #         self.joint_linear_compliance,
-                        #         self.joint_angular_compliance,
-                        #         self.joint_angular_relaxation,
-                        #         self.joint_linear_relaxation,
-                        #         dt,
-                        #     ],
-                        #     outputs=[body_deltas],
-                        #     device=model.device,
-                        # )
-
-                        wp.launch(
-                            kernel=solve_body_joints,
-                            dim=model.joint_count,
-                            inputs=[
-                                body_q,
-                                body_qd,
-                                model.body_com,
-                                model.body_inv_mass,
-                                model.body_inv_inertia,
-                                model.joint_type,
-                                model.joint_enabled,
-                                model.joint_parent,
-                                model.joint_child,
-                                model.joint_X_p,
-                                model.joint_X_c,
-                                model.joint_limit_lower,
-                                model.joint_limit_upper,
-                                model.joint_qd_start,
-                                model.joint_dof_dim,
-                                model.joint_axis,
-                                control.joint_target_pos,
-                                control.joint_target_vel,
-                                model.joint_target_ke,
-                                model.joint_target_kd,
-                                self.joint_linear_compliance,
-                                self.joint_angular_compliance,
-                                self.joint_angular_relaxation,
-                                self.joint_linear_relaxation,
-                                dt,
-                            ],
-                            outputs=[body_deltas],
-                            device=model.device,
-                        )
-
-                        body_q, body_qd = self.apply_body_deltas(model, state_in, state_out, body_deltas, dt)
-
                     # Solve rigid contact constraints
                     if model.body_count and contacts is not None:
                         if self.rigid_contact_con_weighting:
                             rigid_contact_inv_weight.zero_()
-                        body_deltas.zero_()
 
                         wp.launch(
                             kernel=solve_body_contact_positions,
@@ -501,9 +489,10 @@ class SolverXPBD(SolverBase):
                             inputs=[
                                 body_q,
                                 body_qd,
+                                model.body_flags,
                                 model.body_com,
-                                model.body_inv_mass,
-                                model.body_inv_inertia,
+                                self.body_inv_mass_effective,
+                                self.body_inv_inertia_effective,
                                 model.shape_body,
                                 contacts.rigid_contact_count,
                                 contacts.rigid_contact_point0,
@@ -511,13 +500,13 @@ class SolverXPBD(SolverBase):
                                 contacts.rigid_contact_offset0,
                                 contacts.rigid_contact_offset1,
                                 contacts.rigid_contact_normal,
-                                contacts.rigid_contact_thickness0,
-                                contacts.rigid_contact_thickness1,
+                                contacts.rigid_contact_margin0,
+                                contacts.rigid_contact_margin1,
                                 contacts.rigid_contact_shape0,
                                 contacts.rigid_contact_shape1,
                                 model.shape_material_mu,
-                                model.shape_material_torsional_friction,
-                                model.shape_material_rolling_friction,
+                                model.shape_material_mu_torsional,
+                                model.shape_material_mu_rolling,
                                 self.rigid_contact_relaxation,
                                 dt,
                             ],
@@ -544,9 +533,51 @@ class SolverXPBD(SolverBase):
                             else:
                                 rigid_contact_inv_weight_init = None
 
-                        body_q, body_qd = self.apply_body_deltas(
+                        body_q, body_qd = self._apply_body_deltas(
                             model, state_in, state_out, body_deltas, dt, rigid_contact_inv_weight
                         )
+
+                    if model.joint_count:
+                        if requires_grad:
+                            body_deltas = wp.zeros_like(body_deltas)
+                        else:
+                            body_deltas.zero_()
+
+                        wp.launch(
+                            kernel=solve_body_joints,
+                            dim=model.joint_count,
+                            inputs=[
+                                body_q,
+                                body_qd,
+                                model.body_com,
+                                self.body_inv_mass_effective,
+                                self.body_inv_inertia_effective,
+                                model.joint_type,
+                                model.joint_enabled,
+                                model.joint_parent,
+                                model.joint_child,
+                                model.joint_X_p,
+                                model.joint_X_c,
+                                model.joint_limit_lower,
+                                model.joint_limit_upper,
+                                model.joint_qd_start,
+                                model.joint_dof_dim,
+                                model.joint_axis,
+                                control.joint_target_pos,
+                                control.joint_target_vel,
+                                model.joint_target_ke,
+                                model.joint_target_kd,
+                                self.joint_linear_compliance,
+                                self.joint_angular_compliance,
+                                self.joint_angular_relaxation,
+                                self.joint_linear_relaxation,
+                                dt,
+                            ],
+                            outputs=[body_deltas],
+                            device=model.device,
+                        )
+
+                        body_q, body_qd = self._apply_body_deltas(model, state_in, state_out, body_deltas, dt)
 
             if model.particle_count:
                 if particle_q.ptr != state_out.particle_q.ptr:
@@ -580,20 +611,18 @@ class SolverXPBD(SolverBase):
                 if model.particle_count:
                     wp.launch(
                         kernel=apply_particle_shape_restitution,
-                        dim=model.particle_count,
+                        dim=contacts.soft_contact_max,
                         inputs=[
-                            particle_q,
                             particle_qd,
                             self.particle_q_init,
                             self.particle_qd_init,
-                            model.particle_inv_mass,
                             model.particle_radius,
                             model.particle_flags,
                             body_q,
+                            body_q_init,
                             body_qd,
+                            body_qd_init,
                             model.body_com,
-                            model.body_inv_mass,
-                            model.body_inv_inertia,
                             model.shape_body,
                             model.particle_adhesion,
                             model.soft_contact_restitution,
@@ -604,8 +633,6 @@ class SolverXPBD(SolverBase):
                             contacts.soft_contact_body_vel,
                             contacts.soft_contact_normal,
                             contacts.soft_contact_max,
-                            dt,
-                            self.soft_contact_relaxation,
                         ],
                         outputs=[state_out.particle_qd],
                         device=model.device,
@@ -623,8 +650,9 @@ class SolverXPBD(SolverBase):
                             body_q_init,
                             body_qd_init,
                             model.body_com,
-                            model.body_inv_mass,
-                            model.body_inv_inertia,
+                            self.body_inv_mass_effective,
+                            self.body_inv_inertia_effective,
+                            model.body_world,
                             model.shape_body,
                             contacts.rigid_contact_count,
                             contacts.rigid_contact_normal,
@@ -635,8 +663,8 @@ class SolverXPBD(SolverBase):
                             contacts.rigid_contact_point1,
                             contacts.rigid_contact_offset0,
                             contacts.rigid_contact_offset1,
-                            contacts.rigid_contact_thickness0,
-                            contacts.rigid_contact_thickness1,
+                            contacts.rigid_contact_margin0,
+                            contacts.rigid_contact_margin1,
                             rigid_contact_inv_weight_init,
                             model.gravity,
                             dt,
@@ -657,4 +685,5 @@ class SolverXPBD(SolverBase):
                         device=model.device,
                     )
 
-            return state_out
+            if model.body_count:
+                self.copy_kinematic_body_state(model, state_in, state_out)

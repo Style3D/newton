@@ -1,3 +1,6 @@
+.. SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
+.. SPDX-License-Identifier: CC-BY-4.0
+
 newton.sensors
 ==============
 
@@ -11,14 +14,6 @@ newton.sensors
 
    SensorContact
    SensorFrameTransform
-   MatchKind
+   SensorIMU
    SensorRaycast
    SensorTiledCamera
-
-.. rubric:: Functions
-
-.. autosummary::
-   :toctree: _generated
-   :signatures: long
-
-   populate_contacts

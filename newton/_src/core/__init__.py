@@ -13,34 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .spatial import (
+from ..math import (
     quat_between_axes,
-    quat_decompose,
-    quat_from_euler,
-    quat_to_euler,
-    quat_to_rpy,
-    quat_twist,
-    quat_twist_angle,
-    transform_twist,
-    transform_wrench,
-    velocity_at_point,
 )
 from .types import (
+    MAXVAL,
     Axis,
     AxisType,
 )
 
 __all__ = [
+    "MAXVAL",
     "Axis",
     "AxisType",
     "quat_between_axes",
-    "quat_decompose",
-    "quat_from_euler",
-    "quat_to_euler",
-    "quat_to_rpy",
-    "quat_twist",
-    "quat_twist_angle",
-    "transform_twist",
-    "transform_wrench",
-    "velocity_at_point",
 ]

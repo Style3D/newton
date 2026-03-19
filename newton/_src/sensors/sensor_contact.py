@@ -15,32 +15,43 @@
 
 import itertools
 from collections import defaultdict
-from collections.abc import Callable
 from enum import Enum
-from fnmatch import fnmatch
-from typing import Any
 
 import numpy as np
 import warp as wp
 
-from ..sim import Contacts, Model
-from ..solvers import SolverBase
+from ..sim import Contacts, Model, State
+from ..utils.selection import match_labels
+
+# Object type constants shared between the kernel and SensorContact.ObjectType enum.
+_OBJ_TYPE_TOTAL = 0
+_OBJ_TYPE_SHAPE = 1
+_OBJ_TYPE_BODY = 2
 
 
-class MatchKind(Enum):
-    """Indicates the object type for a sensing object or a counterpart.
+@wp.kernel(enable_backward=False)
+def compute_sensing_obj_transforms_kernel(
+    indices: wp.array(dtype=wp.int32),
+    obj_types: wp.array(dtype=wp.int32),
+    shape_body: wp.array(dtype=wp.int32),
+    shape_transform: wp.array(dtype=wp.transform),
+    body_q: wp.array(dtype=wp.transform),
+    # output
+    transforms: wp.array(dtype=wp.transform),
+):
+    tid = wp.tid()
+    idx = indices[tid]
+    obj_type = obj_types[tid]
+    if obj_type == wp.static(_OBJ_TYPE_BODY):
+        transforms[tid] = body_q[idx]
+    elif obj_type == wp.static(_OBJ_TYPE_SHAPE):
+        body_idx = shape_body[idx]
+        if body_idx >= 0:
+            transforms[tid] = wp.transform_multiply(body_q[body_idx], shape_transform[idx])
+        else:
+            transforms[tid] = shape_transform[idx]
 
-    - MATCH_ANY indicates a wildcard counterpart
-    - SHAPE indicates a shape sensing object or counterpart
-    - BODY indicates a body sensing object or counterpart
-    """
 
-    MATCH_ANY = 0
-    SHAPE = 1
-    BODY = 2
-
-
-# TODO: merge with broadphase_common.binary_search
 @wp.func
 def bisect_shape_pairs(
     # inputs
@@ -60,8 +71,8 @@ def bisect_shape_pairs(
     return lo
 
 
-@wp.kernel
-def select_aggregate_net_force(
+@wp.kernel(enable_backward=False)
+def select_aggregate_net_force_kernel(
     # input
     num_contacts: wp.array(dtype=wp.int32),
     sp_sorted: wp.array(dtype=wp.vec2i),
@@ -69,9 +80,10 @@ def select_aggregate_net_force(
     sp_ep: wp.array(dtype=wp.vec2i),
     sp_ep_offset: wp.array(dtype=wp.int32),
     sp_ep_count: wp.array(dtype=wp.int32),
-    contact_pair: wp.array(dtype=wp.vec2i),
+    contact_shape0: wp.array(dtype=wp.int32),
+    contact_shape1: wp.array(dtype=wp.int32),
     contact_normal: wp.array(dtype=wp.vec3),
-    contact_force: wp.array(dtype=wp.float32),
+    contact_force: wp.array(dtype=wp.spatial_vector),
     # output
     net_force: wp.array(dtype=wp.vec3),
 ):
@@ -79,105 +91,196 @@ def select_aggregate_net_force(
     if con_idx >= num_contacts[0]:
         return
 
-    pair = contact_pair[con_idx]
+    shape0 = contact_shape0[con_idx]
+    shape1 = contact_shape1[con_idx]
 
     # Find the entity pairs
-    smin, smax = wp.min(pair[0], pair[1]), wp.max(pair[0], pair[1])
+    smin, smax = wp.min(shape0, shape1), wp.max(shape0, shape1)
 
     # add contribution for shape pair
     normalized_pair = wp.vec2i(smin, smax)
-    sp_flip = normalized_pair[0] != pair[0]
+    sp_flip = normalized_pair[0] != shape0
     sp_ord = bisect_shape_pairs(sp_sorted, num_sp, normalized_pair)
 
-    force = contact_force[con_idx] * contact_normal[con_idx]
-    if sp_ord < num_sp and sp_sorted[sp_ord] == normalized_pair:
-        # add the force to the pair's force accumulators
-        offset = sp_ep_offset[sp_ord]
-        for i in range(sp_ep_count[sp_ord]):
-            ep = sp_ep[offset + i]
-            force_acc, flip = ep[0], ep[1]
-            wp.atomic_add(net_force, force_acc, wp.where(sp_flip != flip, -force, force))
+    force = wp.spatial_top(contact_force[con_idx])
+    if sp_ord < num_sp:
+        if sp_sorted[sp_ord] == normalized_pair:
+            # add the force to the pair's force accumulators
+            offset = sp_ep_offset[sp_ord]
+            for i in range(sp_ep_count[sp_ord]):
+                ep = sp_ep[offset + i]
+                force_acc, flip = ep[0], ep[1]
+                wp.atomic_add(net_force, force_acc, wp.where(sp_flip != flip, -force, force))
 
     # add contribution for shape a and b
     for i in range(2):
-        mono_sp = wp.vec2i(-1, pair[i])
+        mono_sp = wp.vec2i(wp.where(i == 0, shape0, shape1), -1)
         mono_ord = bisect_shape_pairs(sp_sorted, num_sp, mono_sp)
 
-        # for shape vs all, only one accumulator is supported and flip is trivially true
-        if mono_ord < num_sp and sp_sorted[mono_ord] == mono_sp:
-            force_acc = sp_ep[sp_ep_offset[mono_ord]][0]
-            wp.atomic_add(net_force, force_acc, wp.where(bool(i), -force, force))
+        # for shape vs all, only one accumulator is supported and flip is trivially false
+        if mono_ord < num_sp:
+            if sp_sorted[mono_ord] == mono_sp:
+                force_acc = sp_ep[sp_ep_offset[mono_ord]][0]
+                wp.atomic_add(net_force, force_acc, wp.where(bool(i), -force, force))
 
 
-class MatchAny:
-    """Wildcard counterpart; matches any object."""
+def _check_index_bounds(indices: list[int], count: int, param_name: str, entity_name: str) -> None:
+    """Raise IndexError if any index is out of range [0, count)."""
+    for idx in indices:
+        if idx < 0 or idx >= count:
+            raise IndexError(f"{param_name} contains index {idx}, but model only has {count} {entity_name}")
 
 
-def populate_contacts(
-    contacts: Contacts,
-    solver: SolverBase,
-):
-    """
-    Populate a Contacts object with the latest contact data from a solver.
-
-    This function updates the given `contacts` object in-place using the contact information
-    from the provided `solver`. It is typically called after a simulation step to refresh
-    the contact data for use in sensors or analysis.
-
-    This function will be removed once contact forces are implemented as extended state attributes.
+def _bucket_indices_by_world(
+    indices: list[int],
+    world_start: list[int],
+    world_count: int,
+) -> tuple[list[list[int]], list[int]]:
+    """Partition world-contiguous indices into per-world buckets.
 
     Args:
-        contacts (Contacts): The Contacts object to be populated or updated.
-        solver (SolverBase): The solver instance containing the latest contact results.
+        indices: Flat indices (any order; sorted internally if needed).
+        world_start: Start index per world, length ``world_count + 2``.
+            Layout: ``[start_w0, start_w1, ..., start_w(N-1), start_global_tail, total]``.
+            Front-global indices are those in ``[0, start_w0)``.
+        world_count: Number of worlds.
 
     Returns:
-        None
+        Tuple of ``(per_world_buckets, global_indices)`` where ``per_world_buckets[w]``
+        contains indices belonging to world ``w`` and ``global_indices`` contains
+        indices belonging to global bodies or shapes (world -1).
     """
-    solver.update_contacts(contacts)
+    buckets: list[list[int]] = [[] for _ in range(world_count)]
+    global_indices: list[int] = []
+
+    w = 0
+    prev = -1
+    for idx in indices:
+        if idx < prev:
+            # indices turn out to be unsorted; sort them first
+            return _bucket_indices_by_world(sorted(indices), world_start, world_count)
+        prev = idx
+        if idx < world_start[0] or idx >= world_start[world_count]:
+            global_indices.append(idx)
+        else:
+            while w < world_count - 1 and idx >= world_start[w + 1]:
+                w += 1
+            buckets[w].append(idx)
+
+    return buckets, global_indices
 
 
 class SensorContact:
-    """Sensor that measures contact forces between bodies or shapes.
+    """Measures net contact forces on a set of **sensing objects** (bodies or shapes).
 
-    This sensor allows you to define a set of "sensing objects" (bodies or shapes) and optionally a set of
-    "counterpart" objects (bodies or shapes) to sense contact forces against. The sensor can be configured to
-    report the total contact force or per-counterpart readings.
+    In its simplest form the sensor reports the total contact force acting on each sensing object. Optionally, specify
+    **counterparts** to break the force down per contacting body or shape. With ``include_total=True`` (default) a
+    total-force column is prepended.
 
-    SensorContact produces a matrix of force readings, where each row corresponds to one sensing object and
-    each column corresponds to one counterpart. Each entry of this matrix is the net contact force vector between
-    the sensing object and the counterpart. If no counterparts are specified, the sensor will read the net contact
-    force for each sensing object.
+    The result is a force matrix: one row per sensing object, one column per counterpart reading.
 
-    If ``include_total`` is True, inserts a wildcard before all other counterparts, such that the first column of
-    the force matrix will read the total contact force for each sensing object.
+    .. rubric:: Multi-world behaviour
 
-    If ``prune_noncolliding`` is True, the force matrix will be sparse, containing only readings for shape pairs that
-    can collide. In this case, force matrix will have as many columns as the maximum number of active counterparts
-    for any sensing object, and the ``reading_indices`` attribute can be used to recover the active counterparts
-    for each sensing object.
+    When the model contains multiple worlds, pair tables are built per-world. Cross-world shape pairs are excluded --
+    only within-world and global counterparts (e.g. ground plane) contribute. Global bodies and shapes cannot be sensing
+    objects.
 
-    .. rubric:: Terms used
+    The force matrix has shape ``(sum_of_sensors_across_worlds, max_readings)`` where ``max_readings`` is the maximum
+    counterpart count of any single world. Rows are world-contiguous (world 0 first, then world 1, ...). Columns
+    beyond a world's own reading count are zero-padded.
 
-    - **Sensing Object**: The body or shape "carrying" a contact sensor.
-    - **Counterpart**: The other body or shape involved in a contact interaction with a sensing object.
-    - **Force Matrix**: The matrix organizing the force data by rows of sensing objects and columns of counterparts.
-    - **Force Reading**: An individual force measurement within the matrix.
+    :attr:`sensing_objs`, :attr:`counterparts`, and :attr:`reading_indices` are per-world nested
+    lists indexed as ``attr[world][i]``.
+
+    .. rubric:: Terms
+
+    - **Sensing object** -- body or shape carrying a contact sensor.
+    - **Counterpart** -- the other body or shape in a contact interaction.
+    - **Force reading** -- one entry of the force matrix (:class:`vec3`).
+
+    .. rubric:: Construction and update order
+
+    ``SensorContact`` requests the ``force`` extended attribute from the model at init, so a :class:`~newton.Contacts`
+    object created afterwards (via :meth:`Model.contacts() <newton.Model.contacts>` or directly) will include it
+    automatically.
+
+    :meth:`update` reads from ``contacts.force``. Call ``solver.update_contacts(contacts)`` before
+    ``sensor.update()`` so that contact forces are current.
+
+    Parameters that select bodies or shapes accept label patterns -- see :ref:`label-matching`.
+
+    Example:
+        Measure net contact force on a sphere resting on the ground:
+
+        .. testcode::
+
+            import warp as wp
+            import newton
+            from newton.sensors import SensorContact
+
+            builder = newton.ModelBuilder()
+            builder.add_ground_plane()
+            body = builder.add_body(xform=wp.transform((0, 0, 0.1), wp.quat_identity()))
+            builder.add_shape_sphere(body, radius=0.1, label="ball")
+            model = builder.finalize()
+
+            sensor = SensorContact(model, sensing_obj_shapes="ball")
+            solver = newton.solvers.SolverMuJoCo(model)
+            state = model.state()
+            contacts = model.contacts()
+
+            solver.step(state, state, None, None, dt=1.0 / 60.0)
+            solver.update_contacts(contacts)
+            sensor.update(state, contacts)
+            force = sensor.net_force.numpy()  # (n_sensing_objs, max_readings, 3)
 
     Raises:
         ValueError: If the configuration of sensing/counterpart objects is invalid.
     """
 
+    class ObjectType(Enum):
+        """Type tag for entries in :attr:`sensing_objs` and :attr:`counterparts`."""
+
+        TOTAL = _OBJ_TYPE_TOTAL
+        """Total force entry. Only applies to counterparts."""
+
+        SHAPE = _OBJ_TYPE_SHAPE
+        """Individual shape."""
+
+        BODY = _OBJ_TYPE_BODY
+        """Individual body."""
+
+    shape: tuple[int, int]
+    """Dimensions of the force matrix ``(n_sensing_objs, max_readings)``."""
+
+    reading_indices: list[list[list[int]]]
+    """Active counterpart indices per sensing object, per world."""
+
+    sensing_objs: list[list[tuple[int, "SensorContact.ObjectType"]]]
+    """Index and type of each sensing object, per world. Rows of the force matrix."""
+
+    counterparts: list[list[tuple[int, "SensorContact.ObjectType"]]]
+    """Index and type of each counterpart, per world. Columns of the force matrix."""
+
+    net_force: wp.array2d(dtype=wp.vec3)
+    """Net contact forces [N], shape ``(n_sensing_objs, max_readings)``, dtype :class:`vec3`.
+    Entry ``[i, j]`` is the force on sensing object ``i`` from counterpart ``j``, in world frame."""
+
+    sensing_obj_transforms: wp.array(dtype=wp.transform)
+    """World-frame transforms of sensing objects [m, unitless quaternion],
+    shape ``(n_sensing_objs,)``, dtype :class:`transform`."""
+
     def __init__(
         self,
         model: Model,
-        sensing_obj_bodies: str | list[str] | None = None,
-        sensing_obj_shapes: str | list[str] | None = None,
-        counterpart_bodies: str | list[str] | None = None,
-        counterpart_shapes: str | list[str] | None = None,
-        match_fn: Callable[[str, str], bool] | None = None,
+        *,
+        sensing_obj_bodies: str | list[str] | list[int] | None = None,
+        sensing_obj_shapes: str | list[str] | list[int] | None = None,
+        counterpart_bodies: str | list[str] | list[int] | None = None,
+        counterpart_shapes: str | list[str] | list[int] | None = None,
         include_total: bool = True,
-        prune_noncolliding: bool = False,
         verbose: bool | None = None,
+        request_contact_attributes: bool = True,
     ):
         """Initialize the SensorContact.
 
@@ -186,31 +289,20 @@ class SensorContact:
         specified, the sensor will read the net contact force for each sensing object.
 
         Args:
-            sensing_obj_bodies: Pattern(s) to select which bodies are sensing objects.
-            sensing_obj_shapes: Pattern(s) to select which shapes are sensing objects.
-            counterpart_bodies: Pattern(s) to select which bodies are considered as counterparts.
-            counterpart_shapes: Pattern(s) to select which shapes are considered as counterparts.
-            match_fn: Function to match names to patterns. If None, uses ``fnmatch``.
+            sensing_obj_bodies: List of body indices, single pattern to match
+                against body labels, or list of patterns where any one matches.
+            sensing_obj_shapes: List of shape indices, single pattern to match
+                against shape labels, or list of patterns where any one matches.
+            counterpart_bodies: List of body indices, single pattern to match
+                against body labels, or list of patterns where any one matches.
+            counterpart_shapes: List of shape indices, single pattern to match
+                against shape labels, or list of patterns where any one matches.
             include_total: If True and counterparts are specified, add a reading for the total contact force for
                 each sensing object. Does nothing when no counterparts are specified.
-            prune_noncolliding: If True, omit force readings for shape pairs that never collide from the force
-                matrix. Does nothing when no counterparts are specified.
             verbose: If True, print details. If None, uses ``wp.config.verbose``.
+            request_contact_attributes: If True (default), transparently request the extended contact attribute
+                ``force`` from the model.
         """
-
-        self.shape: tuple[int, int]
-        """Shape of the force matrix (n_sensing_objs, n_counterparts) if ``prune_noncolliding`` is False, and
-        (n_sensing_objs, max_active_counterparts) if it is True."""
-        self.reading_indices: list[list[int]]
-        """List of active counterpart indices per sensing object."""
-        self.sensing_objs: list[tuple[int, MatchKind]]
-        """Index and kind of each sensing object, length n_sensing_objs. Corresponds to the rows of the force matrix."""
-        self.counterparts: list[tuple[int, MatchKind]]
-        """Index and kind of each counterpart, length n_counterparts. Corresponds to the columns of the force matrix,
-        unless ``prune_noncolliding`` is True."""
-
-        self.net_force: wp.array2d(dtype=wp.vec3)
-        """Net force matrix."""
 
         if (sensing_obj_bodies is None) == (sensing_obj_shapes is None):
             raise ValueError("Exactly one of `sensing_obj_bodies` and `sensing_obj_shapes` must be specified")
@@ -221,35 +313,87 @@ class SensorContact:
         self.device = model.device
         self.verbose = verbose if verbose is not None else wp.config.verbose
 
-        if match_fn is None:
-            match_fn = fnmatch
+        # request contact force attribute
+        if request_contact_attributes:
+            model.request_contact_attributes("force")
 
         if sensing_obj_bodies is not None:
-            s_bodies = self._match_elem_key(match_fn, model, model.body_key, sensing_obj_bodies)
+            s_bodies = match_labels(model.body_label, sensing_obj_bodies)
+            _check_index_bounds(s_bodies, len(model.body_label), "sensing_obj_bodies", "bodies")
             s_shapes = []
         else:
             s_bodies = []
-            s_shapes = self._match_elem_key(match_fn, model, model.shape_key, sensing_obj_shapes)
+            s_shapes = match_labels(model.shape_label, sensing_obj_shapes)
+            _check_index_bounds(s_shapes, len(model.shape_label), "sensing_obj_shapes", "shapes")
 
         if counterpart_bodies is not None:
-            c_bodies = self._match_elem_key(match_fn, model, model.body_key, counterpart_bodies)
+            c_bodies = match_labels(model.body_label, counterpart_bodies)
+            _check_index_bounds(c_bodies, len(model.body_label), "counterpart_bodies", "bodies")
             c_shapes = []
             if include_total:
-                c_bodies = [MatchAny, *c_bodies]
+                c_bodies = [self.ObjectType.TOTAL, *c_bodies]
         elif counterpart_shapes is not None:
             c_bodies = []
-            c_shapes = self._match_elem_key(match_fn, model, model.shape_key, counterpart_shapes)
+            c_shapes = match_labels(model.shape_label, counterpart_shapes)
+            _check_index_bounds(c_shapes, len(model.shape_label), "counterpart_shapes", "shapes")
             if include_total:
-                c_shapes = [MatchAny, *c_shapes]
+                c_shapes = [self.ObjectType.TOTAL, *c_shapes]
         else:
-            c_shapes = [MatchAny]
+            c_shapes = [self.ObjectType.TOTAL]
             c_bodies = []
 
-        contact_pairs = set(map(tuple, model.shape_contact_pairs.list())) if prune_noncolliding else None
+        if model.shape_contact_pairs is None:
+            contact_pairs = None
+        else:
+            # pack into larger int to avoid Python object overhead
+            pairs = model.shape_contact_pairs.numpy()
+            assert pairs.dtype == np.int32
+            pairs = pairs.astype(np.int64)
+            contact_pairs = set(((pairs[:, 0] << 32) | pairs[:, 1]).tolist())
 
-        sp_sorted, sp_reading, self.shape, self.reading_indices, self.sensing_objs, self.counterparts = (
-            self._assemble_sensor_mappings(s_bodies, s_shapes, c_bodies, c_shapes, model.body_shapes, contact_pairs)
-        )
+        TOTAL = self.ObjectType.TOTAL
+        wc = model.world_count
+        shape_ws = model.shape_world_start.list()
+        body_ws = model.body_world_start.list()
+
+        def bucket(indices, ws):
+            real = [x for x in indices if x is not TOTAL]
+            if wc <= 1:
+                return [real], []
+            return _bucket_indices_by_world(real, ws, wc) if real else ([[] for _ in range(wc)], [])
+
+        s_body_b, s_body_g = bucket(s_bodies, body_ws)
+        s_shape_b, s_shape_g = bucket(s_shapes, shape_ws)
+        if s_body_g or s_shape_g:
+            raise ValueError(
+                "Global bodies/shapes (world=-1) cannot be sensing objects. "
+                f"Global body indices: {s_body_g}, global shape indices: {s_shape_g}"
+            )
+
+        c_body_b, c_body_g = bucket(c_bodies, body_ws)
+        c_shape_b, c_shape_g = bucket(c_shapes, shape_ws)
+
+        per_world_results = []
+        for w in range(wc):
+            wb = ([TOTAL] if TOTAL in c_bodies else []) + c_body_g + c_body_b[w]
+            wsh = ([TOTAL] if TOTAL in c_shapes else []) + c_shape_g + c_shape_b[w]
+            per_world_results.append(
+                self._assemble_sensor_mappings(s_body_b[w], s_shape_b[w], wb, wsh, model.body_shapes, contact_pairs)
+            )
+
+        max_r = max((r[2] for r in per_world_results), default=0)
+        self.sensing_objs = [r[4] for r in per_world_results]
+        self.counterparts = [r[5] for r in per_world_results]
+        self.reading_indices = [r[3] for r in per_world_results]
+
+        sp_sorted, sp_reading = [], []
+        row = 0
+        for sp_w, raw_w, _, _, so_w, _ in per_world_results:
+            for entries in raw_w:
+                sp_reading.append([((row + s) * max_r + r, f) for s, r, f in entries])
+            sp_sorted.extend(sp_w)
+            row += len(so_w)
+        self.shape = (row, max_r)
 
         # initialize warp arrays
         self._n_shape_pairs: int = len(sp_sorted)
@@ -262,55 +406,80 @@ class SensorContact:
         self._net_force = wp.zeros(self.shape[0] * self.shape[1], dtype=wp.vec3, device=self.device)
         self.net_force = self._net_force.reshape(self.shape)
 
-    def eval(self, contacts: Contacts):
-        """Evaluate the contact sensor readings based on the provided contacts.
+        # build sensing object transform data
+        flat_sensing = [obj for world_objs in self.sensing_objs for obj in world_objs]
+        n_sensing = len(flat_sensing)
+        sensing_indices = [idx for idx, _ in flat_sensing]
+        sensing_obj_types = [obj_type.value for _, obj_type in flat_sensing]
+        assert all(idx >= 0 and t != self.ObjectType.TOTAL for idx, t in flat_sensing), (
+            "Sensing objects must not be TOTAL and indices must be non-negative"
+        )
 
-        Process the given Contacts object and updates the internal net force readings for each sensing_obj-counterpart
-        pair.
+        self._model = model
+        self._sensing_obj_indices = wp.array(sensing_indices, dtype=wp.int32, device=self.device)
+        self._sensing_obj_types = wp.array(sensing_obj_types, dtype=wp.int32, device=self.device)
+        self.sensing_obj_transforms = wp.zeros(n_sensing, dtype=wp.transform, device=self.device)
+
+    def update(self, state: State | None, contacts: Contacts):
+        """Update the contact sensor readings based on the provided state and contacts.
+
+        Computes world-frame transforms for all sensing objects and evaluates net contact forces
+        for each sensing-object/counterpart pair.
 
         Args:
-            contacts (Contacts): The contact data to evaluate.
+            state: The simulation state providing body transforms, or None to skip
+                the transform update.
+            contacts: The contact data to evaluate.
         """
+        # update sensing object transforms
+        n = sum(len(world_objs) for world_objs in self.sensing_objs)
+        if n > 0 and state is not None and state.body_q is not None:
+            wp.launch(
+                compute_sensing_obj_transforms_kernel,
+                dim=n,
+                inputs=[
+                    self._sensing_obj_indices,
+                    self._sensing_obj_types,
+                    self._model.shape_body,
+                    self._model.shape_transform,
+                    state.body_q,
+                ],
+                outputs=[self.sensing_obj_transforms],
+                device=self.device,
+            )
+
+        if contacts.force is None:
+            raise ValueError(
+                "SensorContact requires a ``Contacts`` object with ``force`` allocated. "
+                "Create ``SensorContact`` before ``Contacts`` for automatically requesting it."
+            )
         self._eval_net_force(contacts)
 
-    def get_total_force(self) -> wp.array2d(dtype=wp.vec3):
-        """Get the total net force measured by the contact sensor.
-
-        Returns:
-            The net force array, shaped according to the sensor configuration.
-        """
-        return self.net_force
-
-    @staticmethod
+    @classmethod
     def _assemble_sensor_mappings(
+        cls,
         sensing_obj_bodies: list[int],
         sensing_obj_shapes: list[int],
-        counterpart_bodies: list[int | MatchAny],
-        counterpart_shapes: list[int | MatchAny],
+        counterpart_bodies: "list[int | SensorContact.ObjectType]",
+        counterpart_shapes: "list[int | SensorContact.ObjectType]",
         body_shapes: dict[int, list[int]],
-        shape_contact_pairs: set[tuple[int, int]] | None,
+        shape_contact_pairs: set[int] | None = None,
     ):
-        # MatchAny, then bodies, then shapes
+        """Given bodies and shapes for sensing objects and counterparts,
+        build the shape_pair -> reading index mapping."""
+        TOTAL = cls.ObjectType.TOTAL
+
+        # TOTAL, then bodies, then shapes
         def expand_bodies(bodies, shapes):
-            has_matchany = MatchAny in bodies or MatchAny in shapes
-            body_idx = [b for b in bodies if b is not MatchAny]
-            shape_idx = [s for s in shapes if s is not MatchAny]
+            has_total = TOTAL in bodies or TOTAL in shapes
+            body_idx = [b for b in bodies if b is not TOTAL]
+            shape_idx = [s for s in shapes if s is not TOTAL]
             body = [tuple(body_shapes[b]) for b in body_idx]
             shape = [(s,) for s in shape_idx]
-            match_kind = (
-                [MatchKind.MATCH_ANY] * has_matchany + [MatchKind.BODY] * len(body) + [MatchKind.SHAPE] * len(shape)
-            )
-            entities = [MatchAny] * has_matchany + body + shape
-            indices = [MatchAny] * has_matchany + body_idx + shape_idx
-            return list(zip(indices, match_kind, strict=False)), entities
-
-        def get_colliding_sps(a, b) -> dict[tuple[int, int], bool]:
-            all_pairs_flip = {
-                (min(pair), max(pair)): min(pair) == pair[1] for pair in itertools.product(a, b) if pair[0] != pair[1]
-            }
-            if shape_contact_pairs is None:
-                return all_pairs_flip
-            return {pair: all_pairs_flip[pair] for pair in shape_contact_pairs.intersection(all_pairs_flip)}
+            obj_type = [TOTAL] * has_total + [cls.ObjectType.BODY] * len(body) + [cls.ObjectType.SHAPE] * len(shape)
+            entities = [TOTAL] * has_total + body + shape
+            indices = [-1] * has_total + body_idx + shape_idx
+            return list(zip(indices, obj_type, strict=True)), entities
 
         sensing_obj_kinds, sensing_objs = expand_bodies(sensing_obj_bodies, sensing_obj_shapes)
         counterpart_kinds, counterparts = expand_bodies(counterpart_bodies, counterpart_shapes)
@@ -322,15 +491,24 @@ class SensorContact:
         # build the mapping from shape pair to tuples of reading index and flip indicator
         # the mapping is ordered lexicographically by sorted shape pair
         for sensing_obj_idx, sensing_obj in enumerate(sensing_objs):
-            if sensing_obj is MatchAny:
-                raise ValueError("Sensing object cannot be MatchAny")
-            sens_counterparts: list[tuple[int, MatchKind], ...] = []
+            if sensing_obj is TOTAL:
+                raise ValueError("Sensing object cannot be a total")
+            sens_counterparts: list[int] = []
             reading_idx = 0
             for counterpart_idx, counterpart in enumerate(counterparts):
-                if counterpart is MatchAny:
-                    sp_flips = dict.fromkeys(itertools.product((-1,), sensing_obj), True)
-                elif not (sp_flips := get_colliding_sps(sensing_obj, counterpart)):
-                    continue
+                if counterpart is TOTAL:
+                    # all shapes contribute
+                    # TODO: skip non-colliding shapes
+                    sp_flips = dict.fromkeys(((s, -1) for s in sensing_obj), False)
+                else:
+                    # skip irrelevant shape pairs to keep sp list short
+                    sp_flips = {
+                        (min(pair), max(pair)): min(pair) == pair[1]
+                        for pair in itertools.product(sensing_obj, counterpart)
+                        if pair[0] != pair[1]
+                    }
+                    if shape_contact_pairs is not None:
+                        sp_flips = {sp: f for sp, f in sp_flips.items() if (sp[0] << 32) | sp[1] in shape_contact_pairs}
 
                 for sp, flip in sp_flips.items():
                     sp_to_reading[sp].append((sensing_obj_idx, reading_idx, flip))
@@ -339,62 +517,33 @@ class SensorContact:
             counterpart_indices.append(sens_counterparts)
 
         # maximum number of readings for any sensing object
-        n_readings = max(map(len, counterpart_indices)) if counterpart_indices else 0
+        n_readings = max(map(len, counterpart_indices), default=0)
 
         sp_sorted = sorted(sp_to_reading)
-        sp_reading = []
-        for sp in sp_sorted:
-            sp_reading.append(
-                [
-                    (sensing_obj_idx * n_readings + reading_idx, flip)
-                    for sensing_obj_idx, reading_idx, flip in sp_to_reading[sp]
-                ]
-            )
+        sp_reading_raw = [sp_to_reading[sp] for sp in sp_sorted]
 
-        shape = len(sensing_objs), n_readings
-        return sp_sorted, sp_reading, shape, counterpart_indices, sensing_obj_kinds, counterpart_kinds
+        return sp_sorted, sp_reading_raw, n_readings, counterpart_indices, sensing_obj_kinds, counterpart_kinds
 
-    def _eval_net_force(self, contact: Contacts):
+    def _eval_net_force(self, contacts: Contacts):
         self._net_force.zero_()
         wp.launch(
-            select_aggregate_net_force,
-            dim=contact.rigid_contact_max,
+            select_aggregate_net_force_kernel,
+            dim=contacts.rigid_contact_max,
             inputs=[
-                contact.rigid_contact_count,
+                contacts.rigid_contact_count,
                 self._sp_sorted,
                 self._n_shape_pairs,
                 self._sp_reading,
                 self._sp_ep_offset,
                 self._sp_ep_count,
-                contact.pair,
-                contact.normal,
-                contact.force,
+                contacts.rigid_contact_shape0,
+                contacts.rigid_contact_shape1,
+                contacts.rigid_contact_normal,
+                contacts.force,
             ],
             outputs=[self._net_force],
-            device=contact.device,
+            device=contacts.device,
         )
-
-    @classmethod
-    def _match_elem_key(
-        cls,
-        match_fn: Callable[[str, str], bool],
-        model: Model,
-        elem_key: dict[str, Any],
-        pattern: str | list[str],
-    ) -> list[int]:
-        """Find the indices of elements matching the pattern."""
-        matches = []
-
-        if isinstance(pattern, list):
-            for single_pattern in pattern:
-                matches.extend(cls._match_elem_key(match_fn, model, elem_key, single_pattern))
-            return matches
-
-        for idx, elem in enumerate(elem_key):
-            if match_fn(elem, pattern):
-                matches.append(idx)
-
-        return matches
 
 
 def _lol_to_arrays(list_of_lists: list[list], dtype, **kwargs) -> tuple[wp.array, wp.array, wp.array]:
