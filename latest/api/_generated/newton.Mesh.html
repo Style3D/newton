@@ -1181,7 +1181,7 @@ if the mesh is closed (two-manifold).</p>
 
 <dl class="py method">
 <dt class="sig sig-object py" id="newton.Mesh.build_sdf">
-<span class="sig-name descname"><span class="pre">build_sdf</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">device</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">narrow_band_range</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target_voxel_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_resolution</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">margin</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">shape_margin</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">scale</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#newton.Mesh.build_sdf" title="Link to this definition">#</a></dt>
+<span class="sig-name descname"><span class="pre">build_sdf</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">device</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">narrow_band_range</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target_voxel_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_resolution</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">margin</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">shape_margin</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">scale</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">texture_format</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'uint16'</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#newton.Mesh.build_sdf" title="Link to this definition">#</a></dt>
 <dd><p>Build and attach an SDF for this mesh.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -1206,6 +1206,11 @@ provided, the mesh vertices are scaled before SDF generation
 and <code class="docutils literal notranslate"><span class="pre">scale_baked</span></code> is set to <code class="docutils literal notranslate"><span class="pre">True</span></code> in the resulting SDF.
 Required for hydroelastic collision with non-unit shape scale.
 Defaults to <code class="docutils literal notranslate"><span class="pre">None</span></code> (no scale baking, scale applied at runtime).</p></li>
+<li><p><strong>texture_format</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – Subgrid texture storage format for the SDF.
+<code class="docutils literal notranslate"><span class="pre">&quot;uint16&quot;</span></code> (default) stores subgrid voxels in 16-bit
+normalized textures (half the memory of float32).
+<code class="docutils literal notranslate"><span class="pre">&quot;float32&quot;</span></code> stores full-precision values. <code class="docutils literal notranslate"><span class="pre">&quot;uint8&quot;</span></code> uses
+8-bit textures for minimum memory at lower precision.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Returns<span class="colon">:</span></dt>
@@ -1296,6 +1301,15 @@ If False, return a new Mesh for the convex hull.</p>
 <dd><p>Default maximum vertex count for convex hull approximation.</p>
 </dd></dl>
 
+<dl class="py property">
+<dt class="sig sig-object py" id="newton.Mesh.texture_hash">
+<em class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">texture_hash</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><span class="pre">int</span></a></em><a class="headerlink" href="#newton.Mesh.texture_hash" title="Link to this definition">#</a></dt>
+<dd><p>Content-based hash of the assigned texture.</p>
+<p>Returns a stable integer hash derived from the texture data.
+The value is lazily computed and cached until <code class="xref py py-attr docutils literal notranslate"><span class="pre">texture</span></code>
+is reassigned.</p>
+</dd></dl>
+
 </dd></dl>
 
 </section>
@@ -1346,6 +1360,7 @@ If False, return a new Mesh for the convex hull.</p>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.Mesh.copy"><code class="docutils literal notranslate"><span class="pre">copy()</span></code></a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.Mesh.finalize"><code class="docutils literal notranslate"><span class="pre">finalize()</span></code></a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.Mesh.MAX_HULL_VERTICES"><code class="docutils literal notranslate"><span class="pre">MAX_HULL_VERTICES</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#newton.Mesh.texture_hash"><code class="docutils literal notranslate"><span class="pre">texture_hash</span></code></a></li>
 </ul>
 </li>
 </ul>
