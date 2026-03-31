@@ -811,7 +811,7 @@
 <h1>newton.usd.has_applied_api_schema<a class="headerlink" href="#newton-usd-has-applied-api-schema" title="Link to this heading">#</a></h1>
 <dl class="py function">
 <dt class="sig sig-object py" id="newton.usd.has_applied_api_schema">
-<span class="sig-prename descclassname"><span class="pre">newton.usd.</span></span><span class="sig-name descname"><span class="pre">has_applied_api_schema</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">prim</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">schema_name</span></span></em><span class="sig-paren">)</span><a class="reference external" href="https://github.com/newton-physics/newton/blob/main/newton/_src/usd/utils.py#L110"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#newton.usd.has_applied_api_schema" title="Link to this definition">#</a></dt>
+<span class="sig-prename descclassname"><span class="pre">newton.usd.</span></span><span class="sig-name descname"><span class="pre">has_applied_api_schema</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">prim</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">schema_name</span></span></em><span class="sig-paren">)</span><a class="reference external" href="https://github.com/newton-physics/newton/blob/main/newton/_src/usd/utils.py#L98"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#newton.usd.has_applied_api_schema" title="Link to this definition">#</a></dt>
 <dd><p>Check if a USD prim has an applied API schema, even if the schema is not
 registered with USD’s schema registry.</p>
 <p>For registered schemas (e.g. <code class="docutils literal notranslate"><span class="pre">UsdPhysics.RigidBodyAPI</span></code>), <code class="docutils literal notranslate"><span class="pre">prim.HasAPI()</span></code>
@@ -822,7 +822,7 @@ be found by <code class="docutils literal notranslate"><span class="pre">HasAPI(
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>prim</strong> (<em>Prim</em>) – The USD prim to query.</p></li>
+<li><p><strong>prim</strong> (<a class="reference external" href="https://docs.omniverse.nvidia.com/kit/docs/pxr-usd-api/latest/pxr/Usd.html#pxr.Usd.Prim" title="(in Omniverse Kit)"><em>pxr.Usd.Prim</em></a>) – The USD prim to query.</p></li>
 <li><p><strong>schema_name</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – The API schema name to check for (e.g. <code class="docutils literal notranslate"><span class="pre">&quot;MjcSiteAPI&quot;</span></code>).</p></li>
 </ul>
 </dd>
