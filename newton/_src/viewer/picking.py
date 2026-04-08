@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import numpy as np
 import warp as wp
@@ -51,6 +39,7 @@ class Picking:
         self.pick_stiffness = pick_stiffness
         self.pick_damping = pick_damping
         self.world_offsets = world_offsets
+        self.visible_worlds_mask: wp.array | None = None
 
         self.min_dist = None
         self.min_index = None
@@ -209,7 +198,14 @@ class Picking:
                 d,
                 self.lock,
             ],
-            outputs=[self.min_dist, self.min_index, self.min_body_index, shape_world, world_offsets],
+            outputs=[
+                self.min_dist,
+                self.min_index,
+                self.min_body_index,
+                shape_world,
+                world_offsets,
+                self.visible_worlds_mask,
+            ],
             device=self.model.device,
         )
         wp.synchronize()

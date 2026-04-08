@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 """
 Tests for the XPBD solver.
@@ -396,7 +384,6 @@ def test_articulation_contact_drift(test, device):
     - Check that the root body hasn't drifted laterally.
     """
     builder = newton.ModelBuilder()
-    builder.default_body_armature = 0.01
     builder.default_joint_cfg.armature = 0.01
     builder.default_joint_cfg.target_ke = 2000.0
     builder.default_joint_cfg.target_kd = 1.0
@@ -414,6 +401,9 @@ def test_articulation_contact_drift(test, device):
         enable_self_collisions=False,
         ignore_inertial_definitions=True,
     )
+    armature_inertia = wp.mat33(np.eye(3, dtype=np.float32)) * 0.01
+    for i in range(builder.body_count):
+        builder.body_inertia[i] = builder.body_inertia[i] + armature_inertia
 
     builder.joint_q[-12:] = [0.2, 0.4, -0.6, -0.2, -0.4, 0.6, -0.2, 0.4, -0.6, 0.2, -0.4, 0.6]
     builder.joint_target_pos[-12:] = builder.joint_q[-12:]
