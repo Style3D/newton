@@ -407,6 +407,12 @@ def get_examples() -> dict[str, str]:
     return example_map
 
 
+def _print_examples(examples: dict[str, str]) -> None:
+    print("Available examples:")
+    for name in examples:
+        print(f"  {name}")
+
+
 def create_parser():
     """Create a base argument parser with common parameters for Newton examples.
 
@@ -470,6 +476,12 @@ def create_parser():
         default=[],
         metavar="KEY=VALUE",
         help="Override a warp.config attribute (repeatable).",
+    )
+    parser.add_argument(
+        "--realtime",
+        action="store_true",
+        default=False,
+        help="Use the most aggressive process priority in benchmark mode.",
     )
 
     return parser
@@ -566,6 +578,48 @@ def _apply_warp_config(parser, args):
         setattr(wp.config, key, value)
 
 
+def _raise_benchmark_priority(realtime=False):
+    """Raise process/thread priority for stable benchmark measurements.
+
+    When *realtime* is True, try to use the most aggressive process priority; failure to raise priority is a fatal error.
+    """
+    import sys  # noqa: PLC0415
+
+    def _fail(msg):
+        if realtime:
+            raise SystemExit(f"Error: {msg}")
+        print(f"Warning: Benchmark running at default process priority. Results may vary. {msg}")
+
+    if sys.platform == "win32":
+        try:
+            import psutil  # noqa: PLC0415
+
+            priority = psutil.REALTIME_PRIORITY_CLASS if realtime else psutil.HIGH_PRIORITY_CLASS
+            psutil.Process().nice(priority)
+        except ModuleNotFoundError:
+            _fail("Install 'psutil' to automatically raise priority.")
+    elif sys.platform == "linux":
+        try:
+            os.nice(-20 if realtime else -15)
+        except PermissionError:
+            _fail("Run with elevated privileges to automatically raise priority.")
+    elif sys.platform == "darwin":
+        import ctypes  # noqa: PLC0415
+        import ctypes.util  # noqa: PLC0415
+
+        try:
+            libsystem = ctypes.CDLL(ctypes.util.find_library("System"))
+            # From <sys/qos.h>
+            QOS_CLASS_USER_INITIATED = 0x19
+            QOS_CLASS_USER_INTERACTIVE = 0x21
+            qos = QOS_CLASS_USER_INTERACTIVE if realtime else QOS_CLASS_USER_INITIATED
+            rc = libsystem.pthread_set_qos_class_self_np(qos, 0)
+            if rc != 0:
+                _fail(f"Failed to automatically raise priority (error {rc}).")
+        except OSError as e:
+            _fail(f"Failed to automatically raise priority: {e}")
+
+
 def init(parser=None):
     """Initialize Newton example components from parsed arguments.
 
@@ -604,9 +658,10 @@ def init(parser=None):
     if args.device:
         wp.set_device(args.device)
 
-    # Benchmark mode forces null viewer
+    # Benchmark mode forces null viewer and raises process/thread priority
     if args.benchmark is not False:
         args.viewer = "null"
+        _raise_benchmark_priority(realtime=args.realtime)
 
     # Create viewer based on type
     if args.viewer == "gl":
@@ -659,20 +714,27 @@ def main():
 
     examples = get_examples()
 
-    if len(sys.argv) < 2:
-        print("Usage: python -m newton.examples <example_name>")
-        print("\nAvailable examples:")
-        for name in examples:
-            print(f"  {name}")
-        sys.exit(1)
+    if len(sys.argv) >= 2 and sys.argv[1] in ("-h", "--help"):
+        print("Usage: python -m newton.examples <example_name> [options]")
+        print("       python -m newton.examples          # run default basic_pendulum")
+        print("       python -m newton.examples --list   # print available examples")
+        print()
+        print("Run 'python -m newton.examples <example_name> --help' to see the")
+        print("options supported by a given example.")
+        sys.exit(0)
 
-    example_name = sys.argv[1]
+    if len(sys.argv) >= 2 and sys.argv[1] == "--list":
+        _print_examples(examples)
+        sys.exit(0)
+
+    if len(sys.argv) < 2:
+        example_name = "basic_pendulum"
+    else:
+        example_name = sys.argv[1]
 
     if example_name not in examples:
-        print(f"Error: Unknown example '{example_name}'")
-        print("\nAvailable examples:")
-        for name in examples:
-            print(f"  {name}")
+        print(f"Error: Unknown example '{example_name}'\n")
+        _print_examples(examples)
         sys.exit(1)
 
     # Set up sys.argv for the target script

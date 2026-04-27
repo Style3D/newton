@@ -55,7 +55,7 @@ available examples:
 
 .. code-block:: console
 
-    uv run -m newton.examples
+    uv run -m newton.examples --list
 
 See the :ref:`extra-dependencies` section of the installation guide for a
 description of all available extras.
@@ -186,6 +186,16 @@ not installed. In order to run these tests, include the ``torch-cu12`` or
             python -m pip install --extra-index-url https://download.pytorch.org/whl/cu128 -e ".[dev,torch-cu12]"
             # run tests
             python -m newton.tests
+
+.. note::
+
+    The ``torch-cu12`` extra requires PyTorch built against CUDA 12.8. If your
+    driver only supports CUDA 12.4 or 12.5 (check with ``nvidia-smi``), install
+    PyTorch 2.6.0 manually instead of using the ``torch-cu12`` extra:
+
+    .. code-block:: console
+
+        pip install torch==2.6.0 --extra-index-url https://download.pytorch.org/whl/cu124
 
 Specific Newton examples can be tested in isolation via the ``-k`` argument:
 
@@ -390,8 +400,9 @@ The built documentation will be available in ``docs/_build/html``.
 .. note::
 
     The documentation build requires `pandoc <https://pandoc.org/>`_ for converting Jupyter notebooks.
-    While ``pypandoc_binary`` is included in the ``[docs]`` dependencies, some systems may require
-    pandoc to be installed separately:
+    The ``[docs]`` dependencies include ``pypandoc_binary``, and ``docs/conf.py`` will
+    automatically use that bundled executable when it is available. If your environment
+    still cannot locate pandoc, install it separately:
 
     - **Ubuntu/Debian:** ``sudo apt-get install pandoc``
     - **macOS:** ``brew install pandoc``
@@ -648,7 +659,7 @@ New examples must also be registered in the examples ``README.md`` with a
         .. code-block:: console
 
             # list all available examples
-            uv run -m newton.examples
+            uv run -m newton.examples --list
 
             # run an example by short name
             uv run -m newton.examples basic_pendulum
@@ -662,7 +673,7 @@ New examples must also be registered in the examples ``README.md`` with a
         .. code-block:: console
 
             # list all available examples
-            python -m newton.examples
+            python -m newton.examples --list
 
             # run an example by short name
             python -m newton.examples basic_pendulum
