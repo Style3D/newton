@@ -84,6 +84,8 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
 
         if 'njmax' in kwargs:
             njmax = kwargs['njmax']
+        else:
+            njmax = 100
 
         self.rigid_solver = newton.solvers. SolverMuJoCo(model, njmax = njmax)
 
@@ -271,3 +273,6 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
 
         self._update_rigidbody_pos_to_simulation( state_in, state_out)
 
+
+    def rebuild_bvh(self, state: State):
+        pass

@@ -17,6 +17,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 
+from click import Path
 import numpy as np
 import warp as wp
 from pxr import Usd
@@ -29,6 +30,11 @@ from newton import Model, ModelBuilder, State, eval_fk
 #from newton.solvers import SolverFeatherstone
 from newton.solvers import SolverFeatherstone, SolverVBD
 from style3d import style3d_pro
+from style3d.style3d_mini import style3d_mini
+from pathlib import Path
+import style3dsim as sim
+import os
+import json
 
 # ----------------------------------------------------------------------
 # Robot key-pose sequence
@@ -159,6 +165,33 @@ def compute_ee_tip_velocity(
     body_out[3] = omega[0]
     body_out[4] = omega[1]
     body_out[5] = omega[2]
+
+
+def _log_in_simulation(**kwargs):
+
+    name = ''
+
+    if not sim.is_login():
+        login_file = None
+        if 'login_file' in kwargs:
+            login_file = kwargs['login_file']
+
+        if login_file and os.path.exists(login_file):
+            with open(login_file,'r') as f:
+                login=json.load(f)
+                name = login['name']
+                pass_word = login['pass_word']
+        else:
+            name = input('Enter your name : ')
+            pass_word = input('Enter your password : ')
+
+        sim.login(name, pass_word, True, None)
+
+    if sim.is_login():
+        print(f'login successful {name}')
+    else:
+        print('login failed')
+
 
 
 # ----------------------------------------------------------------------
@@ -315,6 +348,7 @@ class Example:
         )
         self.table_viz_color = wp.array([wp.vec3(0.5, 0.5, 0.5)], dtype=wp.vec3)
 
+
     def _init_simulation_state(self):
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
@@ -332,11 +366,15 @@ class Example:
         self.robot_solver = SolverFeatherstone(self.model, update_mass_matrix_interval=self.sim_substeps)
         self._init_jacobian_controller()
 
-        self.use_style3d_pro = False
+        self.use_style3d_pro = True
         if self.add_cloth:
             self.model.edge_rest_angle.zero_()
             if self.use_style3d_pro:
-                self.cloth_solver = style3d_pro.SolverStyle3DPro(self.model)
+
+                password_dir = Path(__file__).parent.resolve()
+                _log_in_simulation( login_file= password_dir / '..' / 'simulation_login.json' )
+                #self.cloth_solver = style3d_pro.SolverStyle3DPro(self.model)
+                self.cloth_solver = style3d_mini.SolverStyle3dMini(self.model )
             else:
                 self.cloth_solver = SolverVBD(
                     self.model,
@@ -415,10 +453,13 @@ class Example:
             self._capture()
 
     def _capture(self):
-        if wp.get_device().is_cuda:
+        if wp.get_device().is_cuda and False:
+        #if wp.get_device().is_cuda :
             with wp.ScopedCapture() as capture:
                 self.simulate()
             self.graph = capture.graph
+        else:
+            self. graph = None
 
     # ----- articulation ---------------------------------------------------
 
@@ -556,7 +597,8 @@ class Example:
         self.sim_time += self.frame_dt
 
     def simulate(self):
-        self.cloth_solver.rebuild_bvh(self.state_0)
+        if self.add_cloth:
+            self.cloth_solver.rebuild_bvh(self.state_0)
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
             self.state_1.clear_forces()
@@ -566,7 +608,8 @@ class Example:
                 with self._robot_only_physics():
                     self.state_0.joint_qd.assign(self.target_joint_qd)
                     self.robot_solver.step(self.state_0, self.state_1, self.control, None, self.sim_dt)
-                    self.state_0.particle_f.zero_()
+                    if self.add_cloth:
+                        self.state_0.particle_f.zero_()
 
             self.collision_pipeline.collide(self.state_0, self.contacts)
 
