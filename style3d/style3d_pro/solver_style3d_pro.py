@@ -7,7 +7,7 @@
 ########################################################################################################################
 
 import numpy as np
-import style3dsim as sim
+import synreal_sim as sim
 import warp as wp
 
 import newton
@@ -44,6 +44,12 @@ class SolverStyle3DPro(nt.solvers.SolverBase):
 
         # Create world
         self.world = sim.World()
+        if model.up_axis == nt.Axis.Z:
+            world_attrib = sim.WorldAttrib()
+            world_attrib.gravity = sim.Vec3f(0, 0, -9.8)
+            world_attrib.ground_direction = sim.Vec3f(0, 0, 1)
+            world_attrib.enable_rigid_self_collision = False
+            self.world.set_attrib(world_attrib)
 
         # Create Cloth
         verts_np = model.particle_q.numpy()
