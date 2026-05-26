@@ -374,7 +374,7 @@ class Example:
                 password_dir = Path(__file__).parent.resolve()
                 _log_in_simulation( login_file= password_dir / '..' / 'simulation_login.json' )
                 #self.cloth_solver = style3d_pro.SolverStyle3DPro(self.model)
-                self.cloth_solver = style3d_mini.SolverStyle3dMini(self.model )
+                self.cloth_solver = style3d_mini.SolverStyle3dMini(self.model, scale=self.viz_scale) )
             else:
                 self.cloth_solver = SolverVBD(
                     self.model,
@@ -646,6 +646,7 @@ class Example:
 
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.viz_state)
+
         self.viewer.log_shapes(
             "/table",
             newton.GeoType.BOX,
@@ -653,6 +654,7 @@ class Example:
             self.table_viz_xform,
             self.table_viz_color,
         )
+
         self.viewer.end_frame()
 
         self.model.shape_transform = self.sim_shape_transform
