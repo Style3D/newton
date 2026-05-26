@@ -57,7 +57,7 @@ def _get_a_sim_world():
     world_attrib.enable_gpu = True
     world_attrib.gravity = sim.Vec3f(0, 0, -9.8)
     world_attrib.ground_direction = sim.Vec3f(0., 0., 1.)
-    world_attrib.ground_height = 5e-3
+    world_attrib.ground_height = 2e-1
     world_attrib.time_step = 1e-3
     world_attrib.enable_rigid_self_collision = False
     world_attrib.enable_collision_force_map_rigidbody_piece = True
@@ -71,8 +71,8 @@ def _get_a_sim_world():
     return world
 
 
-def _to_sim_transform(trans):
-    translation = sim.Vec3f(trans[0], trans[1], trans[2])
+def _to_sim_transform(trans,scale_model_2_sim):
+    translation = sim.Vec3f(trans[0]*scale_model_2_sim, trans[1]*scale_model_2_sim, trans[2]*scale_model_2_sim)
     rotation = sim.Quat(trans[3], trans[4], trans[5], trans[6])
     scaling = sim.Vec3f(1.0, 1.0, 1.0)
     #return translation, rotation, scaling
@@ -89,21 +89,21 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
             njmax = 100
 
         if 'scale' in kwargs:
-            scale = kwargs['scale']
+            self.scale_model_2_sim = kwargs['scale']
         else:            
-            scale = 1.0    
+            self.scale_model_2_sim = 1.0    
 
-        self.rigid_solver = newton.solvers. SolverMuJoCo(model, njmax = njmax)
+        self.rigid_solver = newton.solvers.SolverMuJoCo(model, njmax = njmax)
 
         self.model = model
 
         self.world = _get_a_sim_world()
 
         ### add_cloth_to_simulation
-        self._add_cloth_to_simulation(scale)
+        self._add_cloth_to_simulation(self.scale_model_2_sim)
 
         ### add_rigid_body to simulation
-        self._add_rigid_body_to_simulation(scale)
+        self._add_rigid_body_to_simulation(self.scale_model_2_sim)
 
 
     def _add_cloth_to_simulation(self, scale):
@@ -116,9 +116,11 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
 
             cloth_attrib = sim. ClothAttrib()
 
-            self.cloth. set_attrib(cloth_attrib)
+            cloth_attrib.bend_stiff = sim.Vec3f(2e-5,2e-5,2e-5)    
 
-            self.cloth. attach(self.world)
+            self.cloth.set_attrib(cloth_attrib)
+
+            self.cloth.attach(self.world)
 
         else:
             self.cloth = None
@@ -147,7 +149,7 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
             trans = transform_i
             #translation, rotation, scaling = to_sim_transform(trans)
             #transform = sim.Transform(translation, rotation, scaling)
-            transform = _to_sim_transform(trans)
+            transform = _to_sim_transform(trans,self.scale_model_2_sim)
 
             if shape_type_i == newton.GeoType.MESH:
                 mesh = sim.Mesh(shape_source_i.indices, shape_source_i.vertices * scale)
@@ -235,7 +237,7 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
             for f, bary in zip(*rb_force):  # force and bary
 
                 trans_0 = trans_in[model_ri]
-                begin_trans = _to_sim_transform(trans_0)
+                begin_trans = _to_sim_transform(trans_0, self.scale_model_2_sim)
 
                 orientation = self._quaternion_to_matrix( begin_trans.rotation )
 
@@ -258,15 +260,15 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
 
             trans_0 = trans_in[model_ri]
             trans_1 = trans_out[model_ri]
-            begin_trans = _to_sim_transform(trans_0)
-            end_trans = _to_sim_transform(trans_1)
+            begin_trans = _to_sim_transform(trans_0, self.scale_model_2_sim)
+            end_trans = _to_sim_transform(trans_1, self.scale_model_2_sim)
             self.sim_rigid_bodies[sim_ri].move(begin_trans, end_trans)
 
 
     def _update_cloth_pos_to_state(self, state_out: State):
         if self.cloth is not None:
             cloth_x = self.cloth.get_positions()
-            state_out. particle_q.assign( cloth_x )
+            state_out.particle_q.assign( cloth_x/self.scale_model_2_sim )
 
     @override
     def step(self, state_in: State, state_out: State, control: Control, contacts: Contacts, dt: float):
