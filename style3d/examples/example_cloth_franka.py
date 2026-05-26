@@ -262,13 +262,13 @@ class Example:
             self.dof_q_per_world = franka.joint_coord_count
             self.dof_qd_per_world = franka.joint_dof_count
 
-        self._add_table()
+        #self._add_table()
         self._add_cloth()
         self.scene.add_ground_plane()
 
         self.model = self.scene.finalize(requires_grad=False)
 
-        self._hide_table_from_viewer()
+        #self._hide_table_from_viewer()
         self._apply_contact_materials()
         self._prepare_table_viz_arrays()
 
@@ -374,7 +374,7 @@ class Example:
                 password_dir = Path(__file__).parent.resolve()
                 _log_in_simulation( login_file= password_dir / '..' / 'simulation_login.json' )
                 #self.cloth_solver = style3d_pro.SolverStyle3DPro(self.model)
-                self.cloth_solver = style3d_mini.SolverStyle3dMini(self.model, scale=self.viz_scale) )
+                self.cloth_solver = style3d_mini.SolverStyle3dMini(self.model, scale=self.viz_scale) 
             else:
                 self.cloth_solver = SolverVBD(
                     self.model,
