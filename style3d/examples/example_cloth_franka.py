@@ -221,6 +221,7 @@ class Example:
         self.frame_dt = 1 / self.fps
         self.sim_dt = self.frame_dt / self.sim_substeps
         self.sim_time = 0.0
+        self.sim_frame = 0
 
         # Visualization: simulation in cm, viewer in meters.
         self.viz_scale = 0.01
@@ -615,9 +616,10 @@ class Example:
 
             if self.add_cloth:
                 self.cloth_solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
+                #pass
 
             self.state_0, self.state_1 = self.state_1, self.state_0
-            self.sim_time += self.sim_dt
+            self.sim_frame += 1
 
     # ----- rendering ------------------------------------------------------
 
