@@ -58,6 +58,8 @@ def _get_a_sim_world():
     world_attrib.gravity = sim.Vec3f(0, 0, -9.8)
     world_attrib.ground_direction = sim.Vec3f(0., 0., 1.)
     world_attrib.ground_height = 2e-1
+    world_attrib.ground_static_friction = 1.0
+    world_attrib.ground_dynamic_friction = 0.9
     world_attrib.time_step = 1e-3
     world_attrib.enable_rigid_self_collision = False
     world_attrib.enable_collision_force_map_rigidbody_piece = True
@@ -116,7 +118,7 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
 
             cloth_attrib = sim. ClothAttrib()
 
-            cloth_attrib.bend_stiff = sim.Vec3f(2e-5,2e-5,2e-5)    
+            cloth_attrib.bend_stiff = sim.Vec3f(1e-7,1e-7,1e-7)    
 
             self.cloth.set_attrib(cloth_attrib)
 
@@ -134,13 +136,32 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
         shape_geo_is_solid = self.model.shape_is_solid.numpy()
         shape_transform = self.model.shape_transform.numpy()
         shape_transform_q = self.model.body_q.numpy()
+        shape_flags = self.model.shape_flags.numpy()
 
-        shape_body_idnex = self.model.shape_body.numpy()
+        shape_2_body_index = self.model.shape_body.numpy() # 
 
         self.sim_rigid_bodies = [] # simulation rigid bodies
-        self.sim_rigid_body_index = shape_body_idnex # rigid body index in newton model, used to map to simulation rigid bodies
+        self.sim_2_body_index = []
 
-        for si, ri in enumerate(shape_body_idnex):
+        for si, mi in enumerate(shape_2_body_index):
+
+            flag_str = []
+            if shape_flags[si] & newton.ShapeFlags.COLLIDE_SHAPES:
+                flag_str.append('COLLIDE_SHAPES')
+            if shape_flags[si] & newton.ShapeFlags.VISIBLE:
+                flag_str.append('VISIBLE')
+            if shape_flags[si] & newton.ShapeFlags.COLLIDE_PARTICLES:
+                flag_str.append('COLLIDE_PARTICLES')
+            if shape_flags[si] & newton.ShapeFlags.SITE:
+                flag_str.append('SITE')
+            if shape_flags[si] & newton.ShapeFlags.HYDROELASTIC:
+                flag_str.append('HYDROELASTIC')
+
+            print(f"shape {si} rigid {mi}, flags: {flag_str}")
+
+            if 'COLLIDE_PARTICLES' not in flag_str:
+                continue
+
 
             shape_source_i = shape_geo_src[si]
             shape_type_i = shape_geo_type[si]
@@ -151,13 +172,16 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
             #transform = sim.Transform(translation, rotation, scaling)
             transform = _to_sim_transform(trans,self.scale_model_2_sim)
 
+            shape_type_str =''
             if shape_type_i == newton.GeoType.MESH:
                 mesh = sim.Mesh(shape_source_i.indices, shape_source_i.vertices * scale)
                 rigid_body = sim.RigidBody(mesh, transform)
+                shape_type_str = 'MESH' 
             elif shape_type_i == newton.GeoType.SPHERE:
                 sphereSize = sim.SphereSize()
                 sphereSize.radius = shape_geo_scale[si] * scale 
                 rigid_body = sim.RigidBody(sphereSize, transform)
+                shape_type_str = 'SPHERE' 
             elif shape_type_i == newton.GeoType.BOX:
 
                 # TODO: get geo size some where
@@ -166,13 +190,15 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
                 s = shape_geo_scale[si]
 
                 boxSize = sim.BoxSize()
-                boxSize.length_x = 2 * s[0] * scale
-                boxSize.length_y = 2 * s[1] * scale
-                boxSize.length_z = 2 * s[2] * scale
+                boxSize.length_x = 2 * s[0] * scale 
+                boxSize.length_y = 2 * s[1] * scale 
+                boxSize.length_z = 2 * s[2] * scale 
                 rigid_body = sim.RigidBody(boxSize, transform)
+                shape_type_str = 'BOX' 
             elif shape_type_i == newton.GeoType.CYLINDER:
                 cylinderSize = sim.CylinderSize()
                 rigid_body = sim.RigidBody(cylinderSize, transform)
+                shape_type_str = 'CYLINDER' 
             else:
                 print('unknown geometry type!')
                 continue
@@ -187,6 +213,8 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
             rigid_body.attach(self.world)
 
             self.sim_rigid_bodies.append(rigid_body)
+            self.sim_2_body_index.append(mi)
+            print(f"add shape {si} {shape_type_str} to simulation , rigid body {len(self.sim_rigid_bodies)-1}, model body {mi}")
 
 
     def _quaternion_to_matrix(self,q):
@@ -210,8 +238,7 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
 
     def _update_rigidbody_cloth_collision_force(self ):
         self.collision_force = []
-        #for rb in self.sim_rigid_bodies:
-        for sim_ri, model_ri in enumerate(self.sim_rigid_body_index):
+        for sim_ri, model_ri in enumerate(self.sim_2_body_index):
             if model_ri < 0: # save some time
                 self.collision_force.append([])
             else:
@@ -224,7 +251,7 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
         trans_in = state_in.body_q.numpy()
         body_f_np = state_in.body_f.numpy()
 
-        for sim_ri, model_ri in enumerate(self.sim_rigid_body_index):
+        for sim_ri, model_ri in enumerate(self.sim_2_body_index):
 
             if model_ri < 0:
                 continue
@@ -253,7 +280,7 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
         trans_in = state_in.body_q.numpy()
         trans_out = state_out.body_q.numpy()
 
-        for sim_ri, model_ri in enumerate(self.sim_rigid_body_index):
+        for sim_ri, model_ri in enumerate(self.sim_2_body_index):
 
             if model_ri < 0:
                 continue
