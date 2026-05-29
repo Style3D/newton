@@ -53,22 +53,7 @@ def _get_a_sim_world():
     sim.set_log_callback(_log_callback)
 
     world = sim.World()
-    world_attrib = sim.WorldAttrib()
-    world_attrib.enable_gpu = True
-    world_attrib.gravity = sim.Vec3f(0, 0, -9.8)
-    world_attrib.ground_direction = sim.Vec3f(0., 0., 1.)
-    world_attrib.ground_height = 0.21
-    world_attrib.ground_static_friction = 1.0
-    world_attrib.ground_dynamic_friction = 0.9
-    world_attrib.time_step = 1e-3
-    world_attrib.enable_rigid_self_collision = False
-    world_attrib.enable_collision_force_map_rigidbody_piece = True
-    world_attrib.enable_plastic_bending = True
-    world_attrib.enable_volume_conserve = True
-    world.set_attrib(world_attrib)
 
-    print( f'time step {world_attrib.time_step}' )
-    print( f'gravity {world_attrib.gravity.x}, {world_attrib.gravity.y}, {world_attrib.gravity.z} ' )
 
     return world
 
@@ -95,20 +80,56 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
         else:            
             self.scale_model_2_sim = 1.0    
 
+        if 'cloth_attrib_fn' in kwargs:
+            cloth_attrib_fn = kwargs['cloth_attrib_fn']
+        else:
+            cloth_attrib_fn = lambda at : at
+
+        if 'rigid_body_attrib_fn' in kwargs:
+            rigid_body_attrib_fn = kwargs['rigid_body_attrib_fn']
+        else:
+            rigid_body_attrib_fn = lambda at : at
+
+        if 'world_attrib_fn' in kwargs:
+            world_attrib_fn = kwargs['world_attrib_fn']
+        else:
+            world_attrib_fn = lambda at : at
+
+        if 'two_way_coupling' in kwargs:
+            self.two_way_coupling = kwargs['two_way_coupling']
+        else:
+            self.two_way_coupling = True
+
         self.rigid_solver = newton.solvers.SolverMuJoCo(model, njmax = njmax)
 
         self.model = model
 
         self.world = _get_a_sim_world()
 
+        world_attrib = sim.WorldAttrib()
+        world_attrib.enable_gpu = True
+        world_attrib.gravity = sim.Vec3f(0, 0, -9.8)  # adapt for newton
+        world_attrib.ground_direction = sim.Vec3f(0., 0., 1.) # z up
+        world_attrib.ground_height = 1e-3 
+        world_attrib.time_step = 0.001  # better to set in user input function for different simulation time step
+        world_attrib.enable_rigid_self_collision = False
+        world_attrib.enable_collision_force_map_rigidbody_piece = True
+        world_attrib.enable_plastic_bending = False
+        world_attrib.enable_volume_conserve = False
+        world_attrib_fn(world_attrib) # user input function
+        self.world.set_attrib(world_attrib)
+
+        print( f'time step {world_attrib.time_step}' )
+        print( f'gravity {world_attrib.gravity.x}, {world_attrib.gravity.y}, {world_attrib.gravity.z} ' )
+
         ### add_cloth_to_simulation
-        self._add_cloth_to_simulation(self.scale_model_2_sim)
+        self._add_cloth_to_simulation(self.scale_model_2_sim,cloth_attrib_fn)
 
         ### add_rigid_body to simulation
-        self._add_rigid_body_to_simulation(self.scale_model_2_sim)
+        self._add_rigid_body_to_simulation(self.scale_model_2_sim,rigid_body_attrib_fn)
 
 
-    def _add_cloth_to_simulation(self, scale):
+    def _add_cloth_to_simulation(self, scale, cloth_attrib_fn):
         # TODO: handle multiple cloth
         x, t = self._extract_cloth_mesh()
 
@@ -116,12 +137,8 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
 
             self.cloth = sim. Cloth(t, x * scale, np.array([], dtype=float), False)
 
-            cloth_attrib = sim. ClothAttrib()
-
-            cloth_attrib.bend_stiff = sim.Vec3f(0,0,0)    
-            cloth_attrib.density = 0.5
-            cloth_attrib.thickness = 7e-3
-
+            cloth_attrib = sim.ClothAttrib()
+            cloth_attrib_fn(cloth_attrib)
             self.cloth.set_attrib(cloth_attrib)
 
             self.cloth.attach(self.world)
@@ -130,7 +147,7 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
             self.cloth = None
 
 
-    def _add_rigid_body_to_simulation(self, scale):
+    def _add_rigid_body_to_simulation(self, scale, rigid_body_attrib_fn):
         shape_geo_src = self.model.shape_source
         shape_geo_type = self.model.shape_type.numpy()
         shape_geo_scale = self.model.shape_scale.numpy()
@@ -159,7 +176,7 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
             if shape_flags[si] & newton.ShapeFlags.HYDROELASTIC:
                 flag_str.append('HYDROELASTIC')
 
-            print(f"shape {si} rigid {mi}, flags: {flag_str}")
+            #print(f"shape {si} rigid {mi}, flags: {flag_str}")
 
             if 'COLLIDE_PARTICLES' not in flag_str:
                 continue
@@ -203,8 +220,7 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
                 continue
 
             rigid_body_attrib = sim.RigidBodyAttrib()
-            rigid_body_attrib.static_friction = 1.0        
-            rigid_body_attrib.dynamic_friction = 1.0        
+            rigid_body_attrib_fn(rigid_body_attrib) # user input function   
             rigid_body.set_attrib(rigid_body_attrib)
 
             rigid_body.set_pin(True)
@@ -215,7 +231,7 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
 
             self.sim_rigid_bodies.append(rigid_body)
             self.sim_2_body_index.append(mi)
-            print(f"add shape {si} {shape_type_str} to simulation , rigid body {len(self.sim_rigid_bodies)-1}, model body {mi}")
+            #print(f"add shape {si} {shape_type_str} to simulation , rigid body {len(self.sim_rigid_bodies)-1}, model body {mi}")
 
 
     def _quaternion_to_matrix(self,q):
@@ -301,9 +317,10 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
     @override
     def step(self, state_in: State, state_out: State, control: Control, contacts: Contacts, dt: float):
 
-        ## apply collision force
-        #self._update_rigidbody_cloth_collision_force()
-        #self._apply_collision_force_to_rigidbody( state_in)
+        # apply collision force
+        if self.two_way_coupling:
+            self._update_rigidbody_cloth_collision_force()
+            self._apply_collision_force_to_rigidbody( state_in)
 
         self.rigid_solver.step(state_in, state_out, control, contacts, dt)
 

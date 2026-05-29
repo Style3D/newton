@@ -367,15 +367,38 @@ class Example:
         self.robot_solver = SolverFeatherstone(self.model, update_mass_matrix_interval=self.sim_substeps)
         self._init_jacobian_controller()
 
-        self.use_style3d_pro = True
+        self.use_style3d_sim = True
         if self.add_cloth:
             self.model.edge_rest_angle.zero_()
-            if self.use_style3d_pro:
+            if self.use_style3d_sim:
 
                 password_dir = Path(__file__).parent.resolve()
-                _log_in_simulation( login_file= password_dir / '..' / 'simulation_login.json' )
-                #self.cloth_solver = style3d_pro.SolverStyle3DPro(self.model)
-                self.cloth_solver = style3d_mini.SolverStyle3dMini(self.model, scale=self.viz_scale) 
+                _log_in_simulation(login_file= password_dir / '..' / 'simulation_login.json')
+
+                # TODO: unify newton and style3d sim physics parameters  
+
+                # cloth stiffness and parameter settings for style3d sim (merter scale)
+                def cloth_attrib_fn(cloth_attrib:sim.ClothAttrib):
+                    cloth_attrib.bend_stiff = sim.Vec3f(1e-7,1e-7,1e-7) # bending stiffness 
+                    cloth_attrib.density = 0.5
+                    cloth_attrib.thickness = 7e-3 # large thickness to avoid stucking 
+
+                def rigid_body_attrib_fn(rigid_body_attrib:sim.RigidBodyAttrib):
+                    rigid_body_attrib.static_friction = 1.0    # large friction to encarage crumpling and folding    
+                    rigid_body_attrib.dynamic_friction = 1.0        
+
+                # world attrib  (merter scale)
+                def world_attrib_fn(world_attrib:sim.WorldAttrib):
+                    world_attrib.ground_height = 0.21 # server as table
+                    world_attrib.time_step = self.sim_dt
+
+                self.cloth_solver = style3d_mini.SolverStyle3dMini(self.model, 
+                                                                   scale=self.viz_scale,
+                                                                   cloth_attrib_fn=cloth_attrib_fn,
+                                                                   rigid_body_attrib_fn=rigid_body_attrib_fn,
+                                                                   world_attrib_fn=world_attrib_fn,
+                                                                   two_way_coupling=False
+                                                                   ) 
             else:
                 self.cloth_solver = SolverVBD(
                     self.model,
