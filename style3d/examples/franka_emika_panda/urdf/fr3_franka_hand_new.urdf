@@ -263,35 +263,14 @@
   <link name="fr3_leftfinger">
     <visual name="fr3_leftfinger_visual">
       <geometry>
-        <mesh filename="package://franka_emika_panda/meshes/robot_ee/franka_hand_white/visual/finger.dae"/>
+        <!-- <mesh filename="package://franka_emika_panda/meshes/robot_ee/franka_hand_white/visual/finger.dae"/> -->
+        <mesh filename="package://franka_emika_panda/meshes/robot_ee/franka_hand_white/collision/fr3_leftfinger_collision.stl"/>
       </geometry>
     </visual>
-    <!-- screw mount -->
+    <!-- screw mount + cartriage sledge + diagonal finger + rubber tip, baked into one mesh -->
     <collision>
-      <origin rpy="0 0 0" xyz="0 18.5e-3 11e-3"/>
       <geometry>
-        <mesh filename="package://franka_emika_panda/meshes/robot_ee/franka_hand_white/collision/unit_cube.stl" scale="0.022 0.015 0.020"/>
-      </geometry>
-    </collision>
-    <!-- cartriage sledge -->
-    <collision>
-      <origin rpy="0 0 0" xyz="0 6.8e-3 2.2e-3"/>
-      <geometry>
-        <mesh filename="package://franka_emika_panda/meshes/robot_ee/franka_hand_white/collision/unit_cube.stl" scale="0.022 0.0088 0.0038"/>
-      </geometry>
-    </collision>
-    <!-- diagonal finger -->
-    <collision>
-      <origin rpy="0.5235987755982988 0 0" xyz="0 15.9e-3 28.35e-3"/>
-      <geometry>
-        <mesh filename="package://franka_emika_panda/meshes/robot_ee/franka_hand_white/collision/unit_cube.stl" scale="0.0175 0.007 0.0235"/>
-      </geometry>
-    </collision>
-    <!-- rubber tip with which to grasp -->
-    <collision>
-      <origin rpy="0 0 0" xyz="0 7.58e-3 45.25e-3"/>
-      <geometry>
-        <mesh filename="package://franka_emika_panda/meshes/robot_ee/franka_hand_white/collision/unit_cube.stl" scale="0.0175 0.0152 0.0185"/>
+        <mesh filename="package://franka_emika_panda/meshes/robot_ee/franka_hand_white/collision/fr3_leftfinger_collision.stl"/>
       </geometry>
     </collision>
     <inertial>
@@ -304,35 +283,14 @@
     <visual name="fr3_rightfinger_visual">
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="package://franka_emika_panda/meshes/robot_ee/franka_hand_white/visual/finger.dae"/>
+        <!-- <mesh filename="package://franka_emika_panda/meshes/robot_ee/franka_hand_white/visual/finger.dae"/> -->
+        <mesh filename="package://franka_emika_panda/meshes/robot_ee/franka_hand_white/collision/fr3_rightfinger_collision.stl"/>
       </geometry>
     </visual>
-    <!-- screw mount -->
+    <!-- screw mount + cartriage sledge + diagonal finger + rubber tip, baked into one mesh -->
     <collision>
-      <origin rpy="0 0 0" xyz="0 18.5e-3 11e-3"/>
       <geometry>
-        <mesh filename="package://franka_emika_panda/meshes/robot_ee/franka_hand_white/collision/unit_cube.stl" scale="0.022 0.015 0.020"/>
-      </geometry>
-    </collision>
-    <!-- cartriage sledge -->
-    <collision>
-      <origin rpy="0 0 0" xyz="0 6.8e-3 2.2e-3"/>
-      <geometry>
-        <mesh filename="package://franka_emika_panda/meshes/robot_ee/franka_hand_white/collision/unit_cube.stl" scale="0.022 0.0088 0.0038"/>
-      </geometry>
-    </collision>
-    <!-- diagonal finger -->
-    <collision>
-      <origin rpy="-0.5235987755982988 0 3.141592653589793" xyz="0 15.9e-3 28.35e-3"/>
-      <geometry>
-        <mesh filename="package://franka_emika_panda/meshes/robot_ee/franka_hand_white/collision/unit_cube.stl" scale="0.0175 0.007 0.0235"/>
-      </geometry>
-    </collision>
-    <!-- rubber tip with which to grasp -->
-    <collision>
-      <origin rpy="0 0 0" xyz="0 7.58e-3 45.25e-3"/>
-      <geometry>
-        <mesh filename="package://franka_emika_panda/meshes/robot_ee/franka_hand_white/collision/unit_cube.stl" scale="0.0175 0.0152 0.0185"/>
+        <mesh filename="package://franka_emika_panda/meshes/robot_ee/franka_hand_white/collision/fr3_rightfinger_collision.stl"/>
       </geometry>
     </collision>
     <inertial>

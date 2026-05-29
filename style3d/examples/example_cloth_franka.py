@@ -292,7 +292,7 @@ class Example:
             vertices=[wp.vec3(v) for v in shirt_mesh.vertices],
             indices=shirt_mesh.indices,
             rot=wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), np.pi),
-            pos=wp.vec3(0.0, 70.0, 30.0),
+            pos=wp.vec3(0.0, 72.0, 40.0),
             vel=wp.vec3(0.0, 0.0, 0.0),
             density=0.02,
             scale=1.0,
@@ -465,9 +465,9 @@ class Example:
     # ----- articulation ---------------------------------------------------
 
     def create_articulation(self, builder):
-        asset_path = newton.utils.download_asset("franka_emika_panda")
+        asset_path = Path(__file__).parent / "franka_emika_panda"
         builder.add_urdf(
-            str(asset_path / "urdf" / "fr3_franka_hand.urdf"),
+            str(asset_path / "urdf" / "fr3_franka_hand_new.urdf"),
             xform=wp.transform((-50.0, -50.0, 0.0), wp.quat_identity()),
             floating=False,
             scale=100,  # URDF is in meters, scale to cm
