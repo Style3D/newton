@@ -263,8 +263,8 @@
   <link name="fr3_leftfinger">
     <visual name="fr3_leftfinger_visual">
       <geometry>
-        <!-- <mesh filename="package://franka_emika_panda/meshes/robot_ee/franka_hand_white/visual/finger.dae"/> -->
-        <mesh filename="package://franka_emika_panda/meshes/robot_ee/franka_hand_white/collision/fr3_leftfinger_collision.stl"/>
+        <mesh filename="package://franka_emika_panda/meshes/robot_ee/franka_hand_white/visual/finger.dae"/> 
+        <!-- <mesh filename="package://franka_emika_panda/meshes/robot_ee/franka_hand_white/collision/fr3_leftfinger_collision.stl"/> -->
       </geometry>
     </visual>
     <!-- screw mount + cartriage sledge + diagonal finger + rubber tip, baked into one mesh -->
@@ -283,8 +283,8 @@
     <visual name="fr3_rightfinger_visual">
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <!-- <mesh filename="package://franka_emika_panda/meshes/robot_ee/franka_hand_white/visual/finger.dae"/> -->
-        <mesh filename="package://franka_emika_panda/meshes/robot_ee/franka_hand_white/collision/fr3_rightfinger_collision.stl"/>
+        <mesh filename="package://franka_emika_panda/meshes/robot_ee/franka_hand_white/visual/finger.dae"/> 
+        <!-- <mesh filename="package://franka_emika_panda/meshes/robot_ee/franka_hand_white/collision/fr3_rightfinger_collision.stl"/> -->
       </geometry>
     </visual>
     <!-- screw mount + cartriage sledge + diagonal finger + rubber tip, baked into one mesh -->
