@@ -57,7 +57,7 @@ def _get_a_sim_world():
     world_attrib.enable_gpu = True
     world_attrib.gravity = sim.Vec3f(0, 0, -9.8)
     world_attrib.ground_direction = sim.Vec3f(0., 0., 1.)
-    world_attrib.ground_height = 2e-1
+    world_attrib.ground_height = 0.21
     world_attrib.ground_static_friction = 1.0
     world_attrib.ground_dynamic_friction = 0.9
     world_attrib.time_step = 1e-3
@@ -110,7 +110,7 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
 
     def _add_cloth_to_simulation(self, scale):
         # TODO: handle multiple cloth
-        x, t = self. _extract_cloth_mesh()
+        x, t = self._extract_cloth_mesh()
 
         if len(t) > 0:
 
@@ -118,7 +118,9 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
 
             cloth_attrib = sim. ClothAttrib()
 
-            cloth_attrib.bend_stiff = sim.Vec3f(1e-7,1e-7,1e-7)    
+            cloth_attrib.bend_stiff = sim.Vec3f(0,0,0)    
+            cloth_attrib.density = 0.5
+            cloth_attrib.thickness = 7e-3
 
             self.cloth.set_attrib(cloth_attrib)
 
@@ -184,9 +186,6 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
                 shape_type_str = 'SPHERE' 
             elif shape_type_i == newton.GeoType.BOX:
 
-                # TODO: get geo size some where
-                # s = geo_size[geom_id]
-                #shape_geo_scale[si]
                 s = shape_geo_scale[si]
 
                 boxSize = sim.BoxSize()
@@ -204,6 +203,8 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
                 continue
 
             rigid_body_attrib = sim.RigidBodyAttrib()
+            rigid_body_attrib.static_friction = 1.0        
+            rigid_body_attrib.dynamic_friction = 1.0        
             rigid_body.set_attrib(rigid_body_attrib)
 
             rigid_body.set_pin(True)
