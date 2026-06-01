@@ -198,6 +198,68 @@ def _log_in_simulation(**kwargs):
 # Example
 # ----------------------------------------------------------------------
 
+def _quat_xyzw_to_matrix(q):
+    x, y, z, w = q
+    xx = x * x
+    yy = y * y
+    zz = z * z
+    xy = x * y
+    xz = x * z
+    yz = y * z
+    wx = w * x
+    wy = w * y
+    wz = w * z
+    return np.array(
+        [
+            [1.0 - 2.0 * (yy + zz), 2.0 * (xy - wz), 2.0 * (xz + wy)],
+            [2.0 * (xy + wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz - wx)],
+            [2.0 * (xz - wy), 2.0 * (yz + wx), 1.0 - 2.0 * (xx + yy)],
+        ],
+        dtype=np.float32,
+    )
+
+
+def _transform_points(points, xform):
+    rot = _quat_xyzw_to_matrix(xform[3:7])
+    return points @ rot.T + xform[:3]
+
+
+def _shape_mesh(model, shape_idx):
+    shape_type = model.shape_type.numpy()[shape_idx]
+    shape_source = model.shape_source[shape_idx]
+    shape_scale = np.asarray(model.shape_scale.numpy()[shape_idx], dtype=np.float32)
+
+    if shape_type in (newton.GeoType.MESH, newton.GeoType.CONVEX_MESH):
+        vertices = np.asarray(shape_source.vertices, dtype=np.float32).reshape(-1, 3)
+        faces = np.asarray(shape_source.indices, dtype=np.int32).reshape(-1, 3)
+        return vertices * shape_scale.reshape(1, 3), faces
+
+    if shape_type == newton.GeoType.BOX:
+        mesh = newton.Mesh.create_box(float(shape_scale[0]), float(shape_scale[1]), float(shape_scale[2]))
+    elif shape_type == newton.GeoType.SPHERE:
+        mesh = newton.Mesh.create_sphere(float(shape_scale[0]), num_latitudes=16, num_longitudes=16)
+    elif shape_type == newton.GeoType.CAPSULE:
+        mesh = newton.Mesh.create_capsule(float(shape_scale[0]), float(shape_scale[1]), up_axis=newton.Axis.X)
+    elif shape_type == newton.GeoType.CYLINDER:
+        mesh = newton.Mesh.create_cylinder(float(shape_scale[0]), float(shape_scale[1]), up_axis=newton.Axis.X)
+    elif shape_type == newton.GeoType.CONE:
+        mesh = newton.Mesh.create_cone(float(shape_scale[0]), float(shape_scale[1]), up_axis=newton.Axis.X)
+    else:
+        return None, None
+
+    return np.asarray(mesh.vertices, dtype=np.float32).reshape(-1, 3), np.asarray(mesh.indices, dtype=np.int32).reshape(-1, 3)
+
+
+def _write_obj_mesh(file, name, vertices, faces, vertex_offset):
+    file.write(f"o {name}\n")
+    for v in vertices:
+        file.write(f"v {v[0]:.8f} {v[1]:.8f} {v[2]:.8f}\n")
+    for face in faces:
+        a, b, c = face + vertex_offset + 1
+        file.write(f"f {a} {b} {c}\n")
+    return vertex_offset + len(vertices)
+
+
 class Example:
     def __init__(self, viewer, args):
         self.viewer = viewer
@@ -250,6 +312,9 @@ class Example:
         self.table_hy_cm = 40.0
         self.table_hz_cm = 10.0
         self.table_pos_cm = wp.vec3(0.0, -50.0, 10.0)
+
+        self.export_dir = Path(__file__).parent / "exports"
+        self._export_key_was_down = False
 
     def _build_model(self):
         """Build the scene, finalize the model, and apply post-finalize fixups."""
@@ -380,7 +445,7 @@ class Example:
                 # cloth stiffness and parameter settings for style3d sim (merter scale)
                 def cloth_attrib_fn(cloth_attrib:sim.ClothAttrib):
                     cloth_attrib.bend_stiff = sim.Vec3f(1e-7,1e-7,1e-7) # bending stiffness 
-                    cloth_attrib.density = 0.5
+                    cloth_attrib.density = 3.0
                     cloth_attrib.thickness = 7e-3 # large thickness to avoid stucking 
 
                 def rigid_body_attrib_fn(rigid_body_attrib:sim.RigidBodyAttrib):
@@ -646,9 +711,54 @@ class Example:
 
     # ----- rendering ------------------------------------------------------
 
+    def _export_scene_obj(self):
+        path = self.export_dir / f"cloth_franka_frame_{self.sim_frame:06d}.obj"
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        body_q = self.state_0.body_q.numpy() if self.model.body_count > 0 else np.empty((0, 7), dtype=np.float32)
+        shape_body = self.model.shape_body.numpy()
+        shape_transform = self.model.shape_transform.numpy()
+        shape_flags = self.model.shape_flags.numpy()
+
+        vertex_offset = 0
+        with open(path, "w", encoding="utf-8") as file:
+            file.write("# Exported from style3d/examples/example_cloth_franka.py\n")
+            file.write("# Units: meters\n")
+
+            if self.add_cloth and self.model.tri_count > 0:
+                cloth_vertices = self.state_0.particle_q.numpy().reshape(self.model.particle_count, 3) * self.viz_scale
+                cloth_faces = self.model.tri_indices.numpy().reshape(self.model.tri_count, 3)
+                vertex_offset = _write_obj_mesh(file, "cloth", cloth_vertices, cloth_faces, vertex_offset)
+
+            for shape_idx in range(self.model.shape_count):
+                if not (shape_flags[shape_idx] & int(newton.ShapeFlags.VISIBLE)):
+                    continue
+                body_idx = int(shape_body[shape_idx])
+                if body_idx < 0:
+                    continue
+
+                vertices, faces = _shape_mesh(self.model, shape_idx)
+                if vertices is None or len(vertices) == 0 or len(faces) == 0:
+                    continue
+
+                vertices = _transform_points(vertices, shape_transform[shape_idx])
+                vertices = _transform_points(vertices, body_q[body_idx]) * self.viz_scale
+                label = self.model.shape_label[shape_idx].replace("/", "_").replace(" ", "_")
+                vertex_offset = _write_obj_mesh(file, f"franka_{label}", vertices, faces, vertex_offset)
+
+        print(f"Exported Franka and cloth OBJ: {path}")
+
+    def _check_export_hotkey(self):
+        key_down = hasattr(self.viewer, "is_key_down") and self.viewer.is_key_down("1")
+        if key_down and not self._export_key_was_down:
+            self._export_scene_obj()
+        self._export_key_was_down = key_down
+
     def render(self):
         if self.viewer is None:
             return
+
+        self._check_export_hotkey()
 
         # Scale particle and body positions from cm to meters.
         wp.launch(

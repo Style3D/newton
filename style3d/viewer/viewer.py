@@ -133,6 +133,19 @@ class Viewer:
     def set_on_release_drag(self, callback):
         self._on_release_drag = callback
 
+    def is_key_down(self, key: str | int) -> bool:
+        if isinstance(key, str):
+            if len(key) == 1 and key.isdigit():
+                key_name = f"ImGuiKey_{key}"
+            elif len(key) == 1 and key.isalpha():
+                key_name = f"ImGuiKey_{key.upper()}"
+            else:
+                key_name = f"ImGuiKey_{key}"
+            key = getattr(ps.imgui, key_name, None)
+            if key is None:
+                return False
+        return ps.imgui.IsKeyDown(key)
+
     def _update_camera(self):
         r = wp.sin(wp.radians(self._camera_theta))
         x = r * wp.sin(wp.radians(self._camera_phi))
