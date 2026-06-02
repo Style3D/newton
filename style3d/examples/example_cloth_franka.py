@@ -351,13 +351,14 @@ class Example:
     def _add_cloth(self):
         if not self.add_cloth:
             return
-        usd_stage = Usd.Stage.Open(newton.examples.get_asset("unisex_shirt.usd"))
+        usd_stage = Usd.Stage.Open(newton.examples.get_asset("unisex_shirt_4xfaces.usd"))
+        #usd_stage = Usd.Stage.Open(newton.examples.get_asset("unisex_shirt.usd"))
         shirt_mesh = newton.usd.get_mesh(usd_stage.GetPrimAtPath("/root/shirt"))
         self.scene.add_cloth_mesh(
             vertices=[wp.vec3(v) for v in shirt_mesh.vertices],
             indices=shirt_mesh.indices,
             rot=wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), np.pi),
-            pos=wp.vec3(0.0, 72.0, 40.0),
+            pos=wp.vec3(0.0, 70.0, 40.0),
             vel=wp.vec3(0.0, 0.0, 0.0),
             density=0.02,
             scale=1.0,
@@ -445,8 +446,9 @@ class Example:
                 # cloth stiffness and parameter settings for style3d sim (merter scale)
                 def cloth_attrib_fn(cloth_attrib:sim.ClothAttrib):
                     cloth_attrib.bend_stiff = sim.Vec3f(1e-7,1e-7,1e-7) # bending stiffness 
+                    cloth_attrib.stretch_stiff = sim.Vec3f(1e2,1e2,1e2) # stretching stiffness 
                     cloth_attrib.density = 3.0
-                    cloth_attrib.thickness = 7e-3 # large thickness to avoid stucking 
+                    cloth_attrib.thickness = 5e-3 # large thickness to avoid stucking 
 
                 def rigid_body_attrib_fn(rigid_body_attrib:sim.RigidBodyAttrib):
                     rigid_body_attrib.static_friction = 1.0    # large friction to encarage crumpling and folding    
@@ -454,7 +456,9 @@ class Example:
 
                 # world attrib  (merter scale)
                 def world_attrib_fn(world_attrib:sim.WorldAttrib):
-                    world_attrib.ground_height = 0.21 # server as table
+                    world_attrib.ground_height = 0.208 # server as table
+                    world_attrib.ground_static_friction = 0.8 
+                    world_attrib.ground_dynamic_friction = 0.8 
                     world_attrib.time_step = self.sim_dt
 
                 self.cloth_solver = style3d_mini.SolverStyle3dMini(self.model, 
