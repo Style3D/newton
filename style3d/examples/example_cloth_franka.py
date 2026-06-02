@@ -78,21 +78,22 @@ ROBOT_KEY_POSES: list[KeyPose] = [
     KeyPose(1.0, (-2.0, -33.0, 28.0), _QUAT_LEFT, CLAMP_OPEN),
     # Top-right corner.
     KeyPose(2.0, (-28.0, -60.0, 28.0), _QUAT_RIGHT, CLAMP_OPEN),
-    KeyPose(2.0, (-28.0, -60.0, 20.0), _QUAT_RIGHT, CLAMP_OPEN),
-    KeyPose(2.0, (-28.0, -60.0, 20.0), _QUAT_RIGHT, CLAMP_CLOSE),
+    KeyPose(2.0, (-28.0, -60.0, 19.0), _QUAT_RIGHT, CLAMP_OPEN),
+    KeyPose(2.0, (-28.0, -60.0, 19.0), _QUAT_RIGHT, CLAMP_CLOSE),
     KeyPose(2.0, (-18.0, -60.0, 31.0), _QUAT_RIGHT, CLAMP_CLOSE),
     KeyPose(3.0, (5.0, -60.0, 31.0), _QUAT_RIGHT, CLAMP_CLOSE),
     KeyPose(1.0, (5.0, -60.0, 31.0), _QUAT_RIGHT, CLAMP_OPEN),
     # Bottom-right corner.
+    KeyPose(1.0, (-18.0, -30.0, 24.0), _QUAT_RIGHT, CLAMP_OPEN),
     KeyPose(3.0, (-18.0, -30.0, 20.5), _QUAT_RIGHT, CLAMP_OPEN),
     KeyPose(3.0, (-18.0, -30.0, 20.5), _QUAT_RIGHT, CLAMP_CLOSE),
     KeyPose(2.0, (-3.0, -30.0, 31.0), _QUAT_RIGHT, CLAMP_CLOSE),
-    KeyPose(3.0, (-3.0, -30.0, 31.0), _QUAT_RIGHT, CLAMP_CLOSE),
+    KeyPose(1.0, (-3.0, -30.0, 31.0), _QUAT_RIGHT, CLAMP_CLOSE),
     KeyPose(2.0, (-3.0, -30.0, 31.0), _QUAT_RIGHT, CLAMP_OPEN),
     # Bottom edge: pick up, fold, release.
     KeyPose(2.0, (0.0, -20.0, 30.0), _QUAT_RIGHT, CLAMP_OPEN),
-    KeyPose(2.0, (0.0, -20.0, 19.5), _QUAT_RIGHT, CLAMP_OPEN),
-    KeyPose(2.0, (0.0, -20.0, 19.5), _QUAT_RIGHT, CLAMP_CLOSE),
+    KeyPose(2.0, (0.0, -20.0, 20.0), _QUAT_RIGHT, CLAMP_OPEN),
+    KeyPose(2.0, (0.0, -20.0, 20.0), _QUAT_RIGHT, CLAMP_CLOSE),
     KeyPose(2.0, (0.0, -20.0, 35.0), _QUAT_RIGHT, CLAMP_CLOSE),
     KeyPose(1.0, (0.0, -30.0, 35.0), _QUAT_RIGHT, CLAMP_CLOSE),
     KeyPose(1.5, (0.0, -30.0, 35.0), _QUAT_RIGHT, CLAMP_CLOSE),
@@ -358,7 +359,7 @@ class Example:
             vertices=[wp.vec3(v) for v in shirt_mesh.vertices],
             indices=shirt_mesh.indices,
             rot=wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), np.pi),
-            pos=wp.vec3(0.0, 70.0, 40.0),
+            pos=wp.vec3(0.0, 70.0, 30.0),
             vel=wp.vec3(0.0, 0.0, 0.0),
             density=0.02,
             scale=1.0,
@@ -445,18 +446,21 @@ class Example:
 
                 # cloth stiffness and parameter settings for style3d sim (merter scale)
                 def cloth_attrib_fn(cloth_attrib:sim.ClothAttrib):
-                    cloth_attrib.bend_stiff = sim.Vec3f(1e-7,1e-7,1e-7) # bending stiffness 
+                    cloth_attrib.bend_stiff = sim.Vec3f(5e-6,5e-6,5e-6) # bending stiffness 
                     cloth_attrib.stretch_stiff = sim.Vec3f(1e2,1e2,1e2) # stretching stiffness 
+                    cloth_attrib.dynamic_friction = 0.8
+                    cloth_attrib.static_friction = 0.8
                     cloth_attrib.density = 3.0
-                    cloth_attrib.thickness = 5e-3 # large thickness to avoid stucking 
+                    cloth_attrib.thickness = 1e-3 # large thickness to avoid stucking 
 
                 def rigid_body_attrib_fn(rigid_body_attrib:sim.RigidBodyAttrib):
-                    rigid_body_attrib.static_friction = 1.0    # large friction to encarage crumpling and folding    
-                    rigid_body_attrib.dynamic_friction = 1.0        
+                    rigid_body_attrib.mass = 1.0
+                    rigid_body_attrib.static_friction = 0.8    # large friction to encarage crumpling and folding    
+                    rigid_body_attrib.dynamic_friction = 0.8        
 
                 # world attrib  (merter scale)
                 def world_attrib_fn(world_attrib:sim.WorldAttrib):
-                    world_attrib.ground_height = 0.208 # server as table
+                    world_attrib.ground_height = 0.200 # server as table
                     world_attrib.ground_static_friction = 0.8 
                     world_attrib.ground_dynamic_friction = 0.8 
                     world_attrib.time_step = self.sim_dt
