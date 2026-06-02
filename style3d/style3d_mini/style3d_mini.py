@@ -5,6 +5,7 @@ from newton import Contacts, Control, State
 import warp as wp
 from pxr import Usd,UsdGeom
 import style3dsim as sim
+from .sim_rigidbody import sim_rigidbody
 import numpy as np
 import json
 import os
@@ -99,6 +100,11 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
             self.two_way_coupling = kwargs['two_way_coupling']
         else:
             self.two_way_coupling = True
+        
+        if 'rigid_body_is_fixed' in kwargs:
+            self.rigid_body_is_fixed = kwargs['rigid_body_is_fixed']
+        else:
+            self.rigid_body_is_fixed = True
 
         self.rigid_solver = newton.solvers.SolverMuJoCo(model, njmax = njmax)
 
@@ -194,7 +200,7 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
             shape_type_str =''
             if shape_type_i == newton.GeoType.MESH:
                 mesh = sim.Mesh(shape_source_i.indices, shape_source_i.vertices * scale)
-                rigid_body = sim.RigidBody(mesh, transform)
+                rigid_body = sim_rigidbody(mesh,transform, self.rigid_body_is_fixed)
                 shape_type_str = 'MESH' 
             elif shape_type_i == newton.GeoType.SPHERE:
                 sphereSize = sim.SphereSize()
@@ -223,7 +229,7 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
             rigid_body_attrib_fn(rigid_body_attrib) # user input function   
             rigid_body.set_attrib(rigid_body_attrib)
 
-            rigid_body.set_pin(True)
+            rigid_body.set_pin(self.rigid_body_is_fixed)
             # rigid_body.set_collision_group(contype[geom_id])
             # rigid_body.set_collision_mask(conaffinity[geom_id])
 
