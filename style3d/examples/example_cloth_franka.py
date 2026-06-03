@@ -253,7 +253,7 @@ class Example:
         self.table_hz_cm = 10.0
         self.table_pos_cm = wp.vec3(0.0, -50.0, 10.0)
 
-        self.export_dir = Path(__file__).parent / "exports"
+        self.export_dir = Path(__file__).parent / "captured_frames"
         self._export_key_was_down = False
 
     def _build_model(self):

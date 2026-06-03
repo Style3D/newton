@@ -11,6 +11,11 @@ import json
 import os
 from pathlib import Path
 
+
+def see_as_frozen_cloth(body_name):
+    name_suffix_indicates_frozen_cloth = 's3d' # if the body name ends with this suffix, it will be treated as frozen cloth in simulation, gain better collision 
+    return body_name.endswith(name_suffix_indicates_frozen_cloth)
+
 def _log_callback(file_name: str, func_name: str, line: int, level: sim.LogLevel, message: str):
     if level == sim.LogLevel.INFO:
         print("[info]: ", message)
@@ -76,6 +81,7 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
         else:
             njmax = 100
 
+        # model size scale then pass to simulation
         if 'scale' in kwargs:
             self.scale_model_2_sim = kwargs['scale']
         else:            
@@ -96,16 +102,12 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
         else:
             world_attrib_fn = lambda at : at
 
+        # True will apply the collision force from cloth to rigid body 
         if 'two_way_coupling' in kwargs:
             self.two_way_coupling = kwargs['two_way_coupling']
         else:
             self.two_way_coupling = True
         
-        if 'rigid_body_is_fixed' in kwargs:
-            self.rigid_body_is_fixed = kwargs['rigid_body_is_fixed']
-        else:
-            self.rigid_body_is_fixed = True
-
         self.rigid_solver = newton.solvers.SolverMuJoCo(model, njmax = njmax)
 
         self.model = model
@@ -163,12 +165,22 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
         shape_transform_q = self.model.body_q.numpy()
         shape_flags = self.model.shape_flags.numpy()
 
-        shape_2_body_index = self.model.shape_body.numpy() # 
+        shape_2_body_index = self.model.shape_body.numpy() #  shape to body index, -1 for fixed , 0~n for body index, > n for non-existing body index (treat as world)
+        body_labels = self.model.body_label
+        body_count = len(body_labels)
 
         self.sim_rigid_bodies = [] # simulation rigid bodies
         self.sim_2_body_index = []
 
         for si, mi in enumerate(shape_2_body_index):
+            if mi < 0:
+                body_name = "world"
+            elif mi < body_count:
+                body_name = body_labels[mi]
+            else:
+                body_name = f"body_{mi}"
+
+            use_frozen_cloth = see_as_frozen_cloth(body_name)
 
             flag_str = []
             if shape_flags[si] & newton.ShapeFlags.COLLIDE_SHAPES:
@@ -200,7 +212,7 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
             shape_type_str =''
             if shape_type_i == newton.GeoType.MESH:
                 mesh = sim.Mesh(shape_source_i.indices, shape_source_i.vertices * scale)
-                rigid_body = sim_rigidbody(mesh,transform, self.rigid_body_is_fixed)
+                rigid_body = sim_rigidbody(mesh,transform, use_frozen_cloth)
                 shape_type_str = 'MESH' 
             elif shape_type_i == newton.GeoType.SPHERE:
                 sphereSize = sim.SphereSize()
@@ -229,7 +241,7 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
             rigid_body_attrib_fn(rigid_body_attrib) # user input function   
             rigid_body.set_attrib(rigid_body_attrib)
 
-            rigid_body.set_pin(self.rigid_body_is_fixed)
+            rigid_body.set_pin(True)
             # rigid_body.set_collision_group(contype[geom_id])
             # rigid_body.set_collision_mask(conaffinity[geom_id])
 

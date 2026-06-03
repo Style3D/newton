@@ -260,7 +260,7 @@
     <parent link="fr3_hand"/>
     <child link="fr3_hand_tcp"/>
   </joint>
-  <link name="fr3_leftfinger">
+  <link name="fr3_leftfinger_s3d">
     <visual name="fr3_leftfinger_visual">
       <geometry>
         <mesh filename="package://franka_emika_panda/meshes/robot_ee/franka_hand_white/visual/finger.dae"/>  
@@ -279,7 +279,7 @@
       <inertia ixx="8.49e-06" ixy="0.0" ixz="0.0" iyy="8.53e-06" iyz="-1.06e-06" izz="1.77e-06"/>
     </inertial>
   </link>
-  <link name="fr3_rightfinger">
+  <link name="fr3_rightfinger_s3d">
     <visual name="fr3_rightfinger_visual">
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
@@ -301,7 +301,7 @@
   </link>
   <joint name="fr3_finger_joint1" type="prismatic">
     <parent link="fr3_hand"/>
-    <child link="fr3_leftfinger"/>
+    <child link="fr3_leftfinger_s3d"/>
     <origin rpy="0 0 0" xyz="0 0 0.0584"/>
     <axis xyz="0 1 0"/>
     <limit effort="100" lower="0.0" upper="0.04" velocity="0.2"/>
@@ -309,7 +309,7 @@
   </joint>
   <joint name="fr3_finger_joint2" type="prismatic">
     <parent link="fr3_hand"/>
-    <child link="fr3_rightfinger"/>
+    <child link="fr3_rightfinger_s3d"/>
     <origin rpy="0 0 3.141592653589793" xyz="0 0 0.0584"/>
     <axis xyz="0 1 0"/>
     <limit effort="100" lower="0.0" upper="0.04" velocity="0.2"/>

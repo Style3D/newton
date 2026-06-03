@@ -75,3 +75,4 @@ docs/_static/viser/
 **/*.ipynb_checkpoints/
 
 style3d/simulation_login.json
+style3d/examples/captured_frames/*
