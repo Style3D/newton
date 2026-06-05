@@ -10,6 +10,7 @@ import numpy as np
 import json
 import os
 from pathlib import Path
+from style3d.instrumentation import trace_function, trace_span
 
 
 def see_as_frozen_cloth(body_name):
@@ -332,25 +333,34 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
             cloth_x = self.cloth.get_positions()
             state_out.particle_q.assign( cloth_x/self.scale_model_2_sim )
 
-    @override
-    def step(self, state_in: State, state_out: State, control: Control, contacts: Contacts, dt: float):
-
-        # apply collision force
+    @trace_function
+    def _two_way_coupling(self,state_in):
         if self.two_way_coupling:
             self._update_rigidbody_cloth_collision_force()
             self._apply_collision_force_to_rigidbody( state_in)
 
-        self.rigid_solver.step(state_in, state_out, control, contacts, dt)
+    @trace_function
+    def _fetch_and_update_cloth_pos_to_state(self,state_in: State, state_out: State):
+        with trace_span("Style3dMini.world.fetch_sim"):
+            self.world.fetch_sim(0)
+        self._update_cloth_pos_to_state(state_out)
+        self._update_rigidbody_pos_to_simulation( state_in, state_out)
+
+    @override
+    @trace_function
+    def step(self, state_in: State, state_out: State, control: Control, contacts: Contacts, dt: float):
+        # apply collision force
+        self._two_way_coupling(state_in)
+
+        with trace_span("Style3dMini.rigid_solver.step"):
+            self.rigid_solver.step(state_in, state_out, control, contacts, dt)
 
         #simulation step
-        self.world.step_sim()
+        with trace_span("Style3dMini.world.step_sim"):
+            self.world.step_sim()
 
         #set new rigid body position to simulation
-        self.world.fetch_sim(0)
-
-        self._update_cloth_pos_to_state(state_out)
-
-        self._update_rigidbody_pos_to_simulation( state_in, state_out)
+        self._fetch_and_update_cloth_pos_to_state(state_in, state_out)
 
 
     def rebuild_bvh(self, state: State):

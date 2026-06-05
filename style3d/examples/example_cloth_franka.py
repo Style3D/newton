@@ -31,6 +31,7 @@ from newton import Model, ModelBuilder, State, eval_fk
 from newton.solvers import SolverFeatherstone, SolverVBD
 from style3d.export_obj import export_scene_obj
 from style3d import style3d_pro
+from style3d.instrumentation import run_with_trace, trace_function, trace_span
 from style3d.style3d_mini import style3d_mini
 from pathlib import Path
 import style3dsim as sim
@@ -624,6 +625,7 @@ class Example:
             self.model.particle_count = saved_particle_count
             self.model.gravity.assign(self.gravity_earth)
 
+    @trace_function
     def step(self):
         self.generate_control_joint_qd(self.state_0)
         if self.graph:
@@ -632,29 +634,54 @@ class Example:
             self.simulate()
         self.sim_time += self.frame_dt
 
+    @trace_function
     def simulate(self):
         if self.add_cloth:
             self.cloth_solver.rebuild_bvh(self.state_0)
-        for _ in range(self.sim_substeps):
-            self.state_0.clear_forces()
-            self.state_1.clear_forces()
-            self.viewer.apply_forces(self.state_0)
+        for substep in range(self.sim_substeps):
+            #with trace_span("Example.substep", substep=substep, frame=self.sim_frame):
+            self._simulate_substep()
 
-            if self.add_robot:
-                with self._robot_only_physics():
-                    self.state_0.joint_qd.assign(self.target_joint_qd)
-                    self.robot_solver.step(self.state_0, self.state_1, self.control, None, self.sim_dt)
-                    if self.add_cloth:
-                        self.state_0.particle_f.zero_()
+    @trace_function
+    def _simulate_substep(self):
+        self._prepare_substep_forces()
 
-            self.collision_pipeline.collide(self.state_0, self.contacts)
+        if self.add_robot:
+            self._step_robot()
 
+        self._collide()
+
+        if self.add_cloth:
+            self._step_cloth()
+
+        self._advance_substep_state()
+
+    @trace_function
+    def _prepare_substep_forces(self):
+        self.state_0.clear_forces()
+        self.state_1.clear_forces()
+        self.viewer.apply_forces(self.state_0)
+
+    @trace_function
+    def _step_robot(self):
+        with self._robot_only_physics():
+            self.state_0.joint_qd.assign(self.target_joint_qd)
+            self.robot_solver.step(self.state_0, self.state_1, self.control, None, self.sim_dt)
             if self.add_cloth:
-                self.cloth_solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
-                #pass
+                self.state_0.particle_f.zero_()
 
-            self.state_0, self.state_1 = self.state_1, self.state_0
-            self.sim_frame += 1
+    @trace_function
+    def _collide(self):
+        self.collision_pipeline.collide(self.state_0, self.contacts)
+
+    @trace_function
+    def _step_cloth(self):
+        self.cloth_solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
+
+    @trace_function
+    def _advance_substep_state(self):
+        self.state_0, self.state_1 = self.state_1, self.state_0
+        self.sim_frame += 1
 
     # ----- rendering ------------------------------------------------------
 
@@ -671,6 +698,7 @@ class Example:
             )
         self._export_key_was_down = key_down
 
+    @trace_function
     def render(self):
         if self.viewer is None:
             return
@@ -739,4 +767,9 @@ if __name__ == "__main__":
     parser = newton.examples.create_parser()
     parser.set_defaults(num_frames=3850)
     viewer, args = newton.examples.init(parser)
-    newton.examples.run(Example(viewer, args), args)
+
+    instrumentation = True
+    if instrumentation:
+        run_with_trace(lambda: newton.examples.run(Example(viewer, args), args))
+    else:
+        newton.examples.run(Example(viewer, args), args)    
