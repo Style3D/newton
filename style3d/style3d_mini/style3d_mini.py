@@ -75,42 +75,18 @@ def _to_sim_transform(trans,scale_model_2_sim):
 
 class SolverStyle3dMini(newton.solvers.SolverBase):
 
-    def __init__(self, model: newton.Model, **kwargs):
+    def __init__(
+                    self, model: newton.Model, 
+                    scale_model_2_sim = 1.0,
+                    cloth_attrib_fn = lambda attrib : attrib,
+                    rigid_body_attrib_fn = lambda attrib : attrib,
+                    world_attrib_fn = lambda attrib : attrib,
+                    two_way_coupling = True
+                 ):
 
-        if 'njmax' in kwargs:
-            njmax = kwargs['njmax']
-        else:
-            njmax = 100
-
-        # model size scale then pass to simulation
-        if 'scale' in kwargs:
-            self.scale_model_2_sim = kwargs['scale']
-        else:            
-            self.scale_model_2_sim = 1.0    
-
-        if 'cloth_attrib_fn' in kwargs:
-            cloth_attrib_fn = kwargs['cloth_attrib_fn']
-        else:
-            cloth_attrib_fn = lambda at : at
-
-        if 'rigid_body_attrib_fn' in kwargs:
-            rigid_body_attrib_fn = kwargs['rigid_body_attrib_fn']
-        else:
-            rigid_body_attrib_fn = lambda at : at
-
-        if 'world_attrib_fn' in kwargs:
-            world_attrib_fn = kwargs['world_attrib_fn']
-        else:
-            world_attrib_fn = lambda at : at
-
-        # True will apply the collision force from cloth to rigid body 
-        if 'two_way_coupling' in kwargs:
-            self.two_way_coupling = kwargs['two_way_coupling']
-        else:
-            self.two_way_coupling = True
+        self.scale_model_2_sim = scale_model_2_sim
+        self.two_way_coupling = two_way_coupling
         
-        self.rigid_solver = newton.solvers.SolverMuJoCo(model, njmax = njmax)
-
         self.model = model
 
         self.world = _get_a_sim_world()
@@ -349,11 +325,6 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
     @override
     @trace_function
     def step(self, state_in: State, state_out: State, control: Control, contacts: Contacts, dt: float):
-        # apply collision force
-        self._two_way_coupling(state_in)
-
-        with trace_span("Style3dMini.rigid_solver.step"):
-            self.rigid_solver.step(state_in, state_out, control, contacts, dt)
 
         #simulation step
         with trace_span("Style3dMini.world.step_sim"):
@@ -361,6 +332,9 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
 
         #set new rigid body position to simulation
         self._fetch_and_update_cloth_pos_to_state(state_in, state_out)
+
+        # apply collision force
+        self._two_way_coupling(state_in)
 
 
     def rebuild_bvh(self, state: State):

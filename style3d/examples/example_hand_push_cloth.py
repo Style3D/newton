@@ -88,7 +88,11 @@ class Example:
         self.viewer = viewer
         self.args = args
 
-        builder = _load_scene_usd ('push_cloth_zjrx/lefthand.usda')
+        current_path = Path(__file__).parent
+        usd_path = current_path / 'push_cloth_zjrx/lefthand.usda'
+        usd_path = str(usd_path.as_posix())
+
+        builder = _load_scene_usd (usd_path)
 
         ## set joint targets and joint drive gains
         for i in range(builder.joint_dof_count):
@@ -97,21 +101,23 @@ class Example:
             builder.joint_target_pos[i] = 0.08
 
         # finalize model
-        self. model = builder. finalize()
+        self.model = builder.finalize()
 
-        self. state_0 = self. model. state()
-        self. state_1 = self. model. state()
-        self. control = self. model. control()
+        self.state_0 = self. model.state()
+        self.state_1 = self. model.state()
+        self.control = self. model.control()
 
-        self. solver =  style3d_mini. SolverStyle3dMini(self.model, njmax = 500 )
+        self.solver =  style3d_mini.SolverStyle3dMini(self.model)
 
         # Create collision pipeline from command-line args (default: CollisionPipelineUnified with EXPLICIT)
-        self. collision_pipeline = newton.examples. create_collision_pipeline(self.model, self.args)
-        self. contacts = self. model.collide(self.state_0, collision_pipeline = self.collision_pipeline)
+        self.collision_pipeline = newton.examples.create_collision_pipeline(self.model, self.args)
+        self.contacts = self.model.collide(self.state_0, collision_pipeline = self.collision_pipeline)
 
-        self. viewer. set_model(self.model)
+        self.rigid_solver = newton.solvers.SolverMuJoCo(self.model, njmax = 500)
 
-        self. capture()
+        self.viewer. set_model(self.model)
+
+        self.capture()
 
         self.sim_frame = 0
 
@@ -154,13 +160,16 @@ class Example:
         self._control_hand_move()
 
         for _ in range(self.sim_substeps):
-            self. state_0.clear_forces()
+            self.state_0.clear_forces()
 
             # apply forces to the model
-            self. viewer.apply_forces(self.state_0)
+            self.viewer.apply_forces(self.state_0)
 
-            self. contacts = self.model.collide(self.state_0, collision_pipeline = self.collision_pipeline)
-            self. solver. step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
+            self.rigid_solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
+
+            self.contacts = self.model.collide(self.state_0, collision_pipeline = self.collision_pipeline)
+
+            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 
             # swap states
             self.state_0, self.state_1 = self.state_1, self.state_0

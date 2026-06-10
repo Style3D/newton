@@ -80,8 +80,8 @@ ROBOT_KEY_POSES: list[KeyPose] = [
     KeyPose(1.0, (-2.0, -33.0, 28.0), _QUAT_LEFT, CLAMP_OPEN),
     # Top-right corner.
     KeyPose(2.0, (-28.0, -60.0, 28.0), _QUAT_RIGHT, CLAMP_OPEN),
-    KeyPose(2.0, (-28.0, -60.0, 19.0), _QUAT_RIGHT, CLAMP_OPEN),
-    KeyPose(2.0, (-28.0, -60.0, 19.0), _QUAT_RIGHT, CLAMP_CLOSE),
+    KeyPose(2.0, (-28.0, -60.0, 20.0), _QUAT_RIGHT, CLAMP_OPEN),
+    KeyPose(2.0, (-28.0, -60.0, 20.0), _QUAT_RIGHT, CLAMP_CLOSE),
     KeyPose(2.0, (-18.0, -60.0, 31.0), _QUAT_RIGHT, CLAMP_CLOSE),
     KeyPose(3.0, (5.0, -60.0, 31.0), _QUAT_RIGHT, CLAMP_CLOSE),
     KeyPose(1.0, (5.0, -60.0, 31.0), _QUAT_RIGHT, CLAMP_OPEN),
@@ -257,6 +257,8 @@ class Example:
         self.export_dir = Path(__file__).parent / "captured_frames"
         self._export_key_was_down = False
 
+        self.use_style3d_sim = True
+
     def _build_model(self):
         """Build the scene, finalize the model, and apply post-finalize fixups."""
         self.scene = ModelBuilder(gravity=-981.0)
@@ -269,13 +271,15 @@ class Example:
             self.dof_q_per_world = franka.joint_coord_count
             self.dof_qd_per_world = franka.joint_dof_count
 
-        #self._add_table()
+        if not self.use_style3d_sim:
+            self._add_table()
         self._add_cloth()
         self.scene.add_ground_plane()
 
         self.model = self.scene.finalize(requires_grad=False)
 
-        #self._hide_table_from_viewer()
+        if not self.use_style3d_sim:
+            self._hide_table_from_viewer()
         self._apply_contact_materials()
         self._prepare_table_viz_arrays()
 
@@ -292,8 +296,8 @@ class Example:
     def _add_cloth(self):
         if not self.add_cloth:
             return
-        usd_stage = Usd.Stage.Open(newton.examples.get_asset("unisex_shirt_4xfaces.usd"))
-        #usd_stage = Usd.Stage.Open(newton.examples.get_asset("unisex_shirt.usd"))
+        #usd_stage = Usd.Stage.Open(newton.examples.get_asset("unisex_shirt_4xfaces.usd"))
+        usd_stage = Usd.Stage.Open(newton.examples.get_asset("unisex_shirt.usd"))
         shirt_mesh = newton.usd.get_mesh(usd_stage.GetPrimAtPath("/root/shirt"))
         self.scene.add_cloth_mesh(
             vertices=[wp.vec3(v) for v in shirt_mesh.vertices],
@@ -374,7 +378,6 @@ class Example:
         self.robot_solver = SolverFeatherstone(self.model, update_mass_matrix_interval=self.sim_substeps)
         self._init_jacobian_controller()
 
-        self.use_style3d_sim = True
         if self.add_cloth:
             self.model.edge_rest_angle.zero_()
             if self.use_style3d_sim:
@@ -406,11 +409,11 @@ class Example:
                     world_attrib.time_step = self.sim_dt
 
                 self.cloth_solver = style3d_mini.SolverStyle3dMini(self.model, 
-                                                                   scale=self.viz_scale,
-                                                                   cloth_attrib_fn=cloth_attrib_fn,
-                                                                   rigid_body_attrib_fn=rigid_body_attrib_fn,
-                                                                   world_attrib_fn=world_attrib_fn,
-                                                                   two_way_coupling=False
+                                                                   scale_model_2_sim = self.viz_scale,
+                                                                   cloth_attrib_fn = cloth_attrib_fn,
+                                                                   rigid_body_attrib_fn = rigid_body_attrib_fn,
+                                                                   world_attrib_fn = world_attrib_fn,
+                                                                   two_way_coupling = False
                                                                    ) 
             else:
                 self.cloth_solver = SolverVBD(
@@ -490,13 +493,13 @@ class Example:
             self._capture()
 
     def _capture(self):
+        #if wp.get_device().is_cuda and not self.use_style3d_sim:
         if wp.get_device().is_cuda and False:
-        #if wp.get_device().is_cuda :
             with wp.ScopedCapture() as capture:
                 self.simulate()
             self.graph = capture.graph
         else:
-            self. graph = None
+            self.graph = None
 
     # ----- articulation ---------------------------------------------------
 
@@ -558,6 +561,7 @@ class Example:
             wp.copy(self.J_flat[i * in_dim : (i + 1) * in_dim], joint_qd.grad)
             tape.zero()
 
+    @trace_function
     def generate_control_joint_qd(self, state_in: State):
         # After the key-pose sequence ends, hold position with zero velocity.
         if self.sim_time >= self.robot_key_poses_time[-1]:
@@ -694,7 +698,7 @@ class Example:
                 self.state_0,
                 path,
                 self.viz_scale,
-                add_cloth=self.add_cloth,
+                add_cloth = self.add_cloth,
             )
         self._export_key_was_down = key_down
 
@@ -768,7 +772,7 @@ if __name__ == "__main__":
     parser.set_defaults(num_frames=3850)
     viewer, args = newton.examples.init(parser)
 
-    instrumentation = True
+    instrumentation = False
     if instrumentation:
         run_with_trace(lambda: newton.examples.run(Example(viewer, args), args))
     else:
