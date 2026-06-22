@@ -41,9 +41,9 @@ def _load_mesh_usd(usd_path,root_path) :
     return indices, points, uv
 
 def _load_scene_usd(usd_file_path) :
-    builder = newton. ModelBuilder()
-    builder. add_usd( usd_file_path, collapse_fixed_joints = False, enable_self_collisions = False )
-    builder. add_ground_plane()
+    builder = newton.ModelBuilder()
+    builder.add_usd( usd_file_path, collapse_fixed_joints = False, enable_self_collisions = False )
+    builder.add_ground_plane()
 
     # List to collect all prims with PhysicsClothAPI
     cloth_prims = []
@@ -64,7 +64,7 @@ def _load_scene_usd(usd_file_path) :
         # Get the translation component of the transformation matrix
         translation = transform_matrix.ExtractTranslation()
 
-        builder. add_cloth_mesh(
+        builder.add_cloth_mesh(
             vertices = x,
             indices = t,
             rot = wp.quat_identity(),
@@ -92,7 +92,7 @@ class Example:
         usd_path = current_path / 'push_cloth_zjrx/lefthand.usda'
         usd_path = str(usd_path.as_posix())
 
-        builder = _load_scene_usd (usd_path)
+        builder = _load_scene_usd(usd_path)
 
         ## set joint targets and joint drive gains
         for i in range(builder.joint_dof_count):

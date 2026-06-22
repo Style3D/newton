@@ -108,7 +108,10 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
         print( f'gravity {world_attrib.gravity.x}, {world_attrib.gravity.y}, {world_attrib.gravity.z} ' )
 
         ### add_cloth_to_simulation
-        self._add_cloth_to_simulation(self.scale_model_2_sim,cloth_attrib_fn)
+        self._add_cloth_to_simulation(self.scale_model_2_sim, cloth_attrib_fn)
+
+        ### add_deformable_body_to_simulation
+        self._add_deformablebody_to_simulation(self.scale_model_2_sim)
 
         ### add_rigid_body to simulation
         self._add_rigid_body_to_simulation(self.scale_model_2_sim,rigid_body_attrib_fn)
@@ -120,7 +123,7 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
 
         if len(t) > 0:
 
-            self.cloth = sim. Cloth(t, x * scale, np.array([], dtype=float), False)
+            self.cloth = sim.Cloth(t, x * scale, np.array([], dtype=float), False)
 
             cloth_attrib = sim.ClothAttrib()
             cloth_attrib_fn(cloth_attrib)
@@ -130,6 +133,19 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
 
         else:
             self.cloth = None
+
+
+    def _add_deformablebody_to_simulation(self, scale):
+
+        x = self.model.particle_q.numpy()
+        tets = self.model.tet_indices.numpy()
+        #TODO: make this general (collision faces is passed in) 
+        collision_faces = self.model.tri_indices.numpy()
+
+        self.deformable_body = sim.DeformableBody(x, collision_faces, tets, x)
+        attrib = sim.DeformableBodyAttrib()
+        self.deformable_body.set_attrib(attrib)
+        self.deformable_body.attach(self.world)
 
 
     def _add_rigid_body_to_simulation(self, scale, rigid_body_attrib_fn):
@@ -260,6 +276,9 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
 
     def _apply_collision_force_to_rigidbody(self,state_in: State):
 
+        if len(self.sim_rigid_bodies) == 0:
+            return
+
         trans_in = state_in.body_q.numpy()
         body_f_np = state_in.body_f.numpy()
 
@@ -289,6 +308,10 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
             state_in.body_f.assign(body_f_np)
 
     def _update_rigidbody_pos_to_simulation(self,state_in: State, state_out: State):
+
+        if len(self.sim_rigid_bodies) == 0:
+            return
+
         trans_in = state_in.body_q.numpy()
         trans_out = state_out.body_q.numpy()
 
