@@ -1,0 +1,13 @@
+kind: deformable
+name: green_tshirt
+obj: green_tshirt_40k.obj
+backend: direct_obj
+default_pos: [0.55, 0.0, 0.01]
+default_quat: [0.7071, 0.7071, 0, 0]
+usd_prim_path: "/World/Cloth/green_tshirt/green_tshirt_obj"
+physics:
+  stretch_stiff: [230.0, 230.0, 230.0]
+  bend_stiff: [1.0e-6, 1.0e-6, 1.0e-6]
+  density: 0.22
+  thickness: 2.0e-3
+  friction: 0.6
