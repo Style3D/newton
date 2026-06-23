@@ -1,0 +1,24 @@
+kind: deformable
+name: nonwoven_small_6
+backend: direct_obj
+obj: nonwoven_small_6_recentered.obj
+usd: nonwoven_small_6.usda
+usd_prim_path: /World/Cloth/nonwoven_small_6/nonwoven_small_6_obj
+
+# OBJ-native bbox (recentered):
+#   x[-0.009, 0.213]  y[-0.200, 0.182]  z[0.000, 0.302]
+# Top-10% (mouth) xy centroid ≈ (0.1045, -0.0109). default_pos shifts that
+# to world (0.40, 0.0) — right-arm IK sweet spot — with the bag bottom on
+# the ground (z_min already 0, so shift_z = 0). No rotation: keep the
+# OBJ's natural orientation per Boss request.
+#   shift_x = 0.40 - 0.1045 ≈ 0.2955
+#   shift_y = 0.00 - (-0.0109) ≈ 0.0109
+default_pos: [0.2955, 0.0109, 0.0]
+default_quat: [1.0, 0.0, 0.0, 0.0]
+physics:
+  stretch_stiff: [10000, 10000, 10000]
+  bend_stiff: [203670e-9, 203670e-9, 203670e-9]
+  density: 1.0
+  thickness: 0.001
+  friction: 0.6
+_preprocessed_from: nonwoven_small_6.obj
