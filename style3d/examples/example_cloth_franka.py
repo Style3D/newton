@@ -29,14 +29,13 @@ import newton.utils
 from newton import Model, ModelBuilder, State, eval_fk
 #from newton.solvers import SolverFeatherstone
 from newton.solvers import SolverFeatherstone, SolverVBD
-from style3d.export_obj import export_scene_obj
+from style3d.export_scene_obj import export_scene_obj
+import style3d.auto_login as auto_login
 from style3d import style3d_pro
 from style3d.instrumentation import run_with_trace, trace_function, trace_span
 from style3d.style3d_mini import style3d_mini
 from pathlib import Path
 import style3dsim as sim
-import os
-import json
 
 # ----------------------------------------------------------------------
 # Robot key-pose sequence
@@ -170,30 +169,6 @@ def compute_ee_tip_velocity(
     body_out[5] = omega[2]
 
 
-def _log_in_simulation(**kwargs):
-
-    name = ''
-
-    if not sim.is_login():
-        login_file = None
-        if 'login_file' in kwargs:
-            login_file = kwargs['login_file']
-
-        if login_file and os.path.exists(login_file):
-            with open(login_file,'r') as f:
-                login=json.load(f)
-                name = login['name']
-                pass_word = login['pass_word']
-        else:
-            name = input('Enter your name : ')
-            pass_word = input('Enter your password : ')
-
-        sim.login(name, pass_word, True, None)
-
-    if sim.is_login():
-        print(f'login successful {name}')
-    else:
-        print('login failed')
 
 
 
@@ -382,8 +357,7 @@ class Example:
             self.model.edge_rest_angle.zero_()
             if self.use_style3d_sim:
 
-                password_dir = Path(__file__).parent.resolve()
-                _log_in_simulation(login_file= password_dir / '..' / 'simulation_login.json')
+                auto_login.log_in_simulation()
 
                 # TODO: unify newton and style3d sim physics parameters  
 
@@ -415,6 +389,14 @@ class Example:
                                                                    world_attrib_fn = world_attrib_fn,
                                                                    two_way_coupling = False
                                                                    ) 
+
+                #newton.solvers.SolverStyle3D.register_custom_attributes(self.scene)
+                #self.cloth_solver = newton.solvers.SolverStyle3D(
+                #            model=self.model,
+                #            iterations=self.iterations,
+                #            #scale_model_2_sim = self.viz_scale,
+                #        )
+
             else:
                 self.cloth_solver = SolverVBD(
                     self.model,

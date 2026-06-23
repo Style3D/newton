@@ -14,6 +14,9 @@ from newton import Mesh, ParticleFlags
 from newton.solvers import style3d
 from style3d.style3d_pro import SolverStyle3DPro
 from style3d.style3d_pro.solver_style3d_pro import sim_log_callback
+import style3d.auto_login as auto_login
+
+from pathlib import Path
 
 
 class Example:
@@ -129,21 +132,12 @@ class Example:
         # Set log callback
         sim.set_log_callback(sim_log_callback)
 
-        # Login
-        if os.path.exists("key.txt"):
-            with open("key.txt", encoding="utf-8") as f:
-                lines = f.read().splitlines()
-                username = lines[0].strip()
-                password = lines[1].strip()
-        else:
-            username = input("User Name: ")
-            password = input("Password: ")
-        sim.login(username, password, True, None)
+        auto_login.log_in_simulation()
 
-        # self.solver = newton.solvers.SolverStyle3D(
+        #self.solver = newton.solvers.SolverStyle3D(
         self.solver = SolverStyle3DPro(
-            model=self.model,
-            iterations=self.iterations,
+            model = self.model,
+            iterations = self.iterations,
         )
         # self.solver._precompute(
         #     builder,

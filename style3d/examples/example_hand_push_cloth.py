@@ -115,7 +115,7 @@ class Example:
 
         self.rigid_solver = newton.solvers.SolverMuJoCo(self.model, njmax = 500)
 
-        self.viewer. set_model(self.model)
+        self.viewer.set_model(self.model)
 
         self.capture()
 

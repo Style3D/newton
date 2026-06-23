@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 from style3d.instrumentation import trace_function, trace_span
+import style3d.auto_login as auto_login
 
 
 def see_as_frozen_cloth(body_name):
@@ -27,35 +28,9 @@ def _log_callback(file_name: str, func_name: str, line: int, level: sim.LogLevel
     elif level == sim.LogLevel.DEBUG:
         print("[debug]: ", message)
 
-def _log_in_simulation(**kwargs):
-
-    name = ''
-
-    if not sim.is_login():
-        login_file = None
-        if 'login_file' in kwargs:
-            login_file = kwargs['login_file']
-
-        if login_file and os.path.exists(login_file):
-            with open(login_file,'r') as f:
-                login=json.load(f)
-                name = login['name']
-                pass_word = login['pass_word']
-        else:
-            name = input('Enter your name : ')
-            pass_word = input('Enter your password : ')
-
-        sim.login(name, pass_word, True, None)
-
-    if sim.is_login():
-        print(f'login successful {name}')
-    else:
-        print('login failed')
-
 def _get_a_sim_world():
 
-    password_dir = Path(__file__).parent.resolve()
-    _log_in_simulation( login_file= password_dir / '..' / 'simulation_login.json' )
+    auto_login.log_in_simulation()
 
     sim.set_log_callback(_log_callback)
 
@@ -138,6 +113,9 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
     def _add_deformablebody_to_simulation(self, scale):
 
         x = self.model.particle_q.numpy()
+        if self.model.tet_indices is None:
+            return
+
         tets = self.model.tet_indices.numpy()
         #TODO: make this general (collision faces is passed in) 
         collision_faces = self.model.tri_indices.numpy()
