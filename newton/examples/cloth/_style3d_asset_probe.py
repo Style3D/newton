@@ -543,6 +543,7 @@ def try_newton_build(
     start_height: float,
     style3d_fix_panel_winding: bool,
     style3d_clean_nonmanifold: bool,
+    style3d_min_triangle_area_ratio: float,
     style3d_sew_distance: float,
     style3d_sew_ke: float,
     style3d_sew_kd: float,
@@ -559,6 +560,7 @@ def try_newton_build(
         start_height=start_height,
         style3d_fix_panel_winding=style3d_fix_panel_winding,
         style3d_clean_nonmanifold=style3d_clean_nonmanifold,
+        style3d_min_triangle_area_ratio=style3d_min_triangle_area_ratio,
         style3d_sew_distance=style3d_sew_distance,
         style3d_sew_ke=style3d_sew_ke,
         style3d_sew_kd=style3d_sew_kd,
@@ -687,6 +689,7 @@ def build_newton_cloth_model(
     start_height: float = 0.05,
     style3d_fix_panel_winding: bool = True,
     style3d_clean_nonmanifold: bool = False,
+    style3d_min_triangle_area_ratio: float = 0.05,
     style3d_sew_distance: float = 0.0,
     style3d_sew_ke: float = 100.0,
     style3d_sew_kd: float = 1.0e-3,
@@ -720,9 +723,11 @@ def build_newton_cloth_model(
             enabled=style3d_fix_panel_winding,
         )
         build_faces_np, panel_faces_np = clean_nonmanifold_style3d_faces(
+            build_vertices_np,
             build_faces_np,
             panel_faces_np,
             enabled=style3d_clean_nonmanifold,
+            min_area_ratio=float(style3d_min_triangle_area_ratio),
         )
 
     vertices = [wp.vec3(float(v[0]), float(v[1]), float(v[2])) for v in build_vertices_np]
@@ -860,10 +865,12 @@ def repair_panel_winding(
 
 
 def clean_nonmanifold_style3d_faces(
+    vertices: np.ndarray,
     faces: np.ndarray,
     panel_faces: np.ndarray,
     *,
     enabled: bool,
+    min_area_ratio: float = 0.05,
 ) -> tuple[np.ndarray, np.ndarray]:
     if not enabled or len(faces) == 0:
         return faces, panel_faces
@@ -879,35 +886,21 @@ def clean_nonmanifold_style3d_faces(
         else:
             seen_faces.add(key)
 
-    dropped_nonmanifold = 0
-    for _ in range(16):
-        edge_to_faces: dict[tuple[int, int], list[int]] = defaultdict(list)
-        for fid, face in enumerate(faces):
-            if not keep[fid]:
-                continue
-            a, b, c = map(int, face)
-            for i, j in ((a, b), (b, c), (c, a)):
-                if i > j:
-                    i, j = j, i
-                edge_to_faces[(i, j)].append(fid)
-
-        drop: set[int] = set()
-        bad_edges = 0
-        for ids in edge_to_faces.values():
-            if len(ids) > 2:
-                bad_edges += 1
-                drop.update(ids[2:])
-        if not drop:
-            break
-        for fid in drop:
-            keep[fid] = False
-        dropped_nonmanifold += len(drop)
+    tri = vertices[faces]
+    face_area = 0.5 * np.linalg.norm(np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]), axis=1)
+    positive_area = face_area[face_area > 0.0]
+    area_threshold = 0.0
+    if len(positive_area) and min_area_ratio > 0.0:
+        area_threshold = float(np.median(positive_area) * min_area_ratio)
+        keep &= face_area >= area_threshold
+    dropped_small_area = int(np.count_nonzero(face_area < area_threshold)) if area_threshold > 0.0 else 0
 
     cleaned_faces = faces[keep]
     cleaned_panel_faces = panel_faces[keep]
     print(
         f"[Newton] Cleaned Style3D topology: dropped_duplicate_tris={duplicate_count}, "
-        f"dropped_nonmanifold_tris={dropped_nonmanifold}, tris={len(faces)}->{len(cleaned_faces)}",
+        f"dropped_small_area_tris={dropped_small_area}, min_area={area_threshold:g}, "
+        f"tris={len(faces)}->{len(cleaned_faces)}",
         flush=True,
     )
     return cleaned_faces, cleaned_panel_faces
@@ -978,6 +971,7 @@ def view_newton_asset(
     start_height: float,
     style3d_fix_panel_winding: bool,
     style3d_clean_nonmanifold: bool,
+    style3d_min_triangle_area_ratio: float,
     style3d_sew_distance: float,
     style3d_sew_ke: float,
     style3d_sew_kd: float,
@@ -993,6 +987,7 @@ def view_newton_asset(
         start_height=start_height,
         style3d_fix_panel_winding=style3d_fix_panel_winding,
         style3d_clean_nonmanifold=style3d_clean_nonmanifold,
+        style3d_min_triangle_area_ratio=style3d_min_triangle_area_ratio,
         style3d_sew_distance=style3d_sew_distance,
         style3d_sew_ke=style3d_sew_ke,
         style3d_sew_kd=style3d_sew_kd,
@@ -1146,7 +1141,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--style3d-panel-axes", choices=["xy", "xz", "yz"], default="xy", help="2D panel projection axes for --backend style3d")
     parser.add_argument("--start-height", type=float, default=0.05, help="Initial height of the asset's lowest vertex above the ground [m]")
     parser.add_argument("--no-style3d-fix-panel-winding", action="store_true", help="Disable automatic flipping of negative-area Style3D panel triangles")
-    parser.add_argument("--style3d-clean-nonmanifold", action="store_true", help="Drop duplicate triangles and extra faces on non-manifold edges before Style3D build")
+    parser.add_argument(
+        "--style3d-clean-nonmanifold",
+        action="store_true",
+        help="Drop duplicate triangles and tiny area triangles before Style3D build",
+    )
+    parser.add_argument(
+        "--style3d-min-triangle-area-ratio",
+        type=float,
+        default=0.05,
+        help="Drop triangles with 3D area below this fraction of the median positive triangle area",
+    )
     parser.add_argument("--style3d-sew-distance", type=float, default=0.0, help="Add seam springs between non-edge vertices whose 3D positions are within this distance")
     parser.add_argument("--style3d-sew-ke", type=float, default=100.0, help="Stiffness for --style3d-sew-distance springs")
     parser.add_argument("--style3d-sew-kd", type=float, default=1.0e-3, help="Damping for --style3d-sew-distance springs")
@@ -1221,6 +1226,7 @@ def main() -> int:
                             start_height=float(args.start_height),
                             style3d_fix_panel_winding=not args.no_style3d_fix_panel_winding,
                             style3d_clean_nonmanifold=bool(args.style3d_clean_nonmanifold),
+                            style3d_min_triangle_area_ratio=float(args.style3d_min_triangle_area_ratio),
                             style3d_sew_distance=float(args.style3d_sew_distance),
                             style3d_sew_ke=float(args.style3d_sew_ke),
                             style3d_sew_kd=float(args.style3d_sew_kd),
@@ -1250,6 +1256,7 @@ def main() -> int:
                     start_height=float(args.start_height),
                     style3d_fix_panel_winding=not args.no_style3d_fix_panel_winding,
                     style3d_clean_nonmanifold=bool(args.style3d_clean_nonmanifold),
+                    style3d_min_triangle_area_ratio=float(args.style3d_min_triangle_area_ratio),
                     style3d_sew_distance=float(args.style3d_sew_distance),
                     style3d_sew_ke=float(args.style3d_sew_ke),
                     style3d_sew_kd=float(args.style3d_sew_kd),

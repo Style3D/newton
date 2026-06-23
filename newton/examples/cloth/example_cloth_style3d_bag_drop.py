@@ -72,6 +72,7 @@ class Example:
             start_height=float(args.start_height),
             style3d_fix_panel_winding=not bool(args.no_style3d_fix_panel_winding),
             style3d_clean_nonmanifold=bool(args.style3d_clean_nonmanifold),
+            style3d_min_triangle_area_ratio=float(args.style3d_min_triangle_area_ratio),
             style3d_sew_distance=float(args.style3d_sew_distance),
             style3d_sew_ke=float(args.style3d_sew_ke),
             style3d_sew_kd=float(args.style3d_sew_kd),
@@ -229,7 +230,13 @@ def create_parser() -> argparse.ArgumentParser:
         "--style3d-clean-nonmanifold",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Drop duplicate triangles and extra faces on non-manifold edges before Style3D build",
+        help="Drop duplicate triangles and tiny area triangles before Style3D build",
+    )
+    parser.add_argument(
+        "--style3d-min-triangle-area-ratio",
+        type=float,
+        default=0.05,
+        help="Drop triangles with 3D area below this fraction of the median positive triangle area",
     )
     parser.add_argument("--style3d-sew-distance", type=float, default=0.0)
     parser.add_argument("--style3d-sew-ke", type=float, default=100.0)
