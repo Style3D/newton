@@ -26,7 +26,6 @@ from newton.examples.cloth._style3d_asset_probe import (
     resolve_path,
 )
 
-
 DEFAULT_BAG_ASSET = "newton/examples/assets/style3d_probe/bag/nonwoven_small_6/nonwoven_small_6.obj"
 
 
@@ -180,32 +179,32 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--warp-cache-dir", default="/tmp/warp_cache")
     parser.add_argument("--scale", type=float, default=None, help="Asset scale override; default uses probe estimate")
     parser.add_argument("--view-fps", type=float, default=60.0, help="Simulation frames advanced per viewer frame")
-    parser.add_argument("--view-substeps", type=int, default=10, help="Style3D solver substeps per viewer frame")
+    parser.add_argument("--view-substeps", type=int, default=6, help="Style3D solver substeps per viewer frame")
     parser.add_argument("--start-height", type=float, default=0.5, help="Lowest bag vertex height above the ground [m]")
     parser.add_argument("--no-cuda-graph", action="store_true", help="Disable CUDA graph capture")
     parser.add_argument("--show-particles", action="store_true", help="Render cloth particles")
 
-    parser.add_argument("--solver-iterations", type=int, default=3, help="Style3D nonlinear iterations per substep")
-    parser.add_argument("--linear-iterations", type=int, default=50, help="Style3D linear iterations per substep")
+    parser.add_argument("--solver-iterations", type=int, default=5, help="Style3D nonlinear iterations per substep")
+    parser.add_argument("--linear-iterations", type=int, default=10, help="Style3D linear iterations per substep")
     parser.set_defaults(step_dt=1.0 / 120.0)
 
-    parser.add_argument("--cloth-density", type=float, default=1.0, help="Cloth areal density")
+    parser.add_argument("--cloth-density", type=float, default=0.3, help="Cloth areal density")
     parser.add_argument("--particle-radius", type=float, default=0.0015, help="Cloth particle/contact radius [m]")
     parser.add_argument("--tri-ka", type=float, default=500.0, help="Triangle area preservation stiffness")
     parser.add_argument("--tri-kd", type=float, default=1.0e-4, help="Triangle damping")
     parser.add_argument(
         "--tri-aniso-ke",
         type=parse_vec3_arg,
-        default=(100000.0, 100000.0, 1000.0),
+        default=(1000.0, 1000.0, 500.0),
         help="Style3D anisotropic stretch/shear stiffness as weft,warp,shear",
     )
     parser.add_argument(
         "--edge-aniso-ke",
         type=parse_vec3_arg,
-        default=(5.0e-6, 5.0e-6, 5.0e-6),
+        default=(2.0e-6, 2.0e-6, 2.0e-6),
         help="Style3D anisotropic bending stiffness as weft,warp,shear",
     )
-    parser.add_argument("--edge-kd", type=float, default=1.0e-2, help="Edge/bending damping")
+    parser.add_argument("--edge-kd", type=float, default=1.0e-4, help="Edge/bending damping")
 
     parser.add_argument("--soft-contact-margin", type=float, default=0.0015, help="Ground/body soft contact margin [m]")
     parser.add_argument("--soft-contact-ke", type=float, default=10.0, help="Ground/body soft contact stiffness")
@@ -213,9 +212,15 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--soft-contact-mu", type=float, default=0.2, help="Ground/body soft contact friction")
 
     parser.add_argument("--no-style3d-self-collision", action="store_true", help="Disable Style3D cloth self-collision")
-    parser.add_argument("--style3d-collision-radius", type=float, default=0.0005, help="Style3D self-collision radius [m]")
-    parser.add_argument("--style3d-collision-stiff-vf", type=float, default=0.01, help="Vertex-face self-collision stiffness")
-    parser.add_argument("--style3d-collision-stiff-ee", type=float, default=0.005, help="Edge-edge self-collision stiffness")
+    parser.add_argument(
+        "--style3d-collision-radius", type=float, default=0.0005, help="Style3D self-collision radius [m]"
+    )
+    parser.add_argument(
+        "--style3d-collision-stiff-vf", type=float, default=0.01, help="Vertex-face self-collision stiffness"
+    )
+    parser.add_argument(
+        "--style3d-collision-stiff-ee", type=float, default=0.005, help="Edge-edge self-collision stiffness"
+    )
     parser.add_argument("--style3d-collision-stiff-ef", type=float, default=0.05, help="Edge-face untangling stiffness")
 
     parser.add_argument("--style3d-panel-axes", choices=["xy", "xz", "yz"], default="xy")
