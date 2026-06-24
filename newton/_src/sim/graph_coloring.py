@@ -22,6 +22,12 @@ def _to_warp_coloring_algorithm(algorithm: ColoringAlgorithm | wp.utils.GraphCol
     return wp.utils.GraphColoringAlgorithm(algorithm)
 
 
+def _is_warp_debug_logging_enabled() -> bool:
+    log_level = getattr(wp.config, "log_level", None)
+    log_debug = getattr(wp, "LOG_DEBUG", None)
+    return log_level is not None and log_debug is not None and log_level <= log_debug
+
+
 @wp.kernel
 def validate_graph_coloring(edge_indices: wp.array2d[int], colors: wp.array[int]):
     edge_idx = wp.tid()
@@ -298,7 +304,7 @@ def color_graph(
             target_max_min_color_ratio,
         )
 
-        if max_min_ratio > target_max_min_color_ratio and wp.config.log_level <= wp.LOG_DEBUG:
+        if max_min_ratio > target_max_min_color_ratio and _is_warp_debug_logging_enabled():
             warnings.warn(
                 f"Color balancing terminated early: max/min ratio {max_min_ratio:.3f} "
                 f"exceeds target {target_max_min_color_ratio:.3f}. "

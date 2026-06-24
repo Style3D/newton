@@ -390,12 +390,6 @@ class Example:
                                                                    two_way_coupling = False
                                                                    ) 
 
-                #newton.solvers.SolverStyle3D.register_custom_attributes(self.scene)
-                #self.cloth_solver = newton.solvers.SolverStyle3D(
-                #            model=self.model,
-                #            iterations=self.iterations,
-                #            #scale_model_2_sim = self.viz_scale,
-                #        )
 
             else:
                 self.cloth_solver = SolverVBD(
