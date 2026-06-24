@@ -77,11 +77,10 @@ def eval_bend_kernel(
     bend_weight[3] = edge_bending_cot[eid][0] + edge_bending_cot[eid][1]
     bend_weight[0] = -edge_bending_cot[eid][0] - edge_bending_cot[eid][2]
     bend_weight[1] = -edge_bending_cot[eid][1] - edge_bending_cot[eid][3]
-    bend_weight = bend_weight * edge_stiff
     for i in range(4):
         force = wp.vec3(0.0)
         for j in range(4):
-            force = force - bend_weight[i] * bend_weight[j] * pos[edge[j]]
+            force = force - edge_stiff * bend_weight[i] * bend_weight[j] * pos[edge[j]]
         wp.atomic_add(forces, edge[i], force)
 
 

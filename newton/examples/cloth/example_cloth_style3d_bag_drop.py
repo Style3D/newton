@@ -202,7 +202,7 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--edge-aniso-ke",
         type=parse_vec3_arg,
-        default=(2.0e-6, 2.0e-6, 2.0e-6),
+        default=(2.0e-4, 2.0e-4, 2.0e-4),
         help="Style3D anisotropic bending stiffness as weft,warp,shear",
     )
     parser.add_argument("--edge-kd", type=float, default=1.0e-4, help="Edge/bending damping")
