@@ -722,7 +722,7 @@ def build_newton_cloth_model(
             panel_vertices_np,
             enabled=style3d_fix_panel_winding,
         )
-        build_faces_np, panel_faces_np = clean_nonmanifold_style3d_faces(
+        build_vertices_np, build_faces_np, panel_faces_np = clean_nonmanifold_style3d_faces(
             build_vertices_np,
             build_faces_np,
             panel_faces_np,
@@ -871,9 +871,9 @@ def clean_nonmanifold_style3d_faces(
     *,
     enabled: bool,
     min_area_ratio: float = 0.05,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     if not enabled or len(faces) == 0:
-        return faces, panel_faces
+        return vertices, faces, panel_faces
 
     keep = np.ones(len(faces), dtype=bool)
     seen_faces: set[tuple[int, int, int]] = set()
@@ -895,15 +895,25 @@ def clean_nonmanifold_style3d_faces(
         keep &= face_area >= area_threshold
     dropped_small_area = int(np.count_nonzero(face_area < area_threshold)) if area_threshold > 0.0 else 0
 
+    cleaned_vertices = vertices
     cleaned_faces = faces[keep]
     cleaned_panel_faces = panel_faces[keep]
+    dropped_vertices = 0
+    if len(cleaned_faces):
+        used_vertices = np.unique(cleaned_faces.reshape(-1))
+        if len(used_vertices) != len(vertices):
+            vertex_remap = np.full(len(vertices), -1, dtype=np.int64)
+            vertex_remap[used_vertices] = np.arange(len(used_vertices), dtype=np.int64)
+            cleaned_vertices = vertices[used_vertices]
+            cleaned_faces = vertex_remap[cleaned_faces]
+            dropped_vertices = len(vertices) - len(cleaned_vertices)
     print(
         f"[Newton] Cleaned Style3D topology: dropped_duplicate_tris={duplicate_count}, "
         f"dropped_small_area_tris={dropped_small_area}, min_area={area_threshold:g}, "
-        f"tris={len(faces)}->{len(cleaned_faces)}",
+        f"tris={len(faces)}->{len(cleaned_faces)}, dropped_orphan_vertices={dropped_vertices}",
         flush=True,
     )
-    return cleaned_faces, cleaned_panel_faces
+    return cleaned_vertices, cleaned_faces, cleaned_panel_faces
 
 
 def add_close_vertex_springs(

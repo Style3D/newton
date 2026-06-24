@@ -1,0 +1,34 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 0.01
+    upAxis = "Y"
+    subLayers = [
+        @./silk_35_aligned.usda@
+    ]
+    doc = """Variant of silk_35_aligned that overlays texture_scale = (4, 4) onto
+the silk_blue OmniPBR shader. Tiles the BlueSilk maps 4x4 across the silk UV
+to keep the weave dense (matches the legacy scene-level over).
+
+Switch the active variant from asset_meta.yaml `usd:` field:
+  - silk_35_aligned.usda        -> default (texture_scale defaults to (1, 1))
+  - silk_35_aligned_tile4.usda  -> tiled (texture_scale = (4, 4))
+"""
+)
+
+over "World"
+{
+    over "silk_35_aligned"
+    {
+        over "Looks"
+        {
+            over "silk_blue"
+            {
+                over "Shader"
+                {
+                    float2 inputs:texture_scale = (4, 4)
+                }
+            }
+        }
+    }
+}

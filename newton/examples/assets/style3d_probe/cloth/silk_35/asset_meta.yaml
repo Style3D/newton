@@ -1,0 +1,23 @@
+kind: deformable
+name: silk_35
+backend: flexcomp
+obj: silk_35_aligned.obj
+usd: silk_35_aligned_tile4.usda
+default_pos: [0.45, 0.0, 0.01]
+default_quat: [0.7071, 0.7071, 0, 0]
+usd_prim_path: "/World/Cloth/silk_35_aligned/silk_35_obj"
+keypoints:
+  # 命名规则: U=远(world +X), D=近(world -X), L=左(world +Y), R=右(world -Y)
+  # canonical (cx, cy): +x=远, -x=近, +y=左, -y=右
+  corner_LU: {index: 1124}    # 远左 canonical (+0.16, +0.16)
+  corner_RU: {index: 14062}   # 远右 canonical (+0.16, -0.16)
+  corner_RD: {index: 12464}   # 近右 canonical (-0.16, -0.16)
+  corner_LD: {index: 1873}    # 近左 canonical (-0.16, +0.16)
+physics:
+  stretch_stiff: [40000e-3, 25000e-3, 3000e-3]
+  bend_stiff: [250e-9, 125e-9, 260e-9]
+  density: 93e-3
+  thickness: 2.0e-3
+  air_damping: 0.1
+  gripper_static_friction: 5.0
+  gripper_dynamic_friction: 5.0

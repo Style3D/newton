@@ -1,0 +1,55 @@
+kind: deformable
+name: Tshirt_Blue_9k
+backend: direct_obj
+obj: Tshirt_Blue_9k_aligned.obj
+usd: Tshirt_Blue_9k_render.usda
+default_pos:
+- 0.30
+- -0.32
+- 0.01
+default_quat:
+- 1
+- 0
+- 0
+- 0
+keypoints:
+  left_hem:
+    index: 20
+  right_hem:
+    index: 145
+  left_collar:
+    index: 9238
+  right_collar:
+    index: 9222
+  left_sleeve_upper:
+    index: 8546
+  right_sleeve_upper:
+    index: 7847
+  left_shoulder:
+    index: 5807
+  right_shoulder:
+    index: 4729
+  left_sleeve_center:
+    index: 9199
+  right_sleeve_center:
+    index: 8508
+  left_sleeve_outer:
+    index: 8917
+  right_sleeve_outer:
+    index: 8219
+  center:
+    index: 115
+    
+usd_prim_path: /World/Cloth/Tshirt_Blue_9k/Tshirt_Blue_9k_aligned_obj
+physics:
+  stretch_stiff:
+  - 270000e-3
+  - 150000e-3
+  - 140000e-3
+  bend_stiff:
+  - 8.3168e-07
+  - 8.3168e-07
+  - 8.3168e-07
+  density: 150e-3
+  thickness: 1e-3
+  friction: 0.6
