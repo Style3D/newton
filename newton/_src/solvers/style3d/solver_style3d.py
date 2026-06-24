@@ -304,7 +304,7 @@ class SolverStyle3D(SolverBase):
                 self.rhs,
                 self.inv_A_diags,
                 self.dx,
-                self.linear_iterations,
+                wp.min(_iter + 1, 10),
                 None if self.collision is None else self.collision.hessian_multiply,
             )
 
