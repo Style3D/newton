@@ -1,0 +1,33 @@
+#usda 1.0
+(
+    defaultPrim = "lefthand"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "lefthand" (
+    variants = {
+        string Physics = "PhysX"
+    }
+    prepend variantSets = ["Physics" ]
+)
+{
+    variantSet "Physics" = {
+        "None" (
+            prepend references = @lefthand_base.usda@
+        ) {
+            over "joints" (
+                active = false
+            )
+            {
+            }
+
+        }
+        "PhysX" (
+            prepend payload = @lefthand_physics.usda@
+        ) {
+
+        }
+    }
+}
+

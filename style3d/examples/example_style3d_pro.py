@@ -1,0 +1,206 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+
+import os
+
+import style3dsim as sim
+import warp as wp
+
+import newton
+import newton.examples
+import newton.usd
+import newton.utils
+from newton import Mesh, ParticleFlags
+from newton.solvers import style3d
+from style3d.style3d_pro import SolverStyle3DPro
+from style3d.style3d_pro.solver_style3d_pro import sim_log_callback
+import style3d.auto_login as auto_login
+
+from pathlib import Path
+
+
+class Example:
+    def __init__(self, viewer, args):
+        # setup simulation parameters first
+        self.fps = 60
+        self.frame_dt = 1.0 / self.fps
+
+        # must be an even number when using CUDA Graph
+        self.sim_substeps = 10
+        self.sim_time = 0.0
+        self.sim_dt = self.frame_dt / self.sim_substeps
+
+        self.iterations = 4
+
+        self.viewer = viewer
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        newton.solvers.SolverStyle3D.register_custom_attributes(builder)
+
+        use_cloth_mesh = True
+        if use_cloth_mesh:
+            from pxr import Usd
+
+            asset_path = newton.utils.download_asset("style3d")
+
+            # Garment
+            # garment_usd_name = "Women_Skirt"
+            # garment_usd_name = "Female_T_Shirt"
+            garment_usd_name = "Women_Sweatshirt"
+
+            usd_stage = Usd.Stage.Open(str(asset_path / "garments" / (garment_usd_name + ".usd")))
+            usd_prim_garment = usd_stage.GetPrimAtPath(str("/Root/" + garment_usd_name + "/Root_Garment"))
+
+            garment_mesh, garment_mesh_uv_indices = newton.usd.get_mesh(
+                usd_prim_garment,
+                load_uvs=True,
+                preserve_facevarying_uvs=True,
+                return_uv_indices=True,
+            )
+            garment_mesh_uv = garment_mesh.uvs * 1.0e-3
+
+            # Avatar
+            usd_stage = Usd.Stage.Open(str(asset_path / "avatars" / "Female.usd"))
+            usd_prim_avatar = usd_stage.GetPrimAtPath("/Root/Female/Root_SkinnedMesh_Avatar_0_Sub_2")
+            avatar_mesh = newton.usd.get_mesh(usd_prim_avatar)
+            avatar_mesh_indices = avatar_mesh.indices
+            avatar_mesh_points = avatar_mesh.vertices
+
+            style3d.add_cloth_mesh(
+                builder,
+                pos=wp.vec3(0, 0, 0),
+                rot=wp.quat_from_axis_angle(axis=wp.vec3(1, 0, 0), angle=wp.pi / 2.0),
+                vel=wp.vec3(0.0, 0.0, 0.0),
+                panel_verts=garment_mesh_uv.tolist(),
+                panel_indices=garment_mesh_uv_indices.tolist(),
+                vertices=garment_mesh.vertices.tolist(),
+                indices=garment_mesh.indices.tolist(),
+                density=0.3,
+                scale=1.0,
+                particle_radius=5.0e-3,
+                tri_aniso_ke=wp.vec3(1.0e2, 1.0e2, 1.0e1),
+                edge_aniso_ke=wp.vec3(2.0e-5, 1.0e-5, 5.0e-6),
+            )
+            builder.add_shape_mesh(
+                body=builder.add_body(),
+                xform=wp.transform(
+                    p=wp.vec3(0, 0, 0),
+                    q=wp.quat_from_axis_angle(axis=wp.vec3(1, 0, 0), angle=wp.pi / 2.0),
+                ),
+                mesh=Mesh(avatar_mesh_points, avatar_mesh_indices),
+            )
+            # fixed_points = [0]
+            fixed_points = []
+        else:
+            grid_dim = 100
+            grid_width = 1.0
+            cloth_density = 0.3
+            style3d.add_cloth_grid(
+                builder,
+                pos=wp.vec3(-0.5, 0.0, 2.0),
+                rot=wp.quat_from_axis_angle(axis=wp.vec3(1, 0, 0), angle=wp.pi / 2.0),
+                dim_x=grid_dim,
+                dim_y=grid_dim,
+                cell_x=grid_width / grid_dim,
+                cell_y=grid_width / grid_dim,
+                vel=wp.vec3(0.0, 0.0, 0.0),
+                mass=cloth_density * (grid_width * grid_width) / (grid_dim * grid_dim),
+                tri_aniso_ke=wp.vec3(1.0e2, 1.0e2, 1.0e1),
+                tri_ka=1.0e2,
+                tri_kd=2.0e-6,
+                edge_aniso_ke=wp.vec3(2.0e-4, 1.0e-4, 5.0e-5),
+            )
+            fixed_points = [0, grid_dim]
+
+        # add a table
+        builder.add_ground_plane()
+        self.model = builder.finalize()
+
+        # set fixed points
+        flags = self.model.particle_flags.numpy()
+        for fixed_vertex_id in fixed_points:
+            flags[fixed_vertex_id] = flags[fixed_vertex_id] & ~ParticleFlags.ACTIVE
+        self.model.particle_flags = wp.array(flags)
+
+        # set up contact query and contact detection distances
+        self.model.soft_contact_radius = 0.2e-2
+        self.model.soft_contact_margin = 0.35e-2
+        self.model.soft_contact_ke = 1.0e1
+        self.model.soft_contact_kd = 1.0e-6
+        self.model.soft_contact_mu = 0.2
+        self.model.set_gravity((0.0, 0.0, -9.81))
+
+        # Set log callback
+        sim.set_log_callback(sim_log_callback)
+
+        auto_login.log_in_simulation()
+
+        #self.solver = newton.solvers.SolverStyle3D(
+        self.solver = SolverStyle3DPro(
+            model = self.model,
+            iterations = self.iterations,
+        )
+        # self.solver._precompute(
+        #     builder,
+        # )
+        self.state_0 = self.model.state()
+        self.state_1 = self.model.state()
+        self.control = self.model.control()
+
+        self.contacts = self.model.contacts()
+
+        self.viewer.set_model(self.model)
+        self.viewer.set_camera(wp.vec3(0.0, -1.7, 1.4), 0.0, -270.0)
+
+        self.graph = None
+
+    def capture(self):
+        if wp.get_device().is_cuda:
+            with wp.ScopedCapture() as capture:
+                self.simulate()
+            self.graph = capture.graph
+        else:
+            self.graph = None
+
+    def simulate(self):
+        self.model.collide(self.state_0, self.contacts)
+        for _ in range(self.sim_substeps):
+            self.state_0.clear_forces()
+
+            # apply forces to the model
+            self.viewer.apply_forces(self.state_0)
+
+            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
+            (self.state_0, self.state_1) = (self.state_1, self.state_0)
+
+    def step(self):
+        if self.graph:
+            wp.capture_launch(self.graph)
+        else:
+            self.simulate()
+
+        self.sim_time += self.frame_dt
+
+    def test_final(self):
+        p_lower = wp.vec3(-0.5, -0.2, 0.9)
+        p_upper = wp.vec3(0.5, 0.2, 1.6)
+        newton.examples.test_particle_state(
+            self.state_0,
+            "particles are within a reasonable volume",
+            lambda q, qd: newton.math.vec_inside_limits(q, p_lower, p_upper),
+        )
+
+    def render(self):
+        self.viewer.begin_frame(self.sim_time)
+        self.viewer.log_state(self.state_0)
+        self.viewer.log_contacts(self.contacts, self.state_0)
+        self.viewer.end_frame()
+
+
+if __name__ == "__main__":
+    # Parse arguments and initialize viewer
+    viewer, args = newton.examples.init()
+
+    # Create example and run
+    example = Example(viewer, args)
+
+    newton.examples.run(example, args)

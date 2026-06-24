@@ -34,6 +34,7 @@ rspec.xml
 .claude/settings.local.json
 .claude/worktrees/
 .mcp.json
+/docs/superpowers/
 
 # Claude Code sandbox artifacts (empty placeholder files created in repo root)
 .bash_profile
@@ -73,3 +74,6 @@ docs/_static/viser/
 
 # Notebook checkpoints
 **/*.ipynb_checkpoints/
+
+style3d/simulation_login.json
+style3d/examples/captured_frames/*
