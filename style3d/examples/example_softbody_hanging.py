@@ -44,9 +44,9 @@ class Example:
         spacing = 0.6  # Space between grids along Y-axis
 
         for i, k_damp in enumerate(damping_values):
-            y_offset = i * spacing
+            offset = i * spacing
             builder.add_soft_grid(
-                pos=wp.vec3(0.0, 1.0 + y_offset, 1.0),
+                pos=wp.vec3(0.0, 1.0 + offset , 1.0 ),
                 rot=wp.quat_identity(),
                 vel=wp.vec3(0.0, 0.0, 0.0),
                 dim_x=dim_x,

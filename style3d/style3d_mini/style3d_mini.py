@@ -82,7 +82,7 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
         print( f'time step {world_attrib.time_step}' )
         print( f'gravity {world_attrib.gravity.x}, {world_attrib.gravity.y}, {world_attrib.gravity.z} ' )
 
-        ### add_cloth_to_simulation
+        ##### add_cloth_to_simulation
         self._add_cloth_to_simulation(self.scale_model_2_sim, cloth_attrib_fn)
 
         ### add_deformable_body_to_simulation
@@ -117,13 +117,32 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
             return
 
         tets = self.model.tet_indices.numpy()
-        #TODO: make this general (collision faces is passed in) 
-        collision_faces = self.model.tri_indices.numpy()
+
+        face_idx = np.array(
+            [
+                [0, 2, 1],
+                [1, 2, 3],
+                [0, 1, 3],
+                [0, 3, 2],
+            ],
+            dtype=np.intp,
+        )
+        all_faces = tets.reshape(-1, 4)[:, face_idx].reshape(-1, 3)
+        sorted_faces = np.sort(all_faces, axis=1)
+        _, inverse, counts = np.unique(sorted_faces, axis=0, return_inverse=True, return_counts=True)
+        collision_faces = all_faces[counts[inverse] == 1].astype(np.int32, copy=False)
 
         self.deformable_body = sim.DeformableBody(x, collision_faces, tets, x)
         attrib = sim.DeformableBodyAttrib()
+        attrib.youngsModulus = 1e6
         self.deformable_body.set_attrib(attrib)
         self.deformable_body.attach(self.world)
+
+        flags = self.model.particle_flags.numpy()
+        fixed = ((flags & newton.ParticleFlags.ACTIVE) == 0) | (self.model.particle_mass.numpy() == 0.0)
+
+        self.deformable_body.set_pin(fixed.tolist(), list(range(len(fixed))))
+
 
 
     def _add_rigid_body_to_simulation(self, scale, rigid_body_attrib_fn):
@@ -308,7 +327,11 @@ class SolverStyle3dMini(newton.solvers.SolverBase):
     def _update_cloth_pos_to_state(self, state_out: State):
         if self.cloth is not None:
             cloth_x = self.cloth.get_positions()
-            state_out.particle_q.assign( cloth_x/self.scale_model_2_sim )
+            state_out.particle_q.assign( cloth_x / self.scale_model_2_sim )
+
+        if self.deformable_body is not None:
+            dfm_x = self.deformable_body.get_positions()
+            state_out.particle_q.assign( dfm_x / self.scale_model_2_sim )
 
     @trace_function
     def _two_way_coupling(self,state_in):
