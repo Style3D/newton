@@ -17,6 +17,17 @@ from newton._src.solvers.style3d.collision.kernels import (
 ########################################################################################################################
 
 
+@wp.kernel
+def hessian_multiply_kernel(
+    hessian_diags: wp.array[wp.mat33],
+    x: wp.array[wp.vec3],
+    # outputs
+    Hx: wp.array[wp.vec3],
+):
+    tid = wp.tid()
+    Hx[tid] = hessian_diags[tid] * x[tid]
+
+
 class Collision:
     """
     Collision handler for cloth simulation.
@@ -236,17 +247,6 @@ class Collision:
 
     def hessian_multiply(self, x: wp.array[wp.vec3]):
         """Computes the Hessian-vector product for implicit integration."""
-
-        @wp.kernel
-        def hessian_multiply_kernel(
-            hessian_diags: wp.array[wp.mat33],
-            x: wp.array[wp.vec3],
-            # outputs
-            Hx: wp.array[wp.vec3],
-        ):
-            tid = wp.tid()
-            Hx[tid] = hessian_diags[tid] * x[tid]
-
         wp.launch(
             hessian_multiply_kernel,
             dim=self.model.particle_count,
