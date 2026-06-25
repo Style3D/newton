@@ -181,12 +181,12 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--warp-cache-dir", default="/tmp/warp_cache")
     parser.add_argument("--scale", type=float, default=None, help="Asset scale override; default uses probe estimate")
     parser.add_argument("--view-fps", type=float, default=60.0, help="Simulation frames advanced per viewer frame")
-    parser.add_argument("--view-substeps", type=int, default=6, help="Style3D solver substeps per viewer frame")
+    parser.add_argument("--view-substeps", type=int, default=2, help="Style3D solver substeps per viewer frame")
     parser.add_argument("--start-height", type=float, default=0.5, help="Lowest bag vertex height above the ground [m]")
     parser.add_argument("--no-cuda-graph", action="store_true", help="Disable CUDA graph capture")
     parser.add_argument("--show-particles", action="store_true", help="Render cloth particles")
 
-    parser.add_argument("--solver-iterations", type=int, default=5, help="Style3D nonlinear iterations per substep")
+    parser.add_argument("--solver-iterations", type=int, default=20, help="Style3D nonlinear iterations per substep")
     parser.add_argument("--linear-iterations", type=int, default=10, help="Style3D linear iterations per substep")
     parser.add_argument(
         "--style3d-translation-preconditioner",
