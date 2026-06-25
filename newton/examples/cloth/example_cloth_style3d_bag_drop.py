@@ -85,6 +85,7 @@ class Example:
             self.model,
             iterations=max(1, int(self.cloth_params.solver_iterations)),
             linear_iterations=max(1, int(self.cloth_params.linear_iterations)),
+            enable_translation_preconditioner=bool(args.style3d_translation_preconditioner),
         )
         configure_style3d_solver_collision(self.solver, self.state_0, self.cloth_params)
 
@@ -187,6 +188,11 @@ def create_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--solver-iterations", type=int, default=5, help="Style3D nonlinear iterations per substep")
     parser.add_argument("--linear-iterations", type=int, default=10, help="Style3D linear iterations per substep")
+    parser.add_argument(
+        "--style3d-translation-preconditioner",
+        action="store_true",
+        help="Enable the Style3D coarse translation PCG preconditioner",
+    )
     parser.set_defaults(step_dt=1.0 / 120.0)
 
     parser.add_argument("--cloth-density", type=float, default=0.3, help="Cloth areal density")

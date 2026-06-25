@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import numpy as np
 import warp as wp
 
 from ...core.types import override
+from ...geometry import ParticleFlags
 from ...sim import Contacts, Control, Model, ModelBuilder, State
 from ..solver import SolverBase
 from .builder import PDMatrixBuilder
@@ -26,6 +28,60 @@ from .linear_solver import PcgSolver, SparseMatrixELL
 
 AttributeAssignment = Model.AttributeAssignment
 AttributeFrequency = Model.AttributeFrequency
+
+
+@wp.kernel
+def _accumulate_translation_preconditioner_kernel(
+    dt: float,
+    residual: wp.array[wp.vec3],
+    particle_component: wp.array[wp.int32],
+    particle_masses: wp.array[float],
+    particle_flags: wp.array[wp.int32],
+    contact_hessian_diags: wp.array[wp.mat33],
+    # outputs
+    coarse_rhs: wp.array[wp.vec3],
+    coarse_diag: wp.array[wp.vec3],
+):
+    tid = wp.tid()
+    if particle_flags[tid] & ParticleFlags.ACTIVE:
+        comp_idx = wp.min(wp.max(particle_component[tid], 0), coarse_diag.shape[0] - 1)
+        mass_diag = particle_masses[tid] / (dt * dt)
+        contact_hess = contact_hessian_diags[tid]
+        wp.atomic_add(coarse_rhs, comp_idx, residual[tid])
+        wp.atomic_add(
+            coarse_diag,
+            comp_idx,
+            wp.vec3(
+                mass_diag + contact_hess[0, 0],
+                mass_diag + contact_hess[1, 1],
+                mass_diag + contact_hess[2, 2],
+            ),
+        )
+
+
+@wp.kernel
+def _apply_translation_preconditioner_kernel(
+    coarse_rhs: wp.array[wp.vec3],
+    coarse_diag: wp.array[wp.vec3],
+    particle_component: wp.array[wp.int32],
+    particle_flags: wp.array[wp.int32],
+    # outputs
+    z: wp.array[wp.vec3],
+):
+    tid = wp.tid()
+    comp_idx = wp.min(wp.max(particle_component[tid], 0), coarse_diag.shape[0] - 1)
+    denom = coarse_diag[comp_idx]
+    rhs = coarse_rhs[comp_idx]
+    if particle_flags[tid] & ParticleFlags.ACTIVE:
+        correction = wp.vec3(0.0)
+        if denom[0] > 0.0:
+            correction[0] = rhs[0] / denom[0]
+        if denom[1] > 0.0:
+            correction[1] = rhs[1] / denom[1]
+        if denom[2] > 0.0:
+            correction[2] = rhs[2] / denom[2]
+        z[tid] = z[tid] + correction
+
 
 ########################################################################################################################
 #################################################    Style3D Solver    #################################################
@@ -106,6 +162,7 @@ class SolverStyle3D(SolverBase):
         linear_iterations: int = 10,
         drag_spring_stiff: float = 1e2,
         enable_mouse_dragging: bool = False,
+        enable_translation_preconditioner: bool = False,
     ):
         """
         Args:
@@ -114,6 +171,7 @@ class SolverStyle3D(SolverBase):
             linear_iterations: Number of linear iterations (currently PCG iter) per non-linear iteration.
             drag_spring_stiff: The stiffness of spring connecting barycentric-weighted drag-point and target-point.
             enable_mouse_dragging: Enable/disable dragging kernel.
+            enable_translation_preconditioner: Enable a coarse per-component translation preconditioner for PCG.
         """
 
         super().__init__(model)
@@ -128,6 +186,7 @@ class SolverStyle3D(SolverBase):
         self.nonlinear_iterations = iterations
         self.drag_spring_stiff = drag_spring_stiff
         self.enable_mouse_dragging = enable_mouse_dragging
+        self.enable_translation_preconditioner = enable_translation_preconditioner
         self.linear_solver = PcgSolver(model.particle_count, self.device)
 
         # Fixed PD matrix
@@ -145,6 +204,15 @@ class SolverStyle3D(SolverBase):
         self.static_A_diags = wp.zeros(model.particle_count, dtype=float, device=self.device)
         self.inv_A_diags = wp.zeros(model.particle_count, dtype=wp.mat33, device=self.device)
         self.A_diags = wp.zeros(model.particle_count, dtype=wp.mat33, device=self.device)
+
+        # Coarse translation preconditioner buffers.
+        self._translation_preconditioner_dt = 0.0
+        self._translation_component_count, particle_component = self._build_particle_components(model)
+        self._translation_particle_component = wp.array(particle_component, dtype=wp.int32, device=self.device)
+        self._translation_coarse_rhs = wp.zeros(self._translation_component_count, dtype=wp.vec3, device=self.device)
+        self._translation_coarse_diag = wp.zeros(self._translation_component_count, dtype=wp.vec3, device=self.device)
+        self._translation_zero_contact_hessian = wp.zeros(model.particle_count, dtype=wp.mat33, device=self.device)
+        self._translation_contact_hessian_diags = self._translation_zero_contact_hessian
 
         # Drag info
         self.drag_pos = wp.zeros(1, dtype=wp.vec3, device=self.device)
@@ -169,6 +237,8 @@ class SolverStyle3D(SolverBase):
         """
         if self.collision is not None:
             self.collision.frame_begin(state_in.particle_q, state_in.particle_qd, dt)
+        self._translation_preconditioner_dt = dt
+        self._translation_contact_hessian_diags = self._translation_zero_contact_hessian
 
         wp.launch(
             kernel=init_step_kernel,
@@ -277,6 +347,7 @@ class SolverStyle3D(SolverBase):
                     self.x_prev,
                     self.static_A_diags,
                 )
+                self._translation_contact_hessian_diags = self.collision.contact_hessian_diagonal()
                 wp.launch(
                     prepare_jacobi_preconditioner_kernel,
                     dim=self.model.particle_count,
@@ -297,16 +368,30 @@ class SolverStyle3D(SolverBase):
                     device=self.device,
                 )
 
-            self.linear_solver.solve(
-                self.pd_non_diags,
-                self.static_A_diags,
-                self.dx if _iter == 0 else None,
-                self.rhs,
-                self.inv_A_diags,
-                self.dx,
-                wp.min(_iter + 1, 10),
-                None if self.collision is None else self.collision.hessian_multiply,
-            )
+            hessian_multiply = None if self.collision is None else self.collision.hessian_multiply
+            if self.enable_translation_preconditioner:
+                self.linear_solver.solve(
+                    self.pd_non_diags,
+                    self.static_A_diags,
+                    self.dx if _iter == 0 else None,
+                    self.rhs,
+                    self.inv_A_diags,
+                    self.dx,
+                    self.linear_iterations,
+                    hessian_multiply,
+                    self._apply_translation_preconditioner,
+                )
+            else:
+                self.linear_solver.solve(
+                    self.pd_non_diags,
+                    self.static_A_diags,
+                    self.dx if _iter == 0 else None,
+                    self.rhs,
+                    self.inv_A_diags,
+                    self.dx,
+                    wp.min(_iter + 1, 10),
+                    hessian_multiply,
+                )
 
             if self.collision is not None:
                 self.collision.linear_iteration_end(self.dx)
@@ -335,6 +420,83 @@ class SolverStyle3D(SolverBase):
     def rebuild_bvh(self, state: State):
         if self.collision is not None:
             self.collision.rebuild_bvh(state.particle_q)
+
+    @staticmethod
+    def _build_particle_components(model: Model) -> tuple[int, np.ndarray]:
+        parent = list(range(model.particle_count))
+        rank = [0] * model.particle_count
+        particle_world = model.particle_world.numpy() if model.particle_world is not None else None
+
+        def find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a: int, b: int) -> None:
+            if a < 0 or b < 0 or a >= model.particle_count or b >= model.particle_count:
+                return
+            if particle_world is not None and particle_world[a] != particle_world[b]:
+                return
+            ra = find(a)
+            rb = find(b)
+            if ra == rb:
+                return
+            if rank[ra] < rank[rb]:
+                parent[ra] = rb
+            elif rank[ra] > rank[rb]:
+                parent[rb] = ra
+            else:
+                parent[rb] = ra
+                rank[ra] += 1
+
+        if model.tri_indices is not None:
+            for tri in model.tri_indices.numpy():
+                a, b, c = (int(tri[0]), int(tri[1]), int(tri[2]))
+                union(a, b)
+                union(b, c)
+                union(c, a)
+
+        component_map: dict[int, int] = {}
+        particle_component = np.empty(model.particle_count, dtype=np.int32)
+        for particle in range(model.particle_count):
+            root = find(particle)
+            component = component_map.setdefault(root, len(component_map))
+            particle_component[particle] = component
+        return max(1, len(component_map)), particle_component
+
+    def _apply_translation_preconditioner(self, residual: wp.array[wp.vec3], z: wp.array[wp.vec3]) -> None:
+        self._translation_coarse_rhs.zero_()
+        self._translation_coarse_diag.zero_()
+        wp.launch(
+            _accumulate_translation_preconditioner_kernel,
+            dim=self.model.particle_count,
+            inputs=[
+                self._translation_preconditioner_dt,
+                residual,
+                self._translation_particle_component,
+                self.model.particle_mass,
+                self.model.particle_flags,
+                self._translation_contact_hessian_diags,
+            ],
+            outputs=[
+                self._translation_coarse_rhs,
+                self._translation_coarse_diag,
+            ],
+            device=self.device,
+        )
+        wp.launch(
+            _apply_translation_preconditioner_kernel,
+            dim=self.model.particle_count,
+            inputs=[
+                self._translation_coarse_rhs,
+                self._translation_coarse_diag,
+                self._translation_particle_component,
+                self.model.particle_flags,
+            ],
+            outputs=[z],
+            device=self.device,
+        )
 
     @override
     @classmethod

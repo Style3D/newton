@@ -347,6 +347,7 @@ class PcgSolver:
         x1: wp.array[wp.vec3],
         iterations: int,
         additional_multiplier: Callable | None = None,
+        preconditioner: Callable | None = None,
     ):
         # Prevent out-of-bounds in rTz/pTAp when iterations > maxIter.
         iterations = wp.min(iterations, self.maxIter)
@@ -364,6 +365,8 @@ class PcgSolver:
 
         for iter in range(iterations):
             self.step2_update_z(inv_M)
+            if preconditioner is not None:
+                preconditioner(self.r, self.z)
             self.step3_update_rTz(iter)
             self.step4_update_p(iter)
 

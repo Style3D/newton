@@ -7,6 +7,7 @@ from newton import Contacts, Model, State
 from newton._src.solvers.style3d.collision.bvh import BvhEdge, BvhTri
 from newton._src.solvers.style3d.collision.kernels import (
     eval_body_contact_kernel,
+    hessian_multiply_kernel,
     handle_edge_edge_contacts_kernel,
     handle_vertex_triangle_contacts_kernel,
     solve_untangling_kernel,
@@ -15,17 +16,6 @@ from newton._src.solvers.style3d.collision.kernels import (
 ########################################################################################################################
 ###################################################    Collision    ####################################################
 ########################################################################################################################
-
-
-@wp.kernel
-def hessian_multiply_kernel(
-    hessian_diags: wp.array[wp.mat33],
-    x: wp.array[wp.vec3],
-    # outputs
-    Hx: wp.array[wp.vec3],
-):
-    tid = wp.tid()
-    Hx[tid] = hessian_diags[tid] * x[tid]
 
 
 class Collision:
