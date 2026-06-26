@@ -840,7 +840,10 @@ def repair_panel_winding(
     if not enabled or len(faces) == 0:
         return faces, panel_faces
     tri = panel_vertices[panel_faces]
-    area2 = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    # 2D signed area (np.cross dropped 2-vector support in NumPy 2.x).
+    _e1 = tri[:, 1] - tri[:, 0]
+    _e2 = tri[:, 2] - tri[:, 0]
+    area2 = _e1[:, 0] * _e2[:, 1] - _e1[:, 1] * _e2[:, 0]
     neg = area2 < -1.0e-14
     zero = np.abs(area2) <= 1.0e-14
     if not np.any(neg):
@@ -853,7 +856,9 @@ def repair_panel_winding(
     repaired_faces[neg] = repaired_faces[neg][:, [0, 2, 1]]
     repaired_panel_faces[neg] = repaired_panel_faces[neg][:, [0, 2, 1]]
     tri_repaired = panel_vertices[repaired_panel_faces]
-    area2_repaired = np.cross(tri_repaired[:, 1] - tri_repaired[:, 0], tri_repaired[:, 2] - tri_repaired[:, 0])
+    _r1 = tri_repaired[:, 1] - tri_repaired[:, 0]
+    _r2 = tri_repaired[:, 2] - tri_repaired[:, 0]
+    area2_repaired = _r1[:, 0] * _r2[:, 1] - _r1[:, 1] * _r2[:, 0]
     valid = area2_repaired > 1.0e-14
     print(
         f"[Newton] Repaired Style3D panel winding: flipped={int(np.count_nonzero(neg))}, "
