@@ -30,6 +30,18 @@ def triangle_barycentric(A: wp.vec3, B: wp.vec3, C: wp.vec3, P: wp.vec3):
     return wp.vec3(u, v, 1.0 - u - v)
 
 
+@wp.func
+def combine_contact_stiffness(stiff_factor: float, stiff_0: float, stiff_1: float):
+    if stiff_0 <= 1.0e-12 and stiff_1 <= 1.0e-12:
+        return 0.0
+    if stiff_0 <= 1.0e-12:
+        return stiff_factor * stiff_1
+    if stiff_1 <= 1.0e-12:
+        return stiff_factor * stiff_0
+    denom = stiff_0 + stiff_1
+    return stiff_factor * (stiff_0 * stiff_1) / denom
+
+
 @wp.kernel
 def hessian_multiply_kernel(
     hessian_diags: wp.array[wp.mat33],
@@ -140,7 +152,9 @@ def handle_vertex_triangle_contacts_kernel(
             continue  # is outside triangle
 
         face_stiff = (static_diags[face[0]] + static_diags[face[1]] + static_diags[face[2]]) / 3.0
-        stiff = stiff_factor * (vert_stiff * face_stiff) / (vert_stiff + face_stiff)
+        stiff = combine_contact_stiffness(stiff_factor, vert_stiff, face_stiff)
+        if stiff <= 0.0:
+            continue
 
         force = stiff * tri_normal * (thickness - wp.abs(dist)) * wp.sign(dist)
         hess = stiff * wp.outer(tri_normal, tri_normal)
@@ -218,7 +232,9 @@ def handle_edge_edge_contacts_kernel(
 
         if 1e-6 < dist < limited_thickness:
             stiff_1 = (static_diags[edge1[0]] + static_diags[edge1[1]]) / 2.0
-            stiff = stiff_factor * (stiff_0 * stiff_1) / (stiff_0 + stiff_1)
+            stiff = combine_contact_stiffness(stiff_factor, stiff_0, stiff_1)
+            if stiff <= 0.0:
+                continue
 
             dir = wp.normalize(dir)
             force = stiff * dir * (limited_thickness - dist)
@@ -349,7 +365,9 @@ def solve_untangling_kernel(
 
         # Can be precomputed
         stiff_1 = (static_diags[face[0]] + static_diags[face[1]] + static_diags[face[2]]) / 3.0
-        stiff = stiff_factor * (stiff_0 * stiff_1) / (stiff_0 + stiff_1)
+        stiff = combine_contact_stiffness(stiff_factor, stiff_0, stiff_1)
+        if stiff <= 0.0:
+            continue
         disp = 2.0 * thickness
 
         force = stiff * G * disp
