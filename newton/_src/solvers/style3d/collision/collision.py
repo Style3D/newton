@@ -10,6 +10,7 @@ from newton._src.solvers.style3d.collision.kernels import (
     hessian_multiply_kernel,
     handle_edge_edge_contacts_kernel,
     handle_vertex_triangle_contacts_kernel,
+    hessian_multiply_kernel,
     solve_untangling_kernel,
 )
 

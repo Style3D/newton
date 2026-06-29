@@ -54,6 +54,17 @@ def hessian_multiply_kernel(
 
 
 @wp.kernel
+def hessian_multiply_kernel(
+    hessian_diags: wp.array[wp.mat33],
+    x: wp.array[wp.vec3],
+    # outputs
+    Hx: wp.array[wp.vec3],
+):
+    tid = wp.tid()
+    Hx[tid] = hessian_diags[tid] * x[tid]
+
+
+@wp.kernel
 def eval_body_contact_kernel(
     # inputs
     dt: float,
