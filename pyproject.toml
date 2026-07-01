@@ -82,6 +82,12 @@ examples = [
     "Pillow>=11.3.0",
 ]
 
+# Teleoperation examples dependencies
+teleop = [
+    "newton[examples]",     # include example dependencies
+    "pygame>=2.6.1",        # for gamepad input
+]
+
 # OVRTX real-time ray tracing viewer
 rtx = [
     "newton[importers]",    # include import dependencies (USD)
