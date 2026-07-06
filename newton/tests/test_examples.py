@@ -15,6 +15,7 @@ manipulating cloth example, which takes approximately 35 seconds to run on a
 CUDA device.
 """
 
+import importlib.util
 import os
 import subprocess
 import sys
@@ -72,9 +73,8 @@ def add_example_test(
 ):
     """Registers a Newton example to run on ``devices`` as a TestCase."""
 
-    # verify the module exists (use package-relative path so this works from any CWD)
-    _examples_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "examples")
-    if not os.path.exists(os.path.join(_examples_dir, f"{name.replace('.', '/')}.py")):
+    module_name = name if name.startswith(("newton.", "style3d.")) else f"newton.examples.{name}"
+    if importlib.util.find_spec(module_name) is None:
         raise ValueError(f"Example {name} does not exist")
 
     if test_options is None:
@@ -146,7 +146,7 @@ def add_example_test(
             command = [sys.executable, *warning_args]
 
         # Append Warp commands
-        command.extend(["-m", f"newton.examples.{name}", "--device", str(device), "--test", "--quiet"])
+        command.extend(["-m", module_name, "--device", str(device), "--test", "--quiet"])
 
         if not use_viewer:
             stage_path = (
@@ -376,7 +376,7 @@ add_example_test(
 )
 add_example_test(
     TestClothExamples,
-    name="cloth.example_cloth_style3d",
+    name="style3d.examples.example_cloth_style3d",
     devices=cuda_test_devices,
     test_options={},
     test_options_cuda={"num-frames": 32},

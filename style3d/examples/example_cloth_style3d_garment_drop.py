@@ -18,7 +18,7 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton.examples.cloth._style3d_asset_probe import (
+from style3d.examples._style3d_asset_probe import (
     analyze_mesh,
     build_newton_cloth_model,
     cloth_params_from_args,
@@ -29,7 +29,7 @@ from newton.examples.cloth._style3d_asset_probe import (
 )
 
 
-DEFAULT_GARMENT_ASSET = "newton/examples/assets/style3d_probe/cloth/green_tshirt/green_tshirt.obj"
+DEFAULT_GARMENT_ASSET = "style3d/examples/assets/style3d_probe/cloth/green_tshirt/green_tshirt.obj"
 
 
 def define_fold_kernel(wp):

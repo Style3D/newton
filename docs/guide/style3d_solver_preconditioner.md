@@ -280,9 +280,9 @@ newton/_src/solvers/style3d/solver_style3d.py
 Examples:
 
 ```text
-newton/examples/cloth/example_cloth_style3d_bag_drop.py
-newton/examples/cloth/example_cloth_style3d_garment_drop.py
-newton/examples/cloth/example_cloth_style3d_two_cloths.py
+style3d/examples/example_cloth_style3d_bag_drop.py
+style3d/examples/example_cloth_style3d_garment_drop.py
+style3d/examples/example_cloth_style3d_two_cloths.py
 ```
 
 Tests:

@@ -21,14 +21,14 @@ import newton
 import newton.examples
 import newton.ik as ik
 from newton import BodyFlags, ParticleFlags
-from newton.examples.cloth._style3d_asset_probe import analyze_mesh, load_mesh, resolve_path
+from style3d.examples._style3d_asset_probe import analyze_mesh, load_mesh, resolve_path
 
 
 MENAGERIE_URL = "https://github.com/google-deepmind/mujoco_menagerie.git"
 MENAGERIE_ROOT_ENV = "NEWTON_MENAGERIE_PATH"
 PIPER_FOLDER = "agilex_piper"
 PIPER_MJCF = "piper.xml"
-DEFAULT_BAG_ASSET = "newton/examples/assets/style3d_probe/bag/canvas_bag/FBD_03.usd"
+DEFAULT_BAG_ASSET = "style3d/examples/assets/style3d_probe/bag/canvas_bag/FBD_03.usd"
 DEFAULT_ROBOT_HOME_Q = (0.0, 1.2, -1.6, 0.0, 0.8, 0.0, 0.028, -0.028)
 DEFAULT_BALL_XY = (0.42, -0.16)
 DEFAULT_BALL_MASS = float(4.0 / 3.0 * np.pi * 0.03**3 * 250.0)

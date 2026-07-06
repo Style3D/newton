@@ -19,8 +19,8 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton.examples.cloth import example_cloth_vbd_piper_bag as piper_bag
-from newton.examples.teleop import (
+from style3d.examples import example_cloth_vbd_piper_bag as piper_bag
+from style3d.examples.teleop import (
     GamepadTeleopController,
     KeyboardTeleopController,
     KinematicArticulationMirror,

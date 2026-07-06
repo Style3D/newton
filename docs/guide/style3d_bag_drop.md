@@ -9,9 +9,9 @@ The bag asset import and test flow is split across these files:
 ```text
 scripts/newton_asset_probe.py
 newton/examples/cloth/_style3d_asset_probe.py
-newton/examples/cloth/example_cloth_style3d.py
-newton/examples/cloth/example_cloth_style3d_fold_probe.py
-newton/examples/cloth/example_cloth_style3d_bag_drop.py
+style3d/examples/example_cloth_style3d.py
+style3d/examples/example_cloth_style3d_fold_probe.py
+style3d/examples/example_cloth_style3d_bag_drop.py
 docs/guide/style3d_asset_probe.md
 docs/guide/style3d_bag_drop.md
 ```
@@ -25,7 +25,7 @@ uv run -m newton.examples cloth_style3d_bag_drop --device cuda:0
 It loads the default bag asset:
 
 ```text
-newton/examples/assets/style3d_probe/bag/nonwoven_small_6/nonwoven_small_6.obj
+style3d/examples/assets/style3d_probe/bag/nonwoven_small_6/nonwoven_small_6.obj
 ```
 
 Pass another OBJ/USD asset as the positional argument to test a different bag.

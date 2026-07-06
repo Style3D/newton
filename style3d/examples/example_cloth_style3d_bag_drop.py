@@ -16,7 +16,7 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton.examples.cloth._style3d_asset_probe import (
+from style3d.examples._style3d_asset_probe import (
     analyze_mesh,
     build_newton_cloth_model,
     cloth_params_from_args,
@@ -26,7 +26,7 @@ from newton.examples.cloth._style3d_asset_probe import (
     resolve_path,
 )
 
-DEFAULT_BAG_ASSET = "newton/examples/assets/style3d_probe/bag/nonwoven_small_6/nonwoven_small_6.obj"
+DEFAULT_BAG_ASSET = "style3d/examples/assets/style3d_probe/bag/nonwoven_small_6/nonwoven_small_6.obj"
 
 
 class Example:

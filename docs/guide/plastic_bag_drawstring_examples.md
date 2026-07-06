@@ -3,15 +3,15 @@
 This note documents the plastic bag, drawstring, and dustbin cloth examples:
 
 ```text
-newton/examples/cloth/example_cloth_vbd_plastic_bag_drawstring.py
-newton/examples/cloth/example_cloth_style3d_plastic_bag_drawstring.py
+style3d/examples/example_cloth_vbd_plastic_bag_drawstring.py
+style3d/examples/example_cloth_style3d_plastic_bag_drawstring.py
 newton/_src/solvers/style3d/collision/kernels.py
 ```
 
 Both examples load the same asset family:
 
 ```text
-newton/examples/assets/style3d_probe/bag/plastic_bag/
+style3d/examples/assets/style3d_probe/bag/plastic_bag/
 ```
 
 The bag is imported as one cloth mesh, the drawstring is imported as a second cloth strip, and the dustbin is imported as

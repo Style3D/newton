@@ -10,7 +10,7 @@ This is intentionally lightweight:
 
 Examples:
     python scripts/newton_asset_probe.py --preset bags_clothes --write-usd
-    python scripts/newton_asset_probe.py newton/examples/assets/style3d_probe/cloth/green_tshirt/green_tshirt.obj --try-newton --steps 2
+    python scripts/newton_asset_probe.py style3d/examples/assets/style3d_probe/cloth/green_tshirt/green_tshirt.obj --try-newton --steps 2
 """
 
 from __future__ import annotations
@@ -30,18 +30,18 @@ from typing import Iterable
 import numpy as np
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-EXAMPLE_ASSET_ROOT = PROJECT_ROOT / "newton" / "examples" / "assets" / "style3d_probe"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+EXAMPLE_ASSET_ROOT = PROJECT_ROOT / "style3d" / "examples" / "assets" / "style3d_probe"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "newton_asset_probe"
 
 
 DEFAULT_PRESET_ASSETS = [
-    "newton/examples/assets/style3d_probe/cloth/green_tshirt/green_tshirt.obj",
-    "newton/examples/assets/style3d_probe/cloth/green_tshirt/green_tshirt_40k.obj",
-    "newton/examples/assets/style3d_probe/cloth/blue_tshirt_14k/blue_tshirt_14k.obj",
-    "newton/examples/assets/style3d_probe/bag/nonwoven_small_6/nonwoven_small_6.obj",
-    "newton/examples/assets/style3d_probe/bag/nonwoven_small_6/nonwoven_small_6.usda",
-    "newton/examples/assets/style3d_probe/bag/nonwoven_711_small_2/nonwoven_711_small_2.obj",
+    "style3d/examples/assets/style3d_probe/cloth/green_tshirt/green_tshirt.obj",
+    "style3d/examples/assets/style3d_probe/cloth/green_tshirt/green_tshirt_40k.obj",
+    "style3d/examples/assets/style3d_probe/cloth/blue_tshirt_9k/Tshirt_Blue_9k_aligned.obj",
+    "style3d/examples/assets/style3d_probe/bag/nonwoven_small_6/nonwoven_small_6.obj",
+    "style3d/examples/assets/style3d_probe/bag/nonwoven_small_6/nonwoven_small_6.usda",
+    "style3d/examples/assets/style3d_probe/bag/nonwoven_5k/nonwoven_5k.obj",
 ]
 
 

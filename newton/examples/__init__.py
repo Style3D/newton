@@ -213,7 +213,10 @@ class _ExampleBrowser:
         tree: dict[str, list[tuple[str, str]]] = defaultdict(list)
         for name, module_path in examples.items():
             parts = module_path.split(".")
-            category = parts[2] if len(parts) > 2 else "other"
+            if parts[:2] == ["style3d", "examples"]:
+                category = "style3d"
+            else:
+                category = parts[2] if len(parts) > 2 else "other"
             tree[category].append((name, module_path))
         self._tree = dict(sorted(tree.items()))
 
@@ -458,14 +461,27 @@ def get_examples() -> dict[str, str]:
     """Return a dict mapping example short names to their full module paths."""
     example_map = {}
     examples_dir = get_source_directory()
-    for module in sorted(os.listdir(examples_dir)):
-        module_dir = os.path.join(examples_dir, module)
-        if not os.path.isdir(module_dir) or module.startswith("_"):
-            continue
-        for filename in sorted(os.listdir(module_dir)):
-            if filename.startswith("example_") and filename.endswith(".py"):
-                example_name = filename[8:-3]
-                example_map[example_name] = f"newton.examples.{module}.{filename[:-3]}"
+    roots = [(examples_dir, "newton.examples", True)]
+
+    style3d_examples_dir = os.path.realpath(os.path.join(examples_dir, "..", "..", "style3d", "examples"))
+    if os.path.isdir(style3d_examples_dir):
+        roots.append((style3d_examples_dir, "style3d.examples", False))
+
+    for root_dir, package, grouped in roots:
+        if grouped:
+            for module in sorted(os.listdir(root_dir)):
+                module_dir = os.path.join(root_dir, module)
+                if not os.path.isdir(module_dir) or module.startswith("_"):
+                    continue
+                for filename in sorted(os.listdir(module_dir)):
+                    if filename.startswith("example_") and filename.endswith(".py"):
+                        example_name = filename[8:-3]
+                        example_map[example_name] = f"{package}.{module}.{filename[:-3]}"
+        else:
+            for filename in sorted(os.listdir(root_dir)):
+                if filename.startswith("example_") and filename.endswith(".py"):
+                    example_name = filename[8:-3]
+                    example_map[example_name] = f"{package}.{filename[:-3]}"
     return example_map
 
 

@@ -12,8 +12,8 @@ stack of cloth layers.
 
 Examples:
     python -m newton.examples cloth_style3d_fold_probe --viewer null --num-frames 2
-    python newton/examples/cloth/example_cloth_style3d_fold_probe.py \
-        newton/examples/assets/style3d_probe/cloth/green_tshirt/green_tshirt.obj \
+    python -m style3d.examples.example_cloth_style3d_fold_probe \
+        style3d/examples/assets/style3d_probe/cloth/green_tshirt/green_tshirt.obj \
         --device cuda:0 --view-substeps 10 --solver-iterations 4 --linear-iterations 10 \
         --cloth-density 0.3 --particle-radius 0.005
 """
@@ -27,7 +27,7 @@ from types import SimpleNamespace
 import numpy as np
 
 import newton.examples
-from newton.examples.cloth._style3d_asset_probe import (
+from style3d.examples._style3d_asset_probe import (
     analyze_mesh,
     build_newton_cloth_model,
     cloth_params_from_args,
@@ -589,7 +589,7 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "asset",
         nargs="?",
-        default="newton/examples/assets/style3d_probe/cloth/green_tshirt/green_tshirt.obj",
+        default="style3d/examples/assets/style3d_probe/cloth/green_tshirt/green_tshirt.obj",
     )
     parser.add_argument("--warp-cache-dir", default="/tmp/warp_cache")
     parser.add_argument("--view-fps", type=float, default=60.0)

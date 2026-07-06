@@ -20,7 +20,7 @@ import newton
 import newton.examples
 from newton import ParticleFlags
 
-ASSET_ROOT = Path(__file__).resolve().parents[1] / "assets" / "style3d_probe" / "bag" / "plastic_bag"
+ASSET_ROOT = Path(__file__).resolve().parent / "assets" / "style3d_probe" / "bag" / "plastic_bag"
 DEFAULT_BAG_ASSET = ASSET_ROOT / "part1_m" / "part1_m.obj"
 DEFAULT_DRAWSTRING_ASSET = ASSET_ROOT / "part2_m" / "part2_m.obj"
 DEFAULT_DUSTBIN_ASSET = ASSET_ROOT / "dustbin" / "dustbin.obj"
