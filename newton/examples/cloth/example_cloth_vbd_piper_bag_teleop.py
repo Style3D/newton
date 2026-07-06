@@ -22,6 +22,7 @@ import newton.examples
 from newton.examples.cloth import example_cloth_vbd_piper_bag as piper_bag
 from newton.examples.teleop import (
     GamepadTeleopController,
+    KeyboardTeleopController,
     KinematicArticulationMirror,
     NewtonIKArm,
     piper_single_arm_spec,
@@ -35,6 +36,7 @@ class Example(piper_bag.Example):
 
         self.teleop_full_q = None
         self.teleop = None
+        self.teleop_arm = None
         self.teleop_mirror = None
         self.prev_robot_tool_pos = None
         self.robot_tool_velocity = np.zeros(3, dtype=np.float64)
@@ -85,16 +87,28 @@ class Example(piper_bag.Example):
             joint_limit_weight=float(self.args.robot_ik_joint_limit_weight),
             lambda_initial=float(self.args.robot_ik_lambda),
         )
-        self.teleop = GamepadTeleopController(
-            [arm],
-            base_full_q=self.teleop_full_q,
-            step_joint=float(self.args.teleop_step_joint),
-            step_pos=float(self.args.teleop_step_pos),
-            step_rot_deg=float(self.args.teleop_step_rot_deg),
-            step_gripper=float(self.args.teleop_step_gripper),
-            joystick_index=max(0, int(self.args.teleop_joystick)),
-            print_help=not bool(self.args.quiet),
-        )
+        self.teleop_arm = arm
+        if self.args.teleop_input == "keyboard":
+            self.teleop = KeyboardTeleopController(
+                [arm],
+                self.viewer,
+                base_full_q=self.teleop_full_q,
+                step_pos=float(self.args.teleop_step_pos),
+                step_rot_deg=float(self.args.teleop_step_rot_deg),
+                step_gripper=float(self.args.teleop_step_gripper),
+                print_help=not bool(self.args.quiet),
+            )
+        else:
+            self.teleop = GamepadTeleopController(
+                [arm],
+                base_full_q=self.teleop_full_q,
+                step_joint=float(self.args.teleop_step_joint),
+                step_pos=float(self.args.teleop_step_pos),
+                step_rot_deg=float(self.args.teleop_step_rot_deg),
+                step_gripper=float(self.args.teleop_step_gripper),
+                joystick_index=max(0, int(self.args.teleop_joystick)),
+                print_help=not bool(self.args.quiet),
+            )
         self.teleop_mirror = KinematicArticulationMirror(
             self.ik_model,
             source_body_start=int(ik_info.body_start),
@@ -105,6 +119,7 @@ class Example(piper_bag.Example):
         self.prev_robot_tool_pos = self.robot_tool_pos.copy()
         print(
             "[PiperBagTeleop] "
+            f"input={self.args.teleop_input}, "
             f"ee_body={self.args.robot_ee_body}, ee_offset={self.robot_ee_offset.astype(float).tolist()}, "
             f"attach_max_gripper={self._attach_gripper_threshold():g}, "
             f"release_gripper={self._release_gripper_threshold():g}",
@@ -121,19 +136,42 @@ class Example(piper_bag.Example):
             return float(self.args.teleop_release_gripper_opening)
         return max(1.25 * self._attach_gripper_threshold(), 0.7 * float(self.args.gripper_opening))
 
+    def _teleop_gripper_opening(self) -> float:
+        assert self.teleop is not None
+        return float(self.teleop.current_state.gripper_opening)
+
+    def _limit_gripper_after_ball_attach(self) -> None:
+        if not self.ball_attached:
+            return
+        assert self.teleop is not None
+        assert self.teleop_arm is not None
+        assert self.teleop_full_q is not None
+
+        min_opening = float(self.ball_attach_opening)
+        state = self.teleop.current_state
+        if state.gripper_opening >= min_opening:
+            return
+
+        state.gripper_opening = min_opening
+        self.teleop_full_q = self.teleop_arm.full_q_with_gripper(min_opening, full_q=self.teleop_full_q)
+
     def _update_teleop_robot_pose(self, state: newton.State) -> None:
         assert self.teleop_mirror is not None
         assert self.teleop_full_q is not None
 
         previous_tool_pos = self.robot_tool_pos.copy() if hasattr(self, "robot_tool_pos") else None
-        self.teleop_mirror.apply(self.teleop_full_q, state)
+        self.teleop_mirror.apply(
+            self.teleop_full_q,
+            state,
+            target_body_q_prev=getattr(self.solver, "body_q_prev", None),
+        )
         body_q = state.body_q.numpy()
         self.robot_tool_pos = piper_bag.transform_point_np(body_q[self.robot_ee_body_main], self.robot_ee_offset)
         if previous_tool_pos is None:
             self.robot_tool_velocity = np.zeros(3, dtype=np.float64)
         else:
             self.robot_tool_velocity = (self.robot_tool_pos - previous_tool_pos) / max(self.sim_dt, 1.0e-8)
-        self.robot_gripper_opening = float(self.teleop.current_state.gripper_opening)
+        self.robot_gripper_opening = self._teleop_gripper_opening()
 
     def _should_attach_ball_to_gripper(self, state: newton.State, time: float) -> tuple[bool, float]:
         del time
@@ -180,6 +218,7 @@ class Example(piper_bag.Example):
     def step(self):
         assert self.teleop is not None
         self.teleop_full_q = self.teleop.update().astype(np.float64).copy()
+        self._limit_gripper_after_ball_attach()
         super().step()
         if self.args.log_interval > 0 and self.frame % int(self.args.log_interval) == 0:
             print(
@@ -195,6 +234,12 @@ def create_parser() -> argparse.ArgumentParser:
     parser = piper_bag.create_parser()
     parser.description = __doc__
     parser.set_defaults(enable_robot_planner=False, no_cuda_graph=True)
+    parser.add_argument(
+        "--teleop-input",
+        choices=("keyboard", "gamepad"),
+        default="keyboard",
+        help="teleoperation input source",
+    )
     parser.add_argument("--teleop-joystick", type=int, default=0, help="pygame joystick index")
     parser.add_argument("--teleop-step-joint", type=float, default=0.04, help="Joint mode step per control tick [rad]")
     parser.add_argument("--teleop-step-pos", type=float, default=0.004, help="Pose mode translation step [m]")

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Newton IK based gamepad teleoperation utilities for examples.
+"""Newton IK based teleoperation utilities for examples.
 
 The helpers in this module intentionally depend only on Newton, Warp, NumPy,
 and optionally pygame for joystick input.  They are meant to be used by example
@@ -480,7 +480,9 @@ class GamepadTeleopController:
 
         pygame.init()
         pygame.joystick.init()
-        self.joystick = pygame.joystick.Joystick(joystick_index) if pygame.joystick.get_count() > joystick_index else None
+        self.joystick = (
+            pygame.joystick.Joystick(joystick_index) if pygame.joystick.get_count() > joystick_index else None
+        )
         if self.joystick is not None:
             self.joystick.init()
             print(f"[NewtonTeleop] Joystick: {self.joystick.get_name()}", flush=True)
@@ -637,6 +639,284 @@ class GamepadTeleopController:
         print("=" * 60 + "\n")
 
 
+class KeyboardTeleopController:
+    """Keyboard controller that updates one or two ``NewtonIKArm`` targets.
+
+    The default bindings use the SIM1 translation layout, with separate
+    hold-to-move gripper keys: left arm on ``WASD/QE/RF/ZC/XV`` and right arm on
+    ``UJHK/YI/OL/BM/NP``.  For a single arm, the left-arm layout is used.
+    """
+
+    @dataclass(frozen=True)
+    class Layout:
+        """Keyboard bindings for one arm."""
+
+        name: str
+        x_pos: str
+        x_neg: str
+        y_pos: str
+        y_neg: str
+        z_pos: str
+        z_neg: str
+        pitch_pos: str
+        pitch_neg: str
+        yaw_pos: str
+        yaw_neg: str
+        gripper_close: str
+        gripper_open: str
+
+    DEFAULT_LEFT_LAYOUT = Layout(
+        name="left",
+        x_pos="w",
+        x_neg="s",
+        y_pos="a",
+        y_neg="d",
+        z_pos="e",
+        z_neg="q",
+        pitch_pos="r",
+        pitch_neg="f",
+        yaw_pos="z",
+        yaw_neg="c",
+        gripper_close="x",
+        gripper_open="v",
+    )
+    DEFAULT_RIGHT_LAYOUT = Layout(
+        name="right",
+        x_pos="u",
+        x_neg="j",
+        y_pos="h",
+        y_neg="k",
+        z_pos="i",
+        z_neg="y",
+        pitch_pos="o",
+        pitch_neg="l",
+        yaw_pos="b",
+        yaw_neg="m",
+        gripper_close="n",
+        gripper_open="p",
+    )
+
+    def __init__(
+        self,
+        arms: Sequence[NewtonIKArm],
+        viewer,
+        *,
+        base_full_q: Sequence[float] | None = None,
+        step_pos: float = 0.004,
+        step_rot_deg: float = 2.0,
+        step_gripper: float = 0.0015,
+        shift_speed_factor: float = 2.0,
+        layouts: Sequence[KeyboardTeleopController.Layout] | None = None,
+        resolve_viewer_conflicts: bool = True,
+        print_help: bool = True,
+    ) -> None:
+        if not arms:
+            raise ValueError("KeyboardTeleopController requires at least one arm")
+        if viewer is None or not hasattr(viewer, "is_key_down"):
+            raise ValueError("KeyboardTeleopController requires a viewer with is_key_down()")
+
+        self.viewer = viewer
+        self.arms = {arm.spec.name: arm for arm in arms}
+        self.arm_order = [arm.spec.name for arm in arms]
+        self.full_q_target = (
+            np.asarray(base_full_q, dtype=np.float64).copy()
+            if base_full_q is not None
+            else arms[0].current_full_q()
+        )
+        self.states: dict[str, TeleopState] = {}
+        for arm in arms:
+            current = self.full_q_target[arm.joint_q_indices].copy()
+            home_q = np.asarray(arm.spec.home_q, dtype=np.float64) if arm.spec.home_q is not None else current.copy()
+            if len(home_q) != len(arm.joint_q_indices):
+                raise ValueError(f"Home q for arm {arm.spec.name!r} must have {len(arm.joint_q_indices)} values")
+            self.states[arm.spec.name] = TeleopState(
+                joint_q=current,
+                gripper_opening=float(arm.spec.home_gripper_opening),
+                home_q=home_q,
+                home_gripper_opening=float(arm.spec.home_gripper_opening),
+            )
+            self.full_q_target = arm.full_q_with_gripper(
+                self.states[arm.spec.name].gripper_opening,
+                full_q=arm.full_q_with_arm(current, full_q=self.full_q_target),
+            )
+
+        if layouts is None:
+            layouts = (self.DEFAULT_LEFT_LAYOUT,) if len(arms) == 1 else (
+                self.DEFAULT_LEFT_LAYOUT,
+                self.DEFAULT_RIGHT_LAYOUT,
+            )
+        if len(layouts) < len(arms):
+            raise ValueError("KeyboardTeleopController needs at least one layout per arm")
+        self.layouts = {arm.spec.name: layouts[index] for index, arm in enumerate(arms)}
+
+        self.step_pos = float(step_pos)
+        self.step_rot_deg = float(step_rot_deg)
+        self.step_gripper = float(step_gripper)
+        self.shift_speed_factor = float(shift_speed_factor)
+        self._viewer_conflict_restore: Callable[[], None] | None = None
+        if resolve_viewer_conflicts:
+            self._viewer_conflict_restore = self._resolve_viewer_conflicts(viewer)
+        if print_help:
+            self.print_instructions()
+
+    @property
+    def current_arm(self) -> NewtonIKArm:
+        return self.arms[self.arm_order[0]]
+
+    @property
+    def current_state(self) -> TeleopState:
+        return self.states[self.arm_order[0]]
+
+    def close(self) -> None:
+        if self._viewer_conflict_restore is not None:
+            self._viewer_conflict_restore()
+            self._viewer_conflict_restore = None
+
+    def update(self) -> np.ndarray:
+        """Poll the keyboard and return the current full joint_q target."""
+
+        speed = self.shift_speed_factor if self._key_down("shift") else 1.0
+        for arm_name in self.arm_order:
+            self._update_arm_pose(arm_name, speed)
+            self._update_arm_gripper(arm_name, speed)
+        self._write_states_to_full_q()
+        return self.full_q_target
+
+    def _key_down(self, key: str) -> bool:
+        try:
+            return bool(self.viewer.is_key_down(key))
+        except Exception:
+            return False
+
+    def _axis(self, positive: str, negative: str) -> float:
+        return float(self._key_down(positive)) - float(self._key_down(negative))
+
+    def _update_arm_pose(self, arm_name: str, speed: float) -> None:
+        arm = self.arms[arm_name]
+        state = self.states[arm_name]
+        layout = self.layouts[arm_name]
+
+        d_world = np.asarray(
+            [
+                self._axis(layout.x_pos, layout.x_neg),
+                self._axis(layout.y_pos, layout.y_neg),
+                self._axis(layout.z_pos, layout.z_neg),
+            ],
+            dtype=np.float64,
+        )
+        pitch = self._axis(layout.pitch_pos, layout.pitch_neg)
+        yaw = self._axis(layout.yaw_pos, layout.yaw_neg)
+        if float(np.linalg.norm(d_world, ord=1)) + abs(pitch) + abs(yaw) < 1.0e-6:
+            return
+
+        current_pose = arm.solve_fk(state.joint_q, full_q=self.full_q_target)
+        d_world *= self.step_pos * speed
+        d_euler_rad = np.radians(np.asarray([0.0, pitch, yaw], dtype=np.float64) * self.step_rot_deg * speed)
+        target_quat = quat_mul_wxyz(current_pose[3:7], quat_from_euler_xyz_wxyz(d_euler_rad))
+        target_pose = np.concatenate([current_pose[:3] + d_world, target_quat])
+        solved = arm.solve_ik(target_pose, seed_joints=state.joint_q, seed_full_q=self.full_q_target)
+        if solved is not None:
+            limits = arm.joint_limits()
+            state.joint_q = np.clip(solved, limits[:, 0], limits[:, 1])
+
+    def _update_arm_gripper(self, arm_name: str, speed: float) -> None:
+        arm = self.arms[arm_name]
+        state = self.states[arm_name]
+        layout = self.layouts[arm_name]
+        delta = self._axis(layout.gripper_open, layout.gripper_close) * self.step_gripper * speed
+        if abs(delta) < 1.0e-12:
+            return
+        state.gripper_opening = float(
+            np.clip(
+                state.gripper_opening + delta,
+                arm.spec.min_gripper_opening,
+                arm.spec.max_gripper_opening,
+            )
+        )
+
+    def _write_states_to_full_q(self) -> None:
+        for name in self.arm_order:
+            arm = self.arms[name]
+            state = self.states[name]
+            self.full_q_target = arm.full_q_with_arm(state.joint_q, full_q=self.full_q_target)
+            self.full_q_target = arm.full_q_with_gripper(state.gripper_opening, full_q=self.full_q_target)
+
+    def print_instructions(self) -> None:
+        print("\n" + "=" * 60)
+        print("NEWTON KEYBOARD TELEOP")
+        print("=" * 60)
+        print("Left arm:  W/S X, A/D Y, E/Q Z, R/F pitch, Z/C yaw, X/V close/open")
+        print("Right arm: U/J X, H/K Y, I/Y Z, O/L pitch, B/M yaw, N/P close/open")
+        print("Gripper keys are hold-to-move; release to stop")
+        print("Hold Shift for 2x motion speed")
+        print("Viewer conflicts: camera arrows only, G toggles UI, 0 frames camera")
+        print(f"arms={self.arm_order}")
+        print("=" * 60 + "\n")
+
+    @staticmethod
+    def _resolve_viewer_conflicts(viewer) -> Callable[[], None] | None:
+        renderer = getattr(viewer, "renderer", None)
+        gui = getattr(viewer, "gui", None)
+        if renderer is None or gui is None:
+            return None
+
+        original_update_camera = getattr(viewer, "_update_camera", None)
+        original_callbacks = (
+            list(getattr(renderer, "_key_callbacks", [])) if hasattr(renderer, "_key_callbacks") else None
+        )
+
+        def update_camera_arrows_only(dt: float) -> None:
+            try:
+                import pyglet
+            except Exception:
+                return
+
+            key = pyglet.window.key
+
+            def is_camera_key_down(symbol: int) -> bool:
+                return bool(symbol in (key.UP, key.DOWN, key.LEFT, key.RIGHT) and renderer.is_key_down(symbol))
+
+            gui.update_camera_from_keys(dt, is_camera_key_down)
+
+        viewer._update_camera = update_camera_arrows_only
+
+        if original_callbacks is not None:
+            original_on_key_press = getattr(viewer, "on_key_press", None)
+
+            def on_key_press_no_teleop_conflicts(symbol: int, modifiers: int) -> None:
+                del modifiers
+                if getattr(gui, "is_keyboard_capturing", lambda: False)():
+                    return
+                try:
+                    import pyglet
+                except Exception:
+                    return
+
+                if symbol == pyglet.window.key.SPACE:
+                    viewer._paused = not viewer._paused
+                elif symbol == pyglet.window.key.PERIOD and getattr(viewer, "_paused", False):
+                    viewer._step_requested = True
+                elif symbol == pyglet.window.key.G:
+                    gui.show_ui = not gui.show_ui
+                elif symbol == pyglet.window.key._0:
+                    gui.frame_camera_on_model()
+                elif symbol == pyglet.window.key.ESCAPE and hasattr(renderer, "close"):
+                    renderer.close()
+
+            for index, callback in enumerate(renderer._key_callbacks):
+                if callback is original_on_key_press or getattr(callback, "__self__", None) is viewer:
+                    renderer._key_callbacks[index] = on_key_press_no_teleop_conflicts
+                    break
+
+        def restore() -> None:
+            if original_update_camera is not None:
+                viewer._update_camera = original_update_camera
+            if original_callbacks is not None and hasattr(renderer, "_key_callbacks"):
+                renderer._key_callbacks[:] = original_callbacks
+
+        return restore
+
+
 def make_gamepad_teleop(
     model: newton.Model,
     specs: Sequence[ArmSpec],
@@ -662,6 +942,34 @@ def make_gamepad_teleop(
         for spec in specs
     ]
     return GamepadTeleopController(arms, base_full_q=base_full_q, **controller_kwargs)
+
+
+def make_keyboard_teleop(
+    model: newton.Model,
+    specs: Sequence[ArmSpec],
+    viewer,
+    *,
+    state: newton.State | None = None,
+    full_q_getter: Callable[[], np.ndarray] | None = None,
+    base_full_q: Sequence[float] | None = None,
+    ik_iterations: int = 24,
+    include_rotation_objective: bool = True,
+    **controller_kwargs,
+) -> KeyboardTeleopController:
+    """Create ``NewtonIKArm`` objects and wrap them in a keyboard controller."""
+
+    arms = [
+        NewtonIKArm(
+            model,
+            spec,
+            state=state,
+            full_q_getter=full_q_getter,
+            iterations=ik_iterations,
+            include_rotation_objective=include_rotation_objective,
+        )
+        for spec in specs
+    ]
+    return KeyboardTeleopController(arms, viewer, base_full_q=base_full_q, **controller_kwargs)
 
 
 def piper_single_arm_spec(

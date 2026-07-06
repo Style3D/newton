@@ -6,9 +6,11 @@
 from .newton_ik_teleop import (
     ArmSpec,
     GamepadTeleopController,
+    KeyboardTeleopController,
     KinematicArticulationMirror,
     NewtonIKArm,
     make_gamepad_teleop,
+    make_keyboard_teleop,
     piper_dual_arm_specs,
     piper_single_arm_spec,
 )
@@ -16,9 +18,11 @@ from .newton_ik_teleop import (
 __all__ = [
     "ArmSpec",
     "GamepadTeleopController",
+    "KeyboardTeleopController",
     "KinematicArticulationMirror",
     "NewtonIKArm",
     "make_gamepad_teleop",
+    "make_keyboard_teleop",
     "piper_dual_arm_specs",
     "piper_single_arm_spec",
 ]
