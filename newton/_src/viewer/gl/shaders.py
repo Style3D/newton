@@ -267,7 +267,8 @@ void main()
     // material properties from vertex shader
     float roughness = clamp(Material.x, 0.0, 1.0);
     float metallic = clamp(Material.y, 0.0, 1.0);
-    float checker_enable = Material.z;
+    float alpha = Material.z < 0.0 ? clamp(-Material.z, 0.0, 1.0) : 1.0;
+    float checker_enable = max(Material.z, 0.0);
     float texture_enable = Material.w;
     float checker_scale = 1.0;
 
@@ -382,7 +383,7 @@ void main()
     // gamma correction (sRGB)
     color = pow(color, vec3(1.0 / 2.2));
 
-    FragColor = vec4(color, 1.0);
+    FragColor = vec4(color, alpha);
 }
 """
 

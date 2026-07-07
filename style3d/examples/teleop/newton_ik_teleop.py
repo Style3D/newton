@@ -11,7 +11,7 @@ scripts that already own the simulation loop.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -407,6 +407,32 @@ class KinematicArticulationMirror:
             )
 
 
+def _as_np3(value: Sequence[float]) -> np.ndarray:
+    return np.asarray(value, dtype=np.float64)[:3].copy()
+
+
+def quat_mul_xyzw(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    q = np.asarray(
+        [
+            aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+            aw * bw - ax * bx - ay * by - az * bz,
+        ],
+        dtype=np.float64,
+    )
+    return q / max(np.linalg.norm(q), 1.0e-12)
+
+
+def transform_point_pose_xyzw(pose_xyzw: np.ndarray, local_point: Sequence[float]) -> np.ndarray:
+    return np.asarray(pose_xyzw[:3], dtype=np.float64) + quat_rotate_xyzw(
+        np.asarray(pose_xyzw[3:7], dtype=np.float64),
+        _as_np3(local_point),
+    )
+
+
 class GamepadTeleopController:
     """Gamepad controller that updates one or more ``NewtonIKArm`` targets."""
 
@@ -424,6 +450,8 @@ class GamepadTeleopController:
         speed_factors: Sequence[float] = (0.25, 0.5, 1.0, 2.0, 3.0),
         speed_index: int = 2,
         joystick_index: int = 0,
+        axis_map: Mapping[str, int] | None = None,
+        button_map: Mapping[str, int] | None = None,
         print_help: bool = True,
     ) -> None:
         if not arms:
@@ -466,7 +494,15 @@ class GamepadTeleopController:
         self.speed_index = int(np.clip(speed_index, 0, len(self.speed_factors) - 1))
         self.axis_map = {"lx": 0, "ly": 1, "rx": 3, "ry": 4, "lt": 2, "rt": 5}
         self.btn_map = {"a": 0, "b": 1, "x": 2, "y": 3, "lb": 4, "rb": 5, "back": 6, "start": 7, "home": 8}
+        if axis_map:
+            self.axis_map.update({str(name): int(index) for name, index in axis_map.items()})
+        if button_map:
+            self.btn_map.update({str(name): int(index) for name, index in button_map.items()})
         self.buttons = {name: Button() for name in self.btn_map}
+        self.last_button_events: dict[str, bool] = {}
+        self.axis_count = 0
+        self.button_count = 0
+        self.hat_count = 0
 
         try:
             import pygame
@@ -485,7 +521,15 @@ class GamepadTeleopController:
         )
         if self.joystick is not None:
             self.joystick.init()
-            print(f"[NewtonTeleop] Joystick: {self.joystick.get_name()}", flush=True)
+            self.axis_count = int(self.joystick.get_numaxes())
+            self.button_count = int(self.joystick.get_numbuttons())
+            self.hat_count = int(self.joystick.get_numhats())
+            print(
+                "[NewtonTeleop] "
+                f"Joystick: {self.joystick.get_name()} "
+                f"(axes={self.axis_count}, buttons={self.button_count}, hats={self.hat_count})",
+                flush=True,
+            )
         else:
             print("[NewtonTeleop] No joystick detected. Connect one and restart teleop.", flush=True)
         if print_help:
@@ -506,7 +550,13 @@ class GamepadTeleopController:
     def _get_axis(self, name: str) -> float:
         if self.joystick is None:
             return 0.0
-        value = float(self.joystick.get_axis(self.axis_map[name]))
+        axis = self.axis_map.get(name)
+        if axis is None or axis < 0 or axis >= self.axis_count:
+            return 0.0
+        try:
+            value = float(self.joystick.get_axis(axis))
+        except Exception:
+            return 0.0
         if name in ("lt", "rt"):
             value = (value + 1.0) / 2.0
         if abs(value) < self.deadzone:
@@ -514,9 +564,12 @@ class GamepadTeleopController:
         return value
 
     def _get_hat(self) -> tuple[int, int]:
-        if self.joystick is None or self.joystick.get_numhats() == 0:
+        if self.joystick is None or self.hat_count == 0:
             return (0, 0)
-        return self.joystick.get_hat(0)
+        try:
+            return self.joystick.get_hat(0)
+        except Exception:
+            return (0, 0)
 
     def update(self) -> np.ndarray:
         """Poll the gamepad and return the current full joint_q target."""
@@ -524,12 +577,22 @@ class GamepadTeleopController:
         if self.pygame is not None:
             self.pygame.event.pump()
         if self.joystick is None:
+            self.last_button_events = {}
             return self.full_q_target
 
         events = {}
         for name, button in self.buttons.items():
-            if button.update(bool(self.joystick.get_button(self.btn_map[name]))):
+            index = self.btn_map.get(name)
+            if index is None or index < 0 or index >= self.button_count:
+                current = False
+            else:
+                try:
+                    current = bool(self.joystick.get_button(index))
+                except Exception:
+                    current = False
+            if button.update(current):
                 events[name] = True
+        self.last_button_events = events
         self._handle_buttons(events)
 
         speed = self.speed_factors[self.speed_index]
@@ -970,97 +1033,3 @@ def make_keyboard_teleop(
         for spec in specs
     ]
     return KeyboardTeleopController(arms, viewer, base_full_q=base_full_q, **controller_kwargs)
-
-
-def piper_single_arm_spec(
-    *,
-    name: str = "piper",
-    joint_prefix: str = "joint",
-    joint_suffix: str = "",
-    ee_body_name: str = "link6",
-    finger_joint_names: tuple[str, str] | None = None,
-    ee_offset: tuple[float, float, float] = (0.0, 0.0, 0.13503),
-    joint_search_start: int = 0,
-    joint_search_stop: int | None = None,
-    body_search_start: int = 0,
-    body_search_stop: int | None = None,
-    home_q: tuple[float, ...] = (0.0, 1.2, -1.6, 0.0, 0.8, 0.0),
-    home_gripper_opening: float = 0.035,
-    min_gripper_opening: float = 0.0,
-    max_gripper_opening: float = 0.035,
-) -> ArmSpec:
-    """Return an ``ArmSpec`` for the AgileX PiPER MJCF convention."""
-
-    joint_names = tuple(f"{joint_prefix}{i}{joint_suffix}" for i in range(1, 7))
-    if finger_joint_names is None:
-        finger_joint_names = (f"{joint_prefix}7{joint_suffix}", f"{joint_prefix}8{joint_suffix}")
-    return ArmSpec(
-        name=name,
-        joint_names=joint_names,
-        ee_body_name=ee_body_name,
-        ee_offset=ee_offset,
-        gripper_joint_names=finger_joint_names,
-        gripper_joint_signs=(1.0, -1.0),
-        joint_search_start=joint_search_start,
-        joint_search_stop=joint_search_stop,
-        body_search_start=body_search_start,
-        body_search_stop=body_search_stop,
-        home_q=home_q,
-        home_gripper_opening=home_gripper_opening,
-        min_gripper_opening=min_gripper_opening,
-        max_gripper_opening=max_gripper_opening,
-    )
-
-
-def piper_dual_arm_specs(
-    *,
-    left_suffix: str = "",
-    right_suffix: str = "_arm2",
-    left_ee_body_name: str = "gripper_base_left",
-    right_ee_body_name: str = "gripper_base_right",
-    ee_offset: tuple[float, float, float] = (0.0, 0.0, 0.1358),
-    left_joint_search_start: int = 0,
-    left_joint_search_stop: int | None = None,
-    left_body_search_start: int = 0,
-    left_body_search_stop: int | None = None,
-    right_joint_search_start: int = 0,
-    right_joint_search_stop: int | None = None,
-    right_body_search_start: int = 0,
-    right_body_search_stop: int | None = None,
-    left_home_q: tuple[float, ...] = (-0.1240, 0.7980, -1.1250, -0.2253, 0.9856, 0.0829),
-    right_home_q: tuple[float, ...] = (0.1240, 0.7980, -1.1250, 0.2253, 0.9856, -0.0829),
-    home_gripper_opening: float = 0.035,
-    min_gripper_opening: float = 0.0,
-    max_gripper_opening: float = 0.035,
-) -> tuple[ArmSpec, ArmSpec]:
-    """Return left/right PiPER specs for dual-arm MJCF naming conventions."""
-
-    left = piper_single_arm_spec(
-        name="left",
-        joint_suffix=left_suffix,
-        ee_body_name=left_ee_body_name,
-        ee_offset=ee_offset,
-        joint_search_start=left_joint_search_start,
-        joint_search_stop=left_joint_search_stop,
-        body_search_start=left_body_search_start,
-        body_search_stop=left_body_search_stop,
-        home_q=left_home_q,
-        home_gripper_opening=home_gripper_opening,
-        min_gripper_opening=min_gripper_opening,
-        max_gripper_opening=max_gripper_opening,
-    )
-    right = piper_single_arm_spec(
-        name="right",
-        joint_suffix=right_suffix,
-        ee_body_name=right_ee_body_name,
-        ee_offset=ee_offset,
-        joint_search_start=right_joint_search_start,
-        joint_search_stop=right_joint_search_stop,
-        body_search_start=right_body_search_start,
-        body_search_stop=right_body_search_stop,
-        home_q=right_home_q,
-        home_gripper_opening=home_gripper_opening,
-        min_gripper_opening=min_gripper_opening,
-        max_gripper_opening=max_gripper_opening,
-    )
-    return left, right

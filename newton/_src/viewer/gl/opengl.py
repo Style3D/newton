@@ -751,6 +751,7 @@ class MeshInstancerGL:
         self.instance_transform_buffer_size = self.transform_byte_size * self.num_instances
         self.instance_color_buffer_size = self.color_byte_size * self.num_instances
         self.instance_material_buffer_size = self.material_byte_size * self.num_instances
+        self.has_transparency = False
 
         # ------------------------
         # transform buffer
@@ -890,6 +891,7 @@ class MeshInstancerGL:
 
         if materials is not None:
             host_materials = materials.numpy()
+            self.has_transparency = bool(np.any(host_materials[:, 2] < 0.0)) if host_materials.ndim == 2 else False
             gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self.instance_material_buffer)
             gl.glBufferData(gl.GL_ARRAY_BUFFER, host_materials.nbytes, host_materials.ctypes.data, gl.GL_STATIC_DRAW)
 
@@ -916,6 +918,7 @@ class MeshInstancerGL:
             gl.glBufferData(gl.GL_ARRAY_BUFFER, host_colors.nbytes, host_colors.ctypes.data, gl.GL_STATIC_DRAW)
         if materials is not None:
             host_materials = materials.numpy()
+            self.has_transparency = bool(np.any(host_materials[:, 2] < 0.0)) if host_materials.ndim == 2 else False
             gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self.instance_material_buffer)
             gl.glBufferData(gl.GL_ARRAY_BUFFER, host_materials.nbytes, host_materials.ctypes.data, gl.GL_STATIC_DRAW)
 
@@ -1847,7 +1850,15 @@ class RendererGL:
         )
 
         with self._shape_shader:
-            self._draw_objects(objects)
+            self._draw_objects(objects, transparent=False)
+            transparent_objects = {k: v for k, v in objects.items() if getattr(v, "has_transparency", False)}
+            if transparent_objects:
+                gl.glEnable(gl.GL_BLEND)
+                gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
+                gl.glDepthMask(gl.GL_FALSE)
+                self._draw_objects(transparent_objects, transparent=True)
+                gl.glDepthMask(gl.GL_TRUE)
+                gl.glDisable(gl.GL_BLEND)
 
         gl.glPolygonMode(gl.GL_FRONT_AND_BACK, gl.GL_FILL)
 
@@ -1858,7 +1869,11 @@ class RendererGL:
             # planes) via the per-object draw_edge flag. Mirrors the cast_shadow
             # filter in _render_shadow_map and keeps the decision off the checker
             # material bit (see #2808 review).
-            edge_objects = {k: v for k, v in objects.items() if getattr(v, "draw_edge", True)}
+            edge_objects = {
+                k: v
+                for k, v in objects.items()
+                if getattr(v, "draw_edge", True) and not getattr(v, "has_transparency", False)
+            }
             self._edge_shader.update(
                 view_matrix=self._view_matrix,
                 projection_matrix=self._projection_matrix,
@@ -1957,8 +1972,10 @@ class RendererGL:
         gl.glDisable(gl.GL_BLEND)
         check_gl_error()
 
-    def _draw_objects(self, objects):
+    def _draw_objects(self, objects, transparent: bool | None = None):
         for o in objects.values():
+            if transparent is not None and bool(getattr(o, "has_transparency", False)) != transparent:
+                continue
             if hasattr(o, "render"):
                 o.render()
 

@@ -13,6 +13,7 @@ Command:
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 import numpy as np
 import warp as wp
@@ -25,8 +26,16 @@ from style3d.examples.teleop import (
     KeyboardTeleopController,
     KinematicArticulationMirror,
     NewtonIKArm,
+    TeleopCameraRig,
+    TeleopEndEffectorVisualizer,
+    TeleopWristCameraPreview,
+    ghost_model_bodies,
+    load_mjcf_camera_frame,
     piper_single_arm_spec,
 )
+
+
+DEFAULT_TELEOP_PIPER_MJCF = Path(__file__).resolve().parent / "assets/style3d_probe/piper/piper_with_texture.xml"
 
 
 class Example(piper_bag.Example):
@@ -37,7 +46,10 @@ class Example(piper_bag.Example):
         self.teleop_full_q = None
         self.teleop = None
         self.teleop_arm = None
+        self.teleop_camera = None
+        self.teleop_eef_vis = None
         self.teleop_mirror = None
+        self.teleop_wrist_preview = None
         self.prev_robot_tool_pos = None
         self.robot_tool_velocity = np.zeros(3, dtype=np.float64)
 
@@ -116,11 +128,77 @@ class Example(piper_bag.Example):
             body_count=int(ik_info.body_end - ik_info.body_start),
         )
         self._update_teleop_robot_pose(self.state_0)
+        wrist_camera_body = self.args.robot_ee_body
+        wrist_camera_offset = (-0.0735, 0.0078, 0.0384)
+        wrist_camera_quat = (0.1228, 0.6964, -0.6964, -0.1228)
+        wrist_camera_fov = 43.23
+        if self.args.teleop_wrist_camera_name:
+            try:
+                frame = load_mjcf_camera_frame(self.args.piper_mjcf, self.args.teleop_wrist_camera_name)
+                wrist_camera_body = frame.parent_body_name or wrist_camera_body
+                wrist_camera_offset = frame.local_pos
+                wrist_camera_quat = frame.local_quat_wxyz
+                wrist_camera_fov = frame.fov_y_deg
+            except Exception as exc:
+                print(f"[PiperBagTeleop] Unable to load wrist camera from MJCF: {exc}", flush=True)
+        self.teleop_wrist_camera_body_main = piper_bag.find_label_index(
+            self.model.body_label,
+            wrist_camera_body,
+            self.piper_info.body_start,
+            self.piper_info.body_end,
+        )
+        if float(self.args.teleop_robot_alpha) < 1.0:
+            ghost_model_bodies(
+                self.viewer,
+                self.model,
+                body_start=int(self.piper_info.body_start),
+                body_end=int(self.piper_info.body_end),
+                alpha=float(self.args.teleop_robot_alpha),
+            )
+        if not bool(self.args.teleop_hide_eef_visualizer):
+            self.teleop_eef_vis = TeleopEndEffectorVisualizer(
+                self.viewer,
+                body_index=int(self.robot_ee_body_main),
+                local_offset=self.robot_ee_offset,
+                axis_length=float(self.args.teleop_eef_axis_length),
+                point_radius=float(self.args.teleop_eef_point_radius),
+                point_alpha=float(self.args.teleop_eef_point_alpha),
+                line_width=float(self.args.teleop_eef_line_width),
+                device=self.model.device,
+            )
+        self.teleop_camera = TeleopCameraRig(
+            self.viewer,
+            base_body_index=int(self.piper_info.body_start),
+            wrist_body_index=int(self.teleop_wrist_camera_body_main),
+            tool_offset=wrist_camera_offset,
+            initial_mode=self.args.teleop_camera,
+            wrist_position_offset=wrist_camera_offset,
+            wrist_quat_wxyz=wrist_camera_quat,
+            wrist_fov=wrist_camera_fov,
+            print_help=not bool(self.args.quiet),
+        )
+        if bool(self.args.teleop_wrist_preview):
+            self.teleop_wrist_preview = TeleopWristCameraPreview(
+                self.viewer,
+                self.model,
+                body_index=int(self.teleop_wrist_camera_body_main),
+                local_offset=wrist_camera_offset,
+                local_quat_wxyz=wrist_camera_quat,
+                fov_y_deg=wrist_camera_fov,
+                width=max(1, int(self.args.teleop_wrist_preview_width)),
+                height=max(1, int(self.args.teleop_wrist_preview_height)),
+                name=self.args.teleop_wrist_preview_name,
+                load_textures=not bool(self.args.teleop_wrist_preview_no_textures),
+                near_clip_m=max(0.0, float(self.args.teleop_wrist_preview_near_clip)),
+            )
+        self._update_teleop_camera()
         self.prev_robot_tool_pos = self.robot_tool_pos.copy()
         print(
             "[PiperBagTeleop] "
             f"input={self.args.teleop_input}, "
             f"ee_body={self.args.robot_ee_body}, ee_offset={self.robot_ee_offset.astype(float).tolist()}, "
+            f"camera={self.args.teleop_camera}, robot_alpha={float(self.args.teleop_robot_alpha):g}, "
+            f"wrist_camera_body={wrist_camera_body}, wrist_camera_fov={wrist_camera_fov:g}, "
             f"attach_max_gripper={self._attach_gripper_threshold():g}, "
             f"release_gripper={self._release_gripper_threshold():g}",
             flush=True,
@@ -173,6 +251,12 @@ class Example(piper_bag.Example):
             self.robot_tool_velocity = (self.robot_tool_pos - previous_tool_pos) / max(self.sim_dt, 1.0e-8)
         self.robot_gripper_opening = self._teleop_gripper_opening()
 
+    def _update_teleop_camera(self) -> None:
+        if self.teleop_camera is None:
+            return
+        gamepad = self.teleop if self.args.teleop_input == "gamepad" else None
+        self.teleop_camera.update(self.state_0, gamepad_controller=gamepad)
+
     def _should_attach_ball_to_gripper(self, state: newton.State, time: float) -> tuple[bool, float]:
         del time
         if self.robot_gripper_opening > self._attach_gripper_threshold():
@@ -220,6 +304,7 @@ class Example(piper_bag.Example):
         self.teleop_full_q = self.teleop.update().astype(np.float64).copy()
         self._limit_gripper_after_ball_attach()
         super().step()
+        self._update_teleop_camera()
         if self.args.log_interval > 0 and self.frame % int(self.args.log_interval) == 0:
             print(
                 "[PiperBagTeleop] "
@@ -229,11 +314,43 @@ class Example(piper_bag.Example):
                 flush=True,
             )
 
+    def render(self):
+        self._update_teleop_camera()
+        if self.teleop_wrist_preview is not None:
+            self.teleop_wrist_preview.render(self.state_0)
+        self.viewer.begin_frame(self.sim_time)
+        self.viewer.log_state(self.state_0)
+        if self.teleop_eef_vis is not None:
+            self.teleop_eef_vis.render(self.state_0)
+        self.viewer.log_mesh(
+            "/piper_bag/canvas_bag",
+            self.state_0.particle_q,
+            self.bag_tri_indices,
+            hidden=bool(self.args.no_colored_bag),
+            backface_culling=False,
+            color=piper_bag.BAG_COLOR,
+        )
+        self.viewer.log_points(
+            "/piper_bag/mouth_particles",
+            self.state_0.particle_q,
+            self.model.particle_radius,
+            colors=self.particle_render_colors,
+            hidden=not bool(self.args.show_mouth_particles),
+        )
+        self.viewer.log_contacts(self.contacts, self.state_0)
+        self.viewer.end_frame()
+
 
 def create_parser() -> argparse.ArgumentParser:
     parser = piper_bag.create_parser()
     parser.description = __doc__
-    parser.set_defaults(enable_robot_planner=False, no_cuda_graph=True)
+    local_piper_mjcf = str(DEFAULT_TELEOP_PIPER_MJCF) if DEFAULT_TELEOP_PIPER_MJCF.exists() else None
+    parser.set_defaults(
+        enable_robot_planner=False,
+        no_cuda_graph=True,
+        piper_mjcf=local_piper_mjcf,
+        robot_ee_offset=(0.0, 0.0, 0.1358),
+    )
     parser.add_argument(
         "--teleop-input",
         choices=("keyboard", "gamepad"),
@@ -245,6 +362,52 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--teleop-step-pos", type=float, default=0.004, help="Pose mode translation step [m]")
     parser.add_argument("--teleop-step-rot-deg", type=float, default=2.0, help="Pose mode rotation step [deg]")
     parser.add_argument("--teleop-step-gripper", type=float, default=0.0015, help="Gripper opening step [m]")
+    parser.add_argument(
+        "--teleop-camera",
+        choices=TeleopCameraRig.MODES,
+        default="rear",
+        help="Initial teleop camera mode. Press 1 rear, 2 wrist, 3 free; gamepad X cycles modes.",
+    )
+    parser.add_argument(
+        "--teleop-robot-alpha",
+        type=float,
+        default=0.22,
+        help="Robot visual alpha during teleop; use 1.0 to keep the robot opaque.",
+    )
+    parser.add_argument(
+        "--teleop-hide-eef-visualizer",
+        action="store_true",
+        help="Hide the teleop end-effector TCP point and RGB axes.",
+    )
+    parser.add_argument("--teleop-eef-axis-length", type=float, default=0.08, help="End-effector axis length [m]")
+    parser.add_argument("--teleop-eef-point-radius", type=float, default=0.006, help="End-effector point radius [m]")
+    parser.add_argument("--teleop-eef-point-alpha", type=float, default=0.45, help="End-effector point alpha")
+    parser.add_argument("--teleop-eef-line-width", type=float, default=0.008, help="End-effector axis line width")
+    parser.add_argument(
+        "--teleop-wrist-camera-name",
+        default="left_hand_cam",
+        help="MJCF camera name used for wrist preview and wrist viewport mode",
+    )
+    parser.add_argument(
+        "--teleop-wrist-preview",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Render the wrist camera into the viewer image panel",
+    )
+    parser.add_argument("--teleop-wrist-preview-width", type=int, default=256, help="Wrist preview image width")
+    parser.add_argument("--teleop-wrist-preview-height", type=int, default=256, help="Wrist preview image height")
+    parser.add_argument("--teleop-wrist-preview-name", default="wrist/color", help="Viewer image name for wrist preview")
+    parser.add_argument(
+        "--teleop-wrist-preview-near-clip",
+        type=float,
+        default=0.02,
+        help="Start wrist preview rays this far in front of the camera to avoid self-occlusion [m]",
+    )
+    parser.add_argument(
+        "--teleop-wrist-preview-no-textures",
+        action="store_true",
+        help="Skip loading textures in the wrist preview sensor",
+    )
     parser.add_argument(
         "--teleop-position-only",
         action="store_true",

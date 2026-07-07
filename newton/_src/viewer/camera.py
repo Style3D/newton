@@ -63,6 +63,7 @@ class Camera:
         # Camera orientation - this is what users can modify
         self.pitch = 0.0
         self.yaw = -180.0
+        self._view_up = None
 
         self.pivot = self.pos + self.get_front() * self.DEFAULT_PIVOT_DISTANCE
 
@@ -126,7 +127,7 @@ class Camera:
         distance = max(float(distance), self.MIN_PIVOT_DISTANCE)
         self.pivot = self.pos + self.get_front() * distance
 
-    def look_at(self, target):
+    def look_at(self, target, up=None):
         """Point the camera at a world-space target and set it as the pivot."""
         target = self._as_vec3(target)
         to_target = target - self.pos
@@ -136,6 +137,14 @@ class Camera:
             return
 
         self._set_orientation_from_direction(to_target)
+        self._view_up = None
+        if up is not None:
+            desired_up = self._as_vec3(up)
+            if self._length(desired_up) > 1.0e-8:
+                front = self.get_front()
+                desired_up = desired_up - front * float(desired_up.dot(front))
+                if self._length(desired_up) > 1.0e-8:
+                    self._view_up = desired_up.normalize()
         self.pivot = target
 
     def translate(self, delta):
@@ -154,6 +163,7 @@ class Camera:
         distance = self.pivot_distance
         self.yaw = self._wrap_yaw(self.yaw + delta_yaw)
         self.pitch = self._clamp_pitch(self.pitch + delta_pitch)
+        self._view_up = None
         self.pos = self.pivot - self.get_front() * distance
 
     def pan(self, delta_right: float, delta_up: float):
@@ -218,6 +228,9 @@ class Camera:
 
     def get_up(self):
         """Get the camera up direction vector (read-only)."""
+        if self._view_up is not None:
+            return self._view_up
+
         from pyglet.math import Vec3 as PyVec3
 
         # World up vector based on up axis
