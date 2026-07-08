@@ -508,8 +508,8 @@ def create_parser():
         "--viewer",
         type=str,
         default="gl",
-        choices=["gl", "usd", "rtx", "rerun", "null", "viser"],
-        help="Viewer to use (gl, usd, rtx, rerun, null, or viser).",
+        choices=["gl", "usd", "rtx", "rerun", "null", "viser", "polyscope"],
+        help="Viewer to use (gl, usd, rtx, rerun, null, viser or polyscope).",
     )
     parser.add_argument(
         "--rerun-address",
@@ -789,6 +789,8 @@ def init(parser=None):
         )
     elif args.viewer == "viser":
         viewer = newton.viewer.ViewerViser()
+    elif args.viewer == "polyscope":
+        viewer = newton.viewer.ViewerPolyscope()
     else:
         raise ValueError(f"Invalid viewer: {args.viewer}")
 
