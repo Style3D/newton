@@ -21,7 +21,7 @@ import newton
 import newton.examples
 import newton.ik as ik
 from newton import BodyFlags, ParticleFlags
-from style3d.examples._style3d_asset_probe import analyze_mesh, load_mesh, resolve_path
+from style3d.examples.tools.mesh_asset_utils import analyze_mesh, load_mesh, resolve_path
 
 
 MENAGERIE_URL = "https://github.com/google-deepmind/mujoco_menagerie.git"

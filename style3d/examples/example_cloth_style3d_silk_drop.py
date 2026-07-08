@@ -17,14 +17,12 @@ import warp as wp
 
 import newton
 import newton.examples
-from style3d.examples._style3d_asset_probe import (
-    analyze_mesh,
-    build_newton_cloth_model,
+from style3d.examples.tools.mesh_asset_utils import analyze_mesh, load_mesh, resolve_path
+from style3d.examples.tools.style3d_cloth_utils import (
+    build_style3d_cloth_model,
     cloth_params_from_args,
     configure_style3d_solver_collision,
-    load_mesh,
     parse_vec3_arg,
-    resolve_path,
 )
 
 
@@ -71,9 +69,8 @@ class Example:
         for warning in report.warnings[:6]:
             print(f"[SilkDrop] asset warning: {warning}", flush=True)
 
-        self.newton, self.wp, self.model, self.state_0, _builder = build_newton_cloth_model(
+        self.newton, self.wp, self.model, self.state_0, _builder = build_style3d_cloth_model(
             mesh,
-            backend="style3d",
             scale=scale,
             device=args.device,
             warp_cache_dir=args.warp_cache_dir,
