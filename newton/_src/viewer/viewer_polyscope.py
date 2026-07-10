@@ -811,6 +811,48 @@ class ViewerPolyscope(ViewerBase):
             ps.remove_group(self._shape_group_parent_name, error_if_absent=False)
         self._shape_groups.clear()
 
+    @staticmethod
+    def _remove_polyscope_entity(remove_func, entity) -> None:
+        if entity is None:
+            return
+
+        try:
+            remove_func(entity.get_name(), error_if_absent=False)
+        except Exception:
+            pass
+
+    def _clear_model_entities(self) -> None:
+        self._remove_polyscope_entity(ps.remove_surface_mesh, self.tri_entity)
+        self._remove_polyscope_entity(ps.remove_point_cloud, self.particle_entity)
+        self._remove_polyscope_entity(ps.remove_curve_network, self._picking_line_entity)
+
+        seen = set()
+        point_entity_ids = {id(entity) for entity in self._point_entities.values()}
+        for entity in (
+            list(self._shape_entities.values())
+            + list(self.body_entities.values())
+            + list(self._point_entities.values())
+        ):
+            entity_id = id(entity)
+            if entity_id in seen:
+                continue
+            seen.add(entity_id)
+            remove_func = ps.remove_point_cloud if entity_id in point_entity_ids else ps.remove_surface_mesh
+            self._remove_polyscope_entity(remove_func, entity)
+
+        self.tri_entity = None
+        self.particle_entity = None
+        self._picking_line_entity = None
+        self.body_entities.clear()
+        self._point_entities.clear()
+        self._point_enabled_state.clear()
+        self._point_quantity_state.clear()
+        self._shape_entities.clear()
+        self._shape_entity_colors.clear()
+        self._shape_entity_materials.clear()
+        self.tri_indices = None
+        self._clear_shape_groups()
+
     def _get_or_create_shape_group(self, group_name: str):
         """Create Polyscope hierarchy groups lazily for multi-world models."""
         group = self._shape_groups.get(group_name)
@@ -843,19 +885,12 @@ class ViewerPolyscope(ViewerBase):
     @override
     def set_model(self, model: newton.Model | None) -> None:
         """Register Newton model geometry with Polyscope."""
+        self._clear_model_entities()
         super().set_model(model)
         self.shape_body = None
         self.shape_world = None
         self.shape_colors = None
         self.particle_world = None
-        self.body_entities.clear()
-        self._point_entities.clear()
-        self._point_enabled_state.clear()
-        self._point_quantity_state.clear()
-        self._shape_entity_materials.clear()
-        self._shape_entity_colors.clear()
-        self._shape_entities.clear()
-        self._clear_shape_groups()
         self._scene_extents_dirty = False
         self.picking = None
         self._last_state = None
@@ -1261,4 +1296,14 @@ class ViewerPolyscope(ViewerBase):
 
     @override
     def close(self) -> None:
-        pass
+        self._clear_model_entities()
+        try:
+            ps.remove_all_structures()
+            ps.remove_all_groups()
+        except Exception:
+            pass
+        try:
+            ps.set_user_callback(None)
+        except Exception:
+            pass
+        ps.shutdown(True)
