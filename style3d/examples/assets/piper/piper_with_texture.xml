@@ -1,0 +1,358 @@
+<mujoco model="piper">
+    <compiler  angle="radian" />
+
+    <option timestep="0.002"/>
+    <size njmax="500" nconmax="100" />
+
+  <visual>
+    <headlight diffuse="0.4 0.4 0.4" ambient="0.1 0.1 0.1" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="150" elevation="-20" offwidth="1920" offheight="1080"/>
+  </visual>
+
+    <default>
+    <default class="piper">
+      <joint frictionloss="0.3" armature="0.005"/>
+      <position inheritrange="1" forcerange="-100 100"/>
+
+      <default class="visual">
+        <geom group="2" type="mesh" contype="0" conaffinity="0" density="0"/>
+      </default>
+
+      <default class="collision">
+        <geom group="3" type="mesh" contype="1" conaffinity="1"/>
+      </default>
+
+      <default class="finger">
+        <joint frictionloss="0" type="slide" damping="100"/>
+        <position forcerange="-100 100"/>
+      </default>
+
+     </default>
+    </default>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8" width="300" height="300"/>
+    <material name="groundplane" texture="fabric_texture" texuniform="true" texrepeat="5 5" reflectance="0.0" specular="0.0" shininess="0" />
+
+    <!-- Robot materials (merged canonical colors) -->
+    <material name="robot_black" specular="0.1" shininess="0.5" rgba="0.105 0.105 0.105 1"/>
+    <material name="robot_charcoal" specular="0.1" shininess="0.5" rgba="0.161 0.161 0.161 1"/>
+    <material name="robot_dark_olive" specular="0.1" shininess="0.5" rgba="0.252 0.265 0.249 1"/>
+    <material name="robot_olive" specular="0.1" shininess="0.5" rgba="0.404 0.406 0.384 1"/>
+    <material name="robot_gray" specular="0.1" shininess="0.5" rgba="0.498 0.498 0.498 1"/>
+    <material name="robot_sage" specular="0.1" shininess="0.5" rgba="0.521 0.525 0.502 1"/>
+    <material name="robot_silver" specular="0.1" shininess="0.5" rgba="0.583 0.583 0.583 1"/>
+    <material name="robot_red" specular="0.1" shininess="0.5" rgba="0.811 0.165 0.165 1"/>
+    <material name="robot_white" specular="0.1" shininess="0.5" rgba="0.980 0.980 0.980 1"/>
+    <material name="gripper_black" rgba="0.05 0.05 0.05 1" specular="0.3" shininess="0.1"/>
+    <material name="gripper_base_white" rgba="0.99 0.99 0.99 1" specular="0.8" shininess="0.3"/>
+
+    <!-- Visual meshes (obj2mjcf decomposed, multi-color per link) -->
+    <!-- base_link: 2 sub-meshes (0,1 removed: <4 vertices) -->
+    <mesh name="base_link_2" file="piper_textured_meshes/base_link_2.obj"/>
+    <mesh name="base_link_3" file="piper_textured_meshes/base_link_3.obj"/>
+    <!-- link1: 1 sub-mesh (1,2 removed: <4 vertices) -->
+    <mesh name="link1_rot_0" file="piper_textured_meshes/link1_rot_0.obj"/>
+    <!-- link2: 32 sub-meshes -->
+    <mesh name="link2_rot_0" file="piper_textured_meshes/link2_rot_0.obj"/>
+    <mesh name="link2_rot_1" file="piper_textured_meshes/link2_rot_1.obj"/>
+    <mesh name="link2_rot_2" file="piper_textured_meshes/link2_rot_2.obj"/>
+    <mesh name="link2_rot_3" file="piper_textured_meshes/link2_rot_3.obj"/>
+    <mesh name="link2_rot_4" file="piper_textured_meshes/link2_rot_4.obj"/>
+    <mesh name="link2_rot_5" file="piper_textured_meshes/link2_rot_5.obj"/>
+    <mesh name="link2_rot_6" file="piper_textured_meshes/link2_rot_6.obj"/>
+    <mesh name="link2_rot_7" file="piper_textured_meshes/link2_rot_7.obj"/>
+    <mesh name="link2_rot_8" file="piper_textured_meshes/link2_rot_8.obj"/>
+    <mesh name="link2_rot_9" file="piper_textured_meshes/link2_rot_9.obj"/>
+    <mesh name="link2_rot_10" file="piper_textured_meshes/link2_rot_10.obj"/>
+    <mesh name="link2_rot_11" file="piper_textured_meshes/link2_rot_11.obj"/>
+    <mesh name="link2_rot_12" file="piper_textured_meshes/link2_rot_12.obj"/>
+    <mesh name="link2_rot_13" file="piper_textured_meshes/link2_rot_13.obj"/>
+    <mesh name="link2_rot_14" file="piper_textured_meshes/link2_rot_14.obj"/>
+    <mesh name="link2_rot_15" file="piper_textured_meshes/link2_rot_15.obj"/>
+    <mesh name="link2_rot_16" file="piper_textured_meshes/link2_rot_16.obj"/>
+    <mesh name="link2_rot_17" file="piper_textured_meshes/link2_rot_17.obj"/>
+    <mesh name="link2_rot_18" file="piper_textured_meshes/link2_rot_18.obj"/>
+    <mesh name="link2_rot_19" file="piper_textured_meshes/link2_rot_19.obj"/>
+    <mesh name="link2_rot_20" file="piper_textured_meshes/link2_rot_20.obj"/>
+    <mesh name="link2_rot_21" file="piper_textured_meshes/link2_rot_21.obj"/>
+    <mesh name="link2_rot_22" file="piper_textured_meshes/link2_rot_22.obj"/>
+    <mesh name="link2_rot_23" file="piper_textured_meshes/link2_rot_23.obj"/>
+    <mesh name="link2_rot_24" file="piper_textured_meshes/link2_rot_24.obj"/>
+    <mesh name="link2_rot_25" file="piper_textured_meshes/link2_rot_25.obj"/>
+    <mesh name="link2_rot_26" file="piper_textured_meshes/link2_rot_26.obj"/>
+    <mesh name="link2_rot_27" file="piper_textured_meshes/link2_rot_27.obj"/>
+    <mesh name="link2_rot_28" file="piper_textured_meshes/link2_rot_28.obj"/>
+    <mesh name="link2_rot_29" file="piper_textured_meshes/link2_rot_29.obj"/>
+    <mesh name="link2_rot_30" file="piper_textured_meshes/link2_rot_30.obj"/>
+    <mesh name="link2_rot_31" file="piper_textured_meshes/link2_rot_31.obj"/>
+    <!-- link3: 29 sub-meshes -->
+    <mesh name="link3_rot_0" file="piper_textured_meshes/link3_rot_0.obj"/>
+    <mesh name="link3_rot_1" file="piper_textured_meshes/link3_rot_1.obj"/>
+    <mesh name="link3_rot_2" file="piper_textured_meshes/link3_rot_2.obj"/>
+    <mesh name="link3_rot_3" file="piper_textured_meshes/link3_rot_3.obj"/>
+    <mesh name="link3_rot_4" file="piper_textured_meshes/link3_rot_4.obj"/>
+    <mesh name="link3_rot_5" file="piper_textured_meshes/link3_rot_5.obj"/>
+    <mesh name="link3_rot_6" file="piper_textured_meshes/link3_rot_6.obj"/>
+    <mesh name="link3_rot_7" file="piper_textured_meshes/link3_rot_7.obj"/>
+    <mesh name="link3_rot_8" file="piper_textured_meshes/link3_rot_8.obj"/>
+    <mesh name="link3_rot_9" file="piper_textured_meshes/link3_rot_9.obj"/>
+    <mesh name="link3_rot_10" file="piper_textured_meshes/link3_rot_10.obj"/>
+    <mesh name="link3_rot_11" file="piper_textured_meshes/link3_rot_11.obj"/>
+    <mesh name="link3_rot_12" file="piper_textured_meshes/link3_rot_12.obj"/>
+    <mesh name="link3_rot_13" file="piper_textured_meshes/link3_rot_13.obj"/>
+    <mesh name="link3_rot_14" file="piper_textured_meshes/link3_rot_14.obj"/>
+    <mesh name="link3_rot_15" file="piper_textured_meshes/link3_rot_15.obj"/>
+    <mesh name="link3_rot_16" file="piper_textured_meshes/link3_rot_16.obj"/>
+    <mesh name="link3_rot_17" file="piper_textured_meshes/link3_rot_17.obj"/>
+    <mesh name="link3_rot_18" file="piper_textured_meshes/link3_rot_18.obj"/>
+    <mesh name="link3_rot_19" file="piper_textured_meshes/link3_rot_19.obj"/>
+    <mesh name="link3_rot_20" file="piper_textured_meshes/link3_rot_20.obj"/>
+    <mesh name="link3_rot_21" file="piper_textured_meshes/link3_rot_21.obj"/>
+    <mesh name="link3_rot_22" file="piper_textured_meshes/link3_rot_22.obj"/>
+    <mesh name="link3_rot_23" file="piper_textured_meshes/link3_rot_23.obj"/>
+    <mesh name="link3_rot_24" file="piper_textured_meshes/link3_rot_24.obj"/>
+    <mesh name="link3_rot_25" file="piper_textured_meshes/link3_rot_25.obj"/>
+    <mesh name="link3_rot_26" file="piper_textured_meshes/link3_rot_26.obj"/>
+    <mesh name="link3_rot_27" file="piper_textured_meshes/link3_rot_27.obj"/>
+    <mesh name="link3_rot_28" file="piper_textured_meshes/link3_rot_28.obj"/>
+    <!-- link4: 7 sub-meshes -->
+    <mesh name="link4_rot_0" file="piper_textured_meshes/link4_rot_0.obj"/>
+    <mesh name="link4_rot_1" file="piper_textured_meshes/link4_rot_1.obj"/>
+    <mesh name="link4_rot_2" file="piper_textured_meshes/link4_rot_2.obj"/>
+    <mesh name="link4_rot_3" file="piper_textured_meshes/link4_rot_3.obj"/>
+    <mesh name="link4_rot_4" file="piper_textured_meshes/link4_rot_4.obj"/>
+    <!-- link4_rot_5, link4_rot_6 removed: <4 vertices -->
+    <!-- link5: 9 sub-meshes -->
+    <mesh name="link5_rot_0" file="piper_textured_meshes/link5_rot_0.obj"/>
+    <mesh name="link5_rot_1" file="piper_textured_meshes/link5_rot_1.obj"/>
+    <mesh name="link5_rot_2" file="piper_textured_meshes/link5_rot_2.obj"/>
+    <mesh name="link5_rot_3" file="piper_textured_meshes/link5_rot_3.obj"/>
+    <mesh name="link5_rot_4" file="piper_textured_meshes/link5_rot_4.obj"/>
+    <mesh name="link5_rot_5" file="piper_textured_meshes/link5_rot_5.obj"/>
+    <mesh name="link5_rot_6" file="piper_textured_meshes/link5_rot_6.obj"/>
+    <!-- link5_rot_7, link5_rot_8 removed: <4 vertices -->
+    <!-- link6: 11 sub-meshes -->
+    <mesh name="link6_rot_0" file="piper_textured_meshes/link6_rot_0.obj"/>
+    <mesh name="link6_rot_1" file="piper_textured_meshes/link6_rot_1.obj"/>
+    <mesh name="link6_rot_2" file="piper_textured_meshes/link6_rot_2.obj"/>
+    <mesh name="link6_rot_3" file="piper_textured_meshes/link6_rot_3.obj"/>
+    <mesh name="link6_rot_4" file="piper_textured_meshes/link6_rot_4.obj"/>
+    <mesh name="link6_rot_5" file="piper_textured_meshes/link6_rot_5.obj"/>
+    <mesh name="link6_rot_6" file="piper_textured_meshes/link6_rot_6.obj"/>
+    <mesh name="link6_rot_7" file="piper_textured_meshes/link6_rot_7.obj"/>
+    <mesh name="link6_rot_8" file="piper_textured_meshes/link6_rot_8.obj"/>
+    <!-- link6_rot_9, link6_rot_10 removed: <4 vertices -->
+    <!-- Gripper visual meshes (STL, correct geometry) -->
+    <mesh name="gripper_base" file="piper_meshes/gripper_base.STL"/>
+    <mesh name="link7" file="piper_meshes/link7.STL"/>
+    <mesh name="link8" file="piper_meshes/link8.STL"/>
+
+    <!-- Collision meshes (convex STL) -->
+    <mesh name="base_link_collision" file="piper_meshes/base_link_convex.STL" />
+    <mesh name="link1_collision" file="piper_meshes/link1_convex.STL" />
+    <mesh name="link2_collision" file="piper_meshes/link2_convex.STL" />
+    <mesh name="link3_collision" file="piper_meshes/link3_convex.STL" />
+    <mesh name="link4_collision" file="piper_meshes/link4_convex.STL" />
+    <mesh name="link5_collision" file="piper_meshes/link5_convex.STL" />
+    <mesh name="link6_collision" file="piper_meshes/link6_convex.STL" />
+    <mesh name="gripper_base_collision" file="piper_meshes/gripper_base_convex_remesh.stl" />
+    <mesh name="link7_collision" file="piper_meshes/link7_remesh_2_convex.stl" />
+    <mesh name="link8_collision" file="piper_meshes/link7_remesh_2_convex.stl" />
+
+  </asset>
+
+
+  <worldbody>
+    <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
+      <camera name="video_third_view" pos="1.857 0.103 1.583" xyaxes="-0.011 1.000 0.000 -0.635 -0.007 0.772"/>
+      <camera name="video_grasp_start_view" pos="-0.265 -0.012 0.485" xyaxes="-0.009 -1.000 -0.000 0.716 -0.006 0.698"/>
+    <camera name="realsense_cam"  fovy="57" pos="1.219394 -0.031956 0.691527"
+        xyaxes="0.100144 0.994289 0.036892 -0.660708 0.038731 0.749644"/>
+    <camera name="photoneo_cam"
+        pos="0.534513 0.004859 1.056115"
+        xyaxes="0.009474 0.999684 -0.023273 -0.979427 0.013969 0.201312"
+        fovy="39.4"/>
+    <camera name="zed_cam" fovy="70"
+        pos="0.403849 0.123144 0.660863"
+        xyaxes="-0.004116 0.998484 -0.054895 -0.999744 -0.002888 0.022433"/>
+    <camera name="static_camera" pos="-0.0301 0.0 0.7733" quat="0.6830 0.1830 -0.1830 -0.6830" fovy="43.23"/>
+    <camera name="top_down_cam" pos="0.5 0 1.5" quat="1.0000 0.0000 0.0000 0.0000" fovy="45"/>
+
+<!--piper-->
+    <body name="base_link" childclass="piper" gravcomp="1">
+          <inertial pos="-0.00473641 0.0000257 0.04145152" mass="1.02"
+              fullinertia="0.00267433 0.00282612 0.00089624 -0.00000073 -0.00017389 0.0000004"/>
+          <geom mesh="base_link_2" material="robot_white" class="visual"/>
+          <geom mesh="base_link_3" material="robot_black" class="visual"/>
+          <geom mesh="base_link_collision" class="collision" />
+        <body name="link1" pos="0 0 0.123">
+            <inertial pos="0.000121505 0.000104632 -0.00438597" mass="0.71"
+                fullinertia="0.00048916 0.00040472 0.00043982 -0.00000036 -0.00000224 -0.00000242"/>
+            <joint name="joint1" pos="0 0 0" axis="0 0 1" range="-2.618 2.168" actuatorfrcrange="-100 100"/>
+            <geom mesh="link1_rot_0" material="robot_black" class="visual"/>
+            <geom mesh="link1_collision" class="collision"/>
+          <body name="link2" quat="0.0480084 -0.0480134 -0.705476 -0.705474">
+              <inertial pos="0.198666 -0.0109269 0.00142122" mass="1.17"
+                  fullinertia="0.00116918 0.06785384 0.06774489 -0.00180037 0.00025146 -0.00000455"/>
+              <joint name="joint2" pos="0 0 0" axis="0 0 1" range="0 3.14" actuatorfrcrange="-100 100"/>
+              <geom mesh="link2_rot_0" material="robot_black" class="visual"/>
+              <geom mesh="link2_rot_1" material="robot_red" class="visual"/>
+              <geom mesh="link2_rot_2" material="robot_black" class="visual"/>
+              <geom mesh="link2_rot_3" material="robot_black" class="visual"/>
+              <geom mesh="link2_rot_4" material="robot_red" class="visual"/>
+              <geom mesh="link2_rot_5" material="robot_black" class="visual"/>
+              <geom mesh="link2_rot_6" material="robot_gray" class="visual"/>
+              <geom mesh="link2_rot_7" material="robot_red" class="visual"/>
+              <geom mesh="link2_rot_8" material="robot_red" class="visual"/>
+              <geom mesh="link2_rot_9" material="robot_gray" class="visual"/>
+              <geom mesh="link2_rot_10" material="robot_red" class="visual"/>
+              <geom mesh="link2_rot_11" material="robot_red" class="visual"/>
+              <geom mesh="link2_rot_12" material="robot_red" class="visual"/>
+              <geom mesh="link2_rot_13" material="robot_red" class="visual"/>
+              <geom mesh="link2_rot_14" material="robot_red" class="visual"/>
+              <geom mesh="link2_rot_15" material="robot_red" class="visual"/>
+              <geom mesh="link2_rot_16" material="robot_red" class="visual"/>
+              <geom mesh="link2_rot_17" material="robot_red" class="visual"/>
+              <geom mesh="link2_rot_18" material="robot_red" class="visual"/>
+              <geom mesh="link2_rot_19" material="robot_red" class="visual"/>
+              <geom mesh="link2_rot_20" material="robot_red" class="visual"/>
+              <geom mesh="link2_rot_21" material="robot_red" class="visual"/>
+              <geom mesh="link2_rot_22" material="robot_red" class="visual"/>
+              <geom mesh="link2_rot_23" material="robot_red" class="visual"/>
+              <geom mesh="link2_rot_24" material="robot_red" class="visual"/>
+              <geom mesh="link2_rot_25" material="robot_red" class="visual"/>
+              <geom mesh="link2_rot_26" material="robot_white" class="visual"/>
+              <geom mesh="link2_rot_27" material="robot_charcoal" class="visual"/>
+              <geom mesh="link2_rot_28" material="robot_charcoal" class="visual"/>
+              <geom mesh="link2_rot_29" material="robot_charcoal" class="visual"/>
+              <geom mesh="link2_rot_30" material="robot_charcoal" class="visual"/>
+              <geom mesh="link2_rot_31" material="robot_olive" class="visual"/>
+              <geom mesh="link2_collision" class="collision" />
+            <body name="link3" pos="0.28503 0 0" quat="0.623996 0 0 -0.781427">
+                <inertial pos="-0.0202738 -0.133915 -0.000458683" mass="0.5"
+                    fullinertia="0.01361711 0.00045024 0.01380322 0.00165794 -0.00000048 -0.00000045"/>
+                <joint name="joint3" pos="0 0 0" axis="0 0 1" range="-2.967 0" actuatorfrcrange="-100 100"/>
+                <geom mesh="link3_rot_0" material="robot_black" class="visual"/>
+                <geom mesh="link3_rot_1" material="robot_black" class="visual"/>
+                <geom mesh="link3_rot_2" material="robot_black" class="visual"/>
+                <geom mesh="link3_rot_3" material="robot_black" class="visual"/>
+                <geom mesh="link3_rot_4" material="robot_black" class="visual"/>
+                <geom mesh="link3_rot_5" material="robot_black" class="visual"/>
+                <geom mesh="link3_rot_6" material="robot_black" class="visual"/>
+                <geom mesh="link3_rot_7" material="robot_black" class="visual"/>
+                <geom mesh="link3_rot_8" material="robot_black" class="visual"/>
+                <geom mesh="link3_rot_9" material="robot_black" class="visual"/>
+                <geom mesh="link3_rot_10" material="robot_black" class="visual"/>
+                <geom mesh="link3_rot_11" material="robot_black" class="visual"/>
+                <geom mesh="link3_rot_12" material="robot_silver" class="visual"/>
+                <geom mesh="link3_rot_13" material="robot_black" class="visual"/>
+                <geom mesh="link3_rot_14" material="robot_olive" class="visual"/>
+                <geom mesh="link3_rot_15" material="robot_silver" class="visual"/>
+                <geom mesh="link3_rot_16" material="robot_silver" class="visual"/>
+                <geom mesh="link3_rot_17" material="robot_silver" class="visual"/>
+                <geom mesh="link3_rot_18" material="robot_silver" class="visual"/>
+                <geom mesh="link3_rot_19" material="robot_red" class="visual"/>
+                <geom mesh="link3_rot_20" material="robot_silver" class="visual"/>
+                <geom mesh="link3_rot_21" material="robot_charcoal" class="visual"/>
+                <geom mesh="link3_rot_22" material="robot_silver" class="visual"/>
+                <geom mesh="link3_rot_23" material="robot_silver" class="visual"/>
+                <geom mesh="link3_rot_24" material="robot_silver" class="visual"/>
+                <geom mesh="link3_rot_25" material="robot_silver" class="visual"/>
+                <geom mesh="link3_rot_26" material="robot_silver" class="visual"/>
+                <geom mesh="link3_rot_27" material="robot_red" class="visual"/>
+                <geom mesh="link3_rot_28" material="robot_charcoal" class="visual"/>
+                <geom mesh="link3_collision" class="collision"/>
+              <body name="link4" pos="-0.021984 -0.25075 0" quat="0.707105 0.707108 0 0">
+                  <inertial pos="-9.66636e-05 0.000876064 -0.00496881" mass="0.38"
+                      fullinertia="0.00018501 0.00018965 0.00015484 0.00000054 0.00000120 -0.00000841"/>
+                  <joint name="joint4" pos="0 0 0" axis="0 0 1" range="-1.745 1.745" actuatorfrcrange="-100 100"/>
+                  <geom mesh="link4_rot_0" material="robot_black" class="visual"/>
+                  <geom mesh="link4_rot_1" material="robot_black" class="visual"/>
+                  <geom mesh="link4_rot_2" material="robot_black" class="visual"/>
+                  <geom mesh="link4_rot_3" material="robot_black" class="visual"/>
+                  <geom mesh="link4_rot_4" material="robot_black" class="visual"/>
+                  <geom mesh="link4_collision" class="collision"/>
+                <body name="link5" quat="0.707105 -0.707108 0 0">
+                    <inertial pos="-4.10554e-05 -0.0566487 -0.00372058" mass="0.383"
+                        fullinertia="0.00166169 0.00018510 0.00164321 0.00000006 -0.00000007 0.00001026"/>
+                    <joint name="joint5" pos="0 0 0" axis="0 0 1" range="-1.22 1.22" actuatorfrcrange="-100 100"/>
+                    <geom mesh="link5_rot_0" material="robot_black" class="visual"/>
+                    <geom mesh="link5_rot_1" material="robot_black" class="visual"/>
+                    <geom mesh="link5_rot_2" material="robot_white" class="visual"/>
+                    <geom mesh="link5_rot_3" material="robot_black" class="visual"/>
+                    <geom mesh="link5_rot_4" material="robot_black" class="visual"/>
+                    <geom mesh="link5_rot_5" material="robot_black" class="visual"/>
+                    <geom mesh="link5_rot_6" material="robot_black" class="visual"/>
+                    <geom mesh="link5_collision" class="collision"/>
+                  <body name="link6" pos="8.8259e-05 -0.091 0" quat="0.707105 0.707108 0 0">
+                      <inertial pos="-8.82591e-05 9.05984e-06 -0.002" mass="0.0069909"
+                          fullinertia="5.73016e-07 5.73016e-07 1.06739e-06 0 0 0"/>
+                      <joint name="joint6" pos="0 0 0" axis="0 0 1" range="-2.0944 2.0944" actuatorfrcrange="-100 100"/>
+                      <site name="wrist_flange_left" pos="0 0 0" size="0.005" type="sphere" rgba="0 1 0 0.5" group="5"/>
+                      <geom mesh="link6_rot_0" material="robot_black" class="visual"/>
+                      <geom mesh="link6_rot_1" material="robot_black" class="visual"/>
+                      <geom mesh="link6_rot_2" material="robot_black" class="visual"/>
+                      <geom mesh="link6_rot_3" material="robot_black" class="visual"/>
+                      <geom mesh="link6_rot_4" material="robot_black" class="visual"/>
+                      <geom mesh="link6_rot_5" material="robot_sage" class="visual"/>
+                      <geom mesh="link6_rot_6" material="robot_dark_olive" class="visual"/>
+                      <geom mesh="link6_rot_7" material="robot_dark_olive" class="visual"/>
+                      <geom mesh="link6_rot_8" material="robot_white" class="visual"/>
+                      <geom mesh="link6_collision" class="collision"/>
+                      <!-- Left wrist camera (D435i, from calibration) -->
+                      <camera name="left_hand_cam"
+                              pos="-0.0735 0.0078 0.0384"
+                              quat="0.1228 0.6964 -0.6964 -0.1228"
+                              fovy="43.23"/>
+                      <!-- gripper_base: separate body, welded to link6 (no joint = fixed) -->
+                      <body name="gripper_base_left" pos="0 0 0">
+                          <inertial pos="-0.000183807 0.0000805033 0.0321437" mass="0.45"
+                              fullinertia="0.00092934 0.00071447 0.00039442 0.00000034 -0.00000738 0.00000005"/>
+                          <geom mesh="gripper_base" material="gripper_base_white" class="visual"/>
+                          <geom mesh="gripper_base_collision" class="collision"/>
+                          <site name="gripper_tip_left" pos="0 0 0.1358" size="0.005" group="5"/>
+                        <body name="link7" pos="0 0 0.1358" quat="0.707105 0.707108 0 0">
+                            <inertial pos="0.000651232 -0.049193 0.00972259" mass="0.025"
+                                fullinertia="0.00007371 0.00000781 0.0000747 -0.00000113 0.00000021 -0.00001372"/>
+                            <joint name="joint7" pos="0 0 0" axis="0 0 1" type="slide" limited="true" range="0 0.035" damping="100"/>
+                            <geom mesh="link7" material="gripper_black" class="visual"/>
+                            <geom mesh="link7_collision" class="collision"/>
+                        </body>
+                        <body name="link8" pos="0 0 0.1358" quat="-2.59734e-06 -2.59735e-06 -0.707108 -0.707105">
+                            <inertial pos="0.000651232 -0.049193 0.00972259" mass="0.025"
+                                fullinertia="0.00007371 0.00000781 0.0000747 -0.00000113 0.00000021 -0.00001372"/>
+                            <joint name="joint8" pos="0 0 0" axis="0 0 -1" type="slide" limited="true" range="-0.035 0" damping="100"/>
+                            <geom mesh="link8" material="gripper_black" class="visual"/>
+                            <geom mesh="link8_collision" class="collision"/>
+                        </body>
+                      </body>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+      </body>
+
+  </worldbody>
+
+  <contact>
+    <exclude body1="base_link" body2="link1"/>
+  </contact>
+
+  <!-- <actuator>
+    <position name="joint1" joint="joint1" class="piper" kp="80" kv="5"/>
+    <position name="joint2" joint="joint2" class="piper" kp="80" kv="5"/>
+    <position name="joint3" joint="joint3" class="piper" kp="80" kv="5"/>
+    <position name="joint4" joint="joint4" class="piper" kp="40" kv="5"/>
+    <position name="joint5" joint="joint5" class="piper" kp="10" kv="1.5"/>
+    <position name="joint6" joint="joint6" class="piper" kp="10" kv="1.5"/>
+    <position name="joint7" joint="joint7" class="finger" kp="400" kv="5" user="1" forcelimited="false" forcerange="-100 100"/>
+    <position name="joint8" joint="joint8" class="finger" kp="400" kv="5" user="1" forcelimited="false" forcerange="-100 100"/>
+
+  </actuator> -->
+
+</mujoco>
