@@ -20,7 +20,6 @@ import warp as wp
 import newton
 import newton.ik as ik
 
-
 PoseWxyz = np.ndarray
 
 
@@ -494,6 +493,8 @@ class GamepadTeleopController:
         self.speed_index = int(np.clip(speed_index, 0, len(self.speed_factors) - 1))
         self.axis_map = {"lx": 0, "ly": 1, "rx": 3, "ry": 4, "lt": 2, "rt": 5}
         self.btn_map = {"a": 0, "b": 1, "x": 2, "y": 3, "lb": 4, "rb": 5, "back": 6, "start": 7, "home": 8}
+        self.use_sdl_axis_mapping = axis_map is None
+        self.use_sdl_button_mapping = button_map is None
         if axis_map:
             self.axis_map.update({str(name): int(index) for name, index in axis_map.items()})
         if button_map:
@@ -503,9 +504,12 @@ class GamepadTeleopController:
         self.axis_count = 0
         self.button_count = 0
         self.hat_count = 0
+        self.controller = None
+        self.input_armed = False
+        self._waiting_for_neutral_reported = False
 
         try:
-            import pygame
+            import pygame  # noqa: PLC0415
         except ImportError:  # pragma: no cover
             pygame = None
         self.pygame = pygame
@@ -524,10 +528,20 @@ class GamepadTeleopController:
             self.axis_count = int(self.joystick.get_numaxes())
             self.button_count = int(self.joystick.get_numbuttons())
             self.hat_count = int(self.joystick.get_numhats())
+            if self.use_sdl_axis_mapping or self.use_sdl_button_mapping:
+                try:
+                    from pygame._sdl2 import controller as sdl2_controller  # noqa: PLC0415
+
+                    sdl2_controller.init()
+                    if sdl2_controller.is_controller(joystick_index):
+                        self.controller = sdl2_controller.Controller(joystick_index)
+                except Exception as exc:
+                    print(f"[NewtonTeleop] SDL controller mapping unavailable: {exc}", flush=True)
             print(
                 "[NewtonTeleop] "
                 f"Joystick: {self.joystick.get_name()} "
-                f"(axes={self.axis_count}, buttons={self.button_count}, hats={self.hat_count})",
+                f"(axes={self.axis_count}, buttons={self.button_count}, hats={self.hat_count}, "
+                f"mapping={'SDL' if self.controller is not None else 'raw'})",
                 flush=True,
             )
         else:
@@ -544,12 +558,35 @@ class GamepadTeleopController:
         return self.states[self.active_arm]
 
     def close(self) -> None:
+        if self.controller is not None:
+            self.controller.quit()
+            self.controller = None
         if self.pygame is not None:
             self.pygame.quit()
 
     def _get_axis(self, name: str) -> float:
         if self.joystick is None:
             return 0.0
+        if self.controller is not None and self.use_sdl_axis_mapping:
+            controller_axis = {
+                "lx": self.pygame.CONTROLLER_AXIS_LEFTX,
+                "ly": self.pygame.CONTROLLER_AXIS_LEFTY,
+                "rx": self.pygame.CONTROLLER_AXIS_RIGHTX,
+                "ry": self.pygame.CONTROLLER_AXIS_RIGHTY,
+                "lt": self.pygame.CONTROLLER_AXIS_TRIGGERLEFT,
+                "rt": self.pygame.CONTROLLER_AXIS_TRIGGERRIGHT,
+            }.get(name)
+            if controller_axis is None:
+                return 0.0
+            try:
+                raw_value = float(self.controller.get_axis(controller_axis))
+            except Exception:
+                return 0.0
+            if name in ("lt", "rt"):
+                value = float(np.clip(raw_value / 32767.0, 0.0, 1.0))
+            else:
+                value = float(np.clip(raw_value / 32767.0, -1.0, 1.0))
+            return 0.0 if abs(value) < self.deadzone else value
         axis = self.axis_map.get(name)
         if axis is None or axis < 0 or axis >= self.axis_count:
             return 0.0
@@ -564,12 +601,58 @@ class GamepadTeleopController:
         return value
 
     def _get_hat(self) -> tuple[int, int]:
-        if self.joystick is None or self.hat_count == 0:
+        if self.joystick is None:
+            return (0, 0)
+        if self.controller is not None and self.use_sdl_button_mapping:
+            try:
+                x = int(self.controller.get_button(self.pygame.CONTROLLER_BUTTON_DPAD_RIGHT)) - int(
+                    self.controller.get_button(self.pygame.CONTROLLER_BUTTON_DPAD_LEFT)
+                )
+                y = int(self.controller.get_button(self.pygame.CONTROLLER_BUTTON_DPAD_UP)) - int(
+                    self.controller.get_button(self.pygame.CONTROLLER_BUTTON_DPAD_DOWN)
+                )
+                return (x, y)
+            except Exception:
+                return (0, 0)
+        if self.hat_count == 0:
             return (0, 0)
         try:
             return self.joystick.get_hat(0)
         except Exception:
             return (0, 0)
+
+    def _get_button(self, name: str) -> bool:
+        if self.joystick is None:
+            return False
+        if self.controller is not None and self.use_sdl_button_mapping:
+            controller_button = {
+                "a": self.pygame.CONTROLLER_BUTTON_A,
+                "b": self.pygame.CONTROLLER_BUTTON_B,
+                "x": self.pygame.CONTROLLER_BUTTON_X,
+                "y": self.pygame.CONTROLLER_BUTTON_Y,
+                "lb": self.pygame.CONTROLLER_BUTTON_LEFTSHOULDER,
+                "rb": self.pygame.CONTROLLER_BUTTON_RIGHTSHOULDER,
+                "back": self.pygame.CONTROLLER_BUTTON_BACK,
+                "start": self.pygame.CONTROLLER_BUTTON_START,
+                "home": self.pygame.CONTROLLER_BUTTON_GUIDE,
+            }.get(name)
+            if controller_button is None:
+                return False
+            try:
+                return bool(self.controller.get_button(controller_button))
+            except Exception:
+                return False
+        index = self.btn_map.get(name)
+        if index is None or index < 0 or index >= self.button_count:
+            return False
+        try:
+            return bool(self.joystick.get_button(index))
+        except Exception:
+            return False
+
+    def _input_is_neutral(self) -> bool:
+        axes_neutral = all(self._get_axis(name) == 0.0 for name in ("lx", "ly", "rx", "ry", "lt", "rt"))
+        return axes_neutral and self._get_hat() == (0, 0)
 
     def update(self) -> np.ndarray:
         """Poll the gamepad and return the current full joint_q target."""
@@ -582,18 +665,25 @@ class GamepadTeleopController:
 
         events = {}
         for name, button in self.buttons.items():
-            index = self.btn_map.get(name)
-            if index is None or index < 0 or index >= self.button_count:
-                current = False
-            else:
-                try:
-                    current = bool(self.joystick.get_button(index))
-                except Exception:
-                    current = False
+            current = self._get_button(name)
             if button.update(current):
                 events[name] = True
         self.last_button_events = events
+
+        if not self.input_armed:
+            if not self._input_is_neutral():
+                if not self._waiting_for_neutral_reported:
+                    print("[NewtonTeleop] Waiting for sticks, triggers, and d-pad to return to neutral.", flush=True)
+                    self._waiting_for_neutral_reported = True
+                return self.full_q_target
+            self.input_armed = True
+            self._waiting_for_neutral_reported = False
+            print("[NewtonTeleop] Input armed", flush=True)
+
         self._handle_buttons(events)
+        if not self.input_armed:
+            self._write_current_state_to_full_q()
+            return self.full_q_target
 
         speed = self.speed_factors[self.speed_index]
         if self.control_mode == "joint":
@@ -622,6 +712,7 @@ class GamepadTeleopController:
             for state in self.states.values():
                 state.joint_q = state.home_q.copy()
                 state.gripper_opening = state.home_gripper_opening
+            self.input_armed = False
             print("[NewtonTeleop] Home", flush=True)
 
     def _update_joint_mode(self, speed: float) -> None:

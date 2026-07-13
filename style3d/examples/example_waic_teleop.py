@@ -122,7 +122,7 @@ class Example:
         from pxr import Usd
 
         # Bag
-        garment_name = "bag"
+        garment_name = "Style3D_Bag5"
         usd_stage = Usd.Stage.Open(str(ASSET_ROOT / (garment_name + ".usd")))
         usd_prim_garment = usd_stage.GetPrimAtPath(str("/Root/" + garment_name + "/Root_Garment"))
         garment_mesh, garment_mesh_uv_indices = newton.usd.get_mesh(
