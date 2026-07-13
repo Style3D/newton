@@ -100,7 +100,7 @@ class Example:
         from pxr import Usd
 
         # Bag
-        garment_name = "Style3D_Bag5"
+        garment_name = "bag"
         usd_stage = Usd.Stage.Open(str(ASSET_ROOT / (garment_name + ".usd")))
         usd_prim_garment = usd_stage.GetPrimAtPath(str("/Root/" + garment_name + "/Root_Garment"))
         garment_mesh, garment_mesh_uv_indices = newton.usd.get_mesh(
@@ -310,7 +310,6 @@ class Example:
         world_attrib.enable_gpu = True
         world_attrib.ground_height = 0.555
         world_attrib.iterations = 50
-        world_attrib.nonlinear_iterations = 1
         world_attrib.enable_rigid_self_collision = False
 
         if self.model.up_axis == newton.Axis.Z:

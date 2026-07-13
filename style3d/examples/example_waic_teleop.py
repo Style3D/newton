@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-import sys
+"""Teleoperate the PiPER arm in the WAIC Style3D Pro scene."""
+
 from pathlib import Path
-sys.path.append("D:/Desktop/synreal-sim/build_vs/lib/RelWithDebInfo")
 
 import numpy as np
 import synreal_sim as sim
@@ -15,6 +15,12 @@ import newton.ik as ik
 import newton.usd
 from newton import Mesh
 from newton.solvers import style3d
+from style3d.examples.teleop import (
+    GamepadTeleopController,
+    KeyboardTeleopController,
+    NewtonIKArm,
+    piper_single_arm_spec,
+)
 
 
 def sim_log_callback(file_name: str, func_name: str, line: int, level: sim.LogLevel, message: str):
@@ -103,16 +109,20 @@ class Example:
         self.viewer = viewer
         self.viewer._paused = True
         self._last_paused = self.viewer._paused
+        self.teleop = None
+        self.teleop_arm = None
+        self.teleop_full_q = None
+        self.teleop_target_q = None
 
         builder = newton.ModelBuilder(up_axis=newton.Axis.Y)
-        newton.solvers.SolverStyle3D.register_custom_attributes(builder) 
+        newton.solvers.SolverStyle3D.register_custom_attributes(builder)
 
         ASSET_ROOT = Path(__file__).resolve().parent / "assets"
 
         from pxr import Usd
 
         # Bag
-        garment_name = "Style3D_Bag5"
+        garment_name = "bag"
         usd_stage = Usd.Stage.Open(str(ASSET_ROOT / (garment_name + ".usd")))
         usd_prim_garment = usd_stage.GetPrimAtPath(str("/Root/" + garment_name + "/Root_Garment"))
         garment_mesh, garment_mesh_uv_indices = newton.usd.get_mesh(
@@ -155,7 +165,6 @@ class Example:
             mesh=Mesh(tennis_mesh.vertices, tennis_mesh.indices),
         )
 
-
         # Desk
         desk_name = "desk"
         usd_stage = Usd.Stage.Open(str(ASSET_ROOT / (desk_name + ".usd")))
@@ -170,7 +179,6 @@ class Example:
             ),
             mesh=Mesh(desk_mesh.vertices, desk_mesh.indices),
         )
-
 
         # Rack
         rack_name = "rack"
@@ -319,7 +327,9 @@ class Example:
             for i, label in enumerate(self.piper_model.joint_label)
             if label.endswith(PIPER_FINGER_JOINT_SUFFIXES)
         )
-        self.piper_arm_q_count = min(self.piper_finger_q_indices) if self.piper_finger_q_indices else self.piper_joint_q_count
+        self.piper_arm_q_count = (
+            min(self.piper_finger_q_indices) if self.piper_finger_q_indices else self.piper_joint_q_count
+        )
         self.piper_tennis_joint = next(
             i for i, label in enumerate(self.piper_model.joint_label) if label == f"{tennis_name}_free_joint"
         )
@@ -371,6 +381,8 @@ class Example:
         self.piper_shape_body_vertices_np = {}
         self.gripper_opening = 0.07
         self.gripper_closed_opening = 0.05
+        if args.teleop_input != "auto":
+            self._setup_teleop(args)
         self.pick_start_time = 0.4
         self.approach_end_time = 1.4
         self.descend_end_time = 2.0
@@ -402,7 +414,6 @@ class Example:
         world_attrib.enable_gpu = True
         world_attrib.ground_height = 0.555
         world_attrib.iterations = 50
-        world_attrib.nonlinear_iterations = 1
         world_attrib.enable_rigid_self_collision = False
 
         if self.model.up_axis == newton.Axis.Z:
@@ -524,6 +535,54 @@ class Example:
 
         self.viewer.set_model(self.model)
         self.viewer.set_camera(wp.vec3(0.0, -1.7, 1.4), 0.0, -270.0)
+
+    def _setup_teleop(self, args):
+        self.teleop_full_q = self.ik_model.joint_q.numpy().astype(np.float64).copy()
+        ee_offset = tuple(float(self.piper_gripper_center_offset[i]) for i in range(3))
+        spec = piper_single_arm_spec(
+            name="piper",
+            ee_body_name="gripper_base_left",
+            ee_offset=ee_offset,
+            home_q=tuple(float(value) for value in self.teleop_full_q[: self.piper_arm_q_count]),
+            home_gripper_opening=0.5 * self.gripper_opening,
+            min_gripper_opening=0.5 * self.gripper_closed_opening,
+            max_gripper_opening=0.5 * self.gripper_opening,
+        )
+        self.teleop_arm = NewtonIKArm(
+            self.ik_model,
+            spec,
+            full_q_getter=lambda: self.teleop_full_q,
+            iterations=max(1, int(args.teleop_ik_iterations)),
+            include_rotation_objective=not bool(args.teleop_position_only),
+        )
+        if args.teleop_input == "gamepad":
+            self.teleop = GamepadTeleopController(
+                [self.teleop_arm],
+                base_full_q=self.teleop_full_q,
+                deadzone=float(args.teleop_deadzone),
+                step_joint=float(args.teleop_step_joint),
+                step_pos=float(args.teleop_step_pos),
+                step_rot_deg=float(args.teleop_step_rot_deg),
+                step_gripper=float(args.teleop_step_gripper),
+                joystick_index=max(0, int(args.teleop_joystick)),
+                print_help=not bool(args.quiet),
+            )
+        else:
+            self.teleop = KeyboardTeleopController(
+                [self.teleop_arm],
+                self.viewer,
+                base_full_q=self.teleop_full_q,
+                step_pos=float(args.teleop_step_pos),
+                step_rot_deg=float(args.teleop_step_rot_deg),
+                step_gripper=float(args.teleop_step_gripper),
+                print_help=not bool(args.quiet),
+            )
+        self.teleop_full_q = self.teleop.full_q_target.copy()
+        self.teleop_target_q = wp.array(
+            self.teleop_full_q.astype(np.float32),
+            dtype=wp.float32,
+            device=self.piper_model.device,
+        )
 
     def _hide_frontend_piper_collision_shapes(self):
         shape_flags = self.model.shape_flags.numpy()
@@ -801,25 +860,33 @@ class Example:
         self.current_tennis_center = self._tennis_center_from_body_xform(body_xform)
 
     def simulate_piper(self):
-        if self.sim_time <= self.grasp_end_time:
+        if self.teleop is None and self.sim_time <= self.grasp_end_time:
             self.tennis_pick_center = self.current_tennis_center.copy()
 
-        tool_pos, gripper = self._piper_plan(self.sim_time)
-        self.ik_pos_obj.set_target_position(0, wp.vec3(*map(float, tool_pos)))
-        self.ik_solver.step(self.ik_joint_q, self.ik_joint_q, iterations=self.ik_iters)
+        if self.teleop is None:
+            tool_pos, gripper = self._piper_plan(self.sim_time)
+            self.ik_pos_obj.set_target_position(0, wp.vec3(*map(float, tool_pos)))
+            self.ik_solver.step(self.ik_joint_q, self.ik_joint_q, iterations=self.ik_iters)
 
-        finger0_q = self.piper_finger_q_indices[0] if len(self.piper_finger_q_indices) > 0 else -1
-        finger1_q = self.piper_finger_q_indices[1] if len(self.piper_finger_q_indices) > 1 else -1
-        wp.copy(
-            self.piper_control.joint_target_q[: self.piper_arm_q_count],
-            self.ik_joint_q.flatten()[: self.piper_arm_q_count],
-        )
-        wp.launch(
-            _set_finger_opening,
-            dim=1,
-            inputs=[self.piper_control.joint_target_q, int(finger0_q), int(finger1_q), float(gripper)],
-            device=self.piper_model.device,
-        )
+            finger0_q = self.piper_finger_q_indices[0] if len(self.piper_finger_q_indices) > 0 else -1
+            finger1_q = self.piper_finger_q_indices[1] if len(self.piper_finger_q_indices) > 1 else -1
+            wp.copy(
+                self.piper_control.joint_target_q[: self.piper_arm_q_count],
+                self.ik_joint_q.flatten()[: self.piper_arm_q_count],
+            )
+            wp.launch(
+                _set_finger_opening,
+                dim=1,
+                inputs=[self.piper_control.joint_target_q, int(finger0_q), int(finger1_q), float(gripper)],
+                device=self.piper_model.device,
+            )
+        else:
+            self.teleop_full_q = self.teleop.update().astype(np.float64).copy()
+            self.teleop_target_q.assign(self.teleop_full_q.astype(np.float32))
+            wp.copy(
+                self.piper_control.joint_target_q[: self.piper_joint_q_count],
+                self.teleop_target_q[: self.piper_joint_q_count],
+            )
 
         piper_body_q_in = self.piper_state_0.body_q.numpy()
         self.piper_model.collide(self.piper_state_0, self.piper_contacts)
@@ -857,7 +924,7 @@ class Example:
         self.simulate_piper()
 
         self.world.step_sim()
-        #self.world.begin_sim_loop()
+        # self.world.begin_sim_loop()
         if self.world.fetch_sim(0):
             verts = self.cloth.get_positions()
             self.state_1.particle_q.assign(verts)
@@ -897,8 +964,32 @@ class Example:
         self.viewer.end_frame()
 
 
-if __name__ == "__main__":
+def create_parser():
     parser = newton.examples.create_parser()
+    parser.description = __doc__
+    parser.add_argument(
+        "--teleop-input",
+        choices=("gamepad", "keyboard", "auto"),
+        default="gamepad",
+        help="Control source; auto runs the original scripted pick-and-place motion",
+    )
+    parser.add_argument("--teleop-joystick", type=int, default=0, help="pygame joystick index")
+    parser.add_argument("--teleop-deadzone", type=float, default=0.1, help="Gamepad stick deadzone")
+    parser.add_argument("--teleop-step-joint", type=float, default=0.04, help="Joint-mode step per tick [rad]")
+    parser.add_argument("--teleop-step-pos", type=float, default=0.004, help="Pose-mode translation step [m]")
+    parser.add_argument("--teleop-step-rot-deg", type=float, default=2.0, help="Pose-mode rotation step [deg]")
+    parser.add_argument("--teleop-step-gripper", type=float, default=0.0015, help="Gripper joint step [m]")
+    parser.add_argument("--teleop-ik-iterations", type=int, default=24, help="IK iterations per pose-mode tick")
+    parser.add_argument(
+        "--teleop-position-only",
+        action="store_true",
+        help="Use position-only IK in pose mode",
+    )
+    return parser
+
+
+if __name__ == "__main__":
+    parser = create_parser()
 
     # Parse arguments and initialize viewer
     viewer, args = newton.examples.init(parser)
