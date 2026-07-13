@@ -17,7 +17,7 @@ import warp as wp
 import newton
 import newton.examples
 from style3d.examples import example_waic_pick_and_place as waic
-from style3d.examples.teleop import GamepadTeleopController, NewtonIKArm, piper_single_arm_spec
+from style3d.examples.teleop import GamepadTeleopController, NewtonIKArm, TeleopCameraRig, piper_single_arm_spec
 
 
 class Example(waic.Example):
@@ -52,6 +52,7 @@ class Example(waic.Example):
             step_pos=float(args.teleop_step_pos),
             step_rot_deg=float(args.teleop_step_rot_deg),
             step_gripper=float(args.teleop_step_gripper),
+            speed_index=0,
             joystick_index=max(0, int(args.teleop_joystick)),
             print_help=not bool(args.quiet),
         )
@@ -61,7 +62,25 @@ class Example(waic.Example):
             dtype=wp.float32,
             device=self.ik_model.device,
         )
-        self.viewer.set_camera(wp.vec3(0.2, 1.25, -1.8), pitch=-18.0, yaw=95.0)
+        wrist_body = next(
+            i
+            for i in range(self.front_piper_body_start, self.front_piper_body_start + self.front_piper_body_count)
+            if self.model.body_label[i] == "link6" or self.model.body_label[i].endswith("/link6")
+        )
+        self.teleop_camera = TeleopCameraRig(
+            self.viewer,
+            base_body_index=self.front_piper_body_start,
+            wrist_body_index=wrist_body,
+            tool_offset=ee_offset,
+            initial_mode=args.teleop_camera,
+            rear_position_offset=(-0.90, 0.0, 1.15),
+            rear_target_offset=(0.30, 0.0, 0.25),
+            wrist_position_offset=(-0.0735, 0.0078, 0.0384),
+            wrist_quat_wxyz=(0.1228, 0.6964, -0.6964, -0.1228),
+            wrist_fov=43.23,
+            print_help=not bool(args.quiet),
+        )
+        self._update_teleop_camera()
 
     @staticmethod
     def create_parser():
@@ -104,6 +123,17 @@ class Example(waic.Example):
 
         self.sync_frontend_piper_display_state()
 
+    def _update_teleop_camera(self):
+        self.teleop_camera.update(self.state_0, gamepad_controller=self.teleop)
+
+    def step(self):
+        super().step()
+        self._update_teleop_camera()
+
+    def render(self):
+        self._update_teleop_camera()
+        super().render()
+
 
 def create_parser():
     parser = newton.examples.create_parser()
@@ -115,6 +145,12 @@ def create_parser():
     parser.add_argument("--teleop-step-rot-deg", type=float, default=2.0, help="Pose-mode rotation step [deg]")
     parser.add_argument("--teleop-step-gripper", type=float, default=0.0015, help="Gripper joint step [m]")
     parser.add_argument("--teleop-ik-iterations", type=int, default=24, help="IK iterations per pose-mode tick")
+    parser.add_argument(
+        "--teleop-camera",
+        choices=TeleopCameraRig.MODES,
+        default="rear",
+        help="Initial viewer camera mode",
+    )
     parser.add_argument(
         "--teleop-position-only",
         action="store_true",
