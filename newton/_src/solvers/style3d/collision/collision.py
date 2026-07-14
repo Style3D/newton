@@ -6,6 +6,8 @@ import warp as wp
 from newton import Contacts, Model, State
 from newton._src.solvers.style3d.collision.bvh import BvhEdge, BvhTri
 from newton._src.solvers.style3d.collision.kernels import (
+    accumulate_body_reaction_kernel,
+    clamp_body_wrench_kernel,
     eval_body_contact_kernel,
     hessian_multiply_kernel,
     handle_edge_edge_contacts_kernel,
@@ -227,6 +229,77 @@ class Collision:
             outputs=[particle_forces, self.contact_hessian_diags],
             device=self.model.device,
         )
+
+    def accumulate_body_reaction(
+        self,
+        dt: float,
+        particle_q_prev: wp.array[wp.vec3],
+        particle_q: wp.array[wp.vec3],
+        contacts: Contacts,
+        body_q: wp.array[wp.transform],
+        body_q_prev: wp.array[wp.transform],
+        body_enabled: wp.array[int],
+        body_f: wp.array[wp.spatial_vector],
+        max_force: float = 0.0,
+    ):
+        """Accumulate cloth contact reaction wrenches onto rigid bodies.
+
+        Evaluates the particle-body contact force once at the given (typically
+        converged, post-step) particle positions and adds the equal-and-opposite
+        wrench per body into ``body_f`` (world frame, about the body COM — the
+        :attr:`newton.State.body_f` convention). Feed the result to an external
+        rigid solver for two-way cloth-rigid coupling.
+
+        Args:
+            dt: Time step used for the contact damping/friction terms.
+            particle_q_prev: Particle positions at the start of the step.
+            particle_q: Particle positions after the cloth solve.
+            contacts: Contacts filled by the collision pipeline for this step.
+            body_q: Current body transforms.
+            body_q_prev: Body transforms at the start of the step.
+            body_enabled: Per-body int mask; only bodies with 1 receive forces.
+            body_f: Output wrench accumulator (not zeroed here).
+            max_force: If > 0, per-body wrenches are uniformly scaled so the
+                linear force magnitude stays below this bound.
+        """
+        wp.launch(
+            kernel=accumulate_body_reaction_kernel,
+            dim=self.body_contact_max,
+            inputs=[
+                dt,
+                particle_q_prev,
+                particle_q,
+                self.model.soft_contact_ke,
+                self.model.soft_contact_kd,
+                self.model.soft_contact_mu,
+                self.friction_epsilon,
+                self.model.particle_radius,
+                contacts.soft_contact_particle,
+                contacts.soft_contact_count,
+                contacts.soft_contact_max,
+                self.model.shape_material_mu,
+                self.model.shape_body,
+                body_q,
+                body_q_prev,
+                self.model.body_qd,
+                self.model.body_com,
+                contacts.soft_contact_shape,
+                contacts.soft_contact_body_pos,
+                contacts.soft_contact_body_vel,
+                contacts.soft_contact_normal,
+                body_enabled,
+            ],
+            outputs=[body_f],
+            device=self.model.device,
+        )
+        if max_force > 0.0:
+            wp.launch(
+                kernel=clamp_body_wrench_kernel,
+                dim=body_f.shape[0],
+                inputs=[max_force],
+                outputs=[body_f],
+                device=self.model.device,
+            )
 
     def contact_hessian_diagonal(self):
         """Return diagonal of contact Hessian for preconditioning.

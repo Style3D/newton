@@ -115,6 +115,105 @@ def eval_body_contact_kernel(
 
 
 @wp.kernel
+def accumulate_body_reaction_kernel(
+    # inputs
+    dt: float,
+    pos_prev: wp.array[wp.vec3],
+    pos: wp.array[wp.vec3],
+    # body-particle contact
+    soft_contact_ke: float,
+    soft_contact_kd: float,
+    friction_mu: float,
+    friction_epsilon: float,
+    particle_radius: wp.array[float],
+    soft_contact_particle: wp.array[int],
+    contact_count: wp.array[int],
+    contact_max: int,
+    shape_material_mu: wp.array[float],
+    shape_body: wp.array[int],
+    body_q: wp.array[wp.transform],
+    body_q_prev: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_com: wp.array[wp.vec3],
+    contact_shape: wp.array[int],
+    contact_body_pos: wp.array[wp.vec3],
+    contact_body_vel: wp.array[wp.vec3],
+    contact_normal: wp.array[wp.vec3],
+    body_enabled: wp.array[int],
+    # outputs
+    body_f: wp.array[wp.spatial_vector],
+):
+    """Accumulate the reaction wrench of particle-body contacts onto bodies.
+
+    Re-evaluates the same contact force as :func:`eval_body_contact_kernel`
+    (at the converged particle positions) and adds the equal-and-opposite
+    wrench to ``body_f`` — world frame, referenced at the body COM, matching
+    :attr:`newton.State.body_f` — so an external rigid solver can consume it
+    as an applied force (two-way cloth-rigid coupling).
+
+    ``body_enabled`` gates which bodies receive the reaction (e.g. only free
+    rigid objects, not kinematically driven robot links).
+    """
+    t_id = wp.tid()
+
+    particle_body_contact_count = wp.min(contact_max, contact_count[0])
+
+    if t_id < particle_body_contact_count:
+        shape_idx = contact_shape[t_id]
+        body_idx = shape_body[shape_idx]
+        if body_idx < 0 or body_enabled[body_idx] == 0:
+            return
+        particle_idx = soft_contact_particle[t_id]
+        body_contact_force, _hessian = evaluate_body_particle_contact(
+            particle_idx,
+            pos[particle_idx],
+            pos_prev[particle_idx],
+            t_id,
+            soft_contact_ke,
+            soft_contact_kd,
+            friction_mu,
+            friction_epsilon,
+            particle_radius,
+            shape_material_mu,
+            shape_body,
+            body_q,
+            body_q_prev,
+            body_qd,
+            body_com,
+            contact_shape,
+            contact_body_pos,
+            contact_body_vel,
+            contact_normal,
+            dt,
+        )
+        reaction = -body_contact_force
+        X_wb = body_q[body_idx]
+        contact_point = wp.transform_point(X_wb, contact_body_pos[t_id])
+        com_world = wp.transform_point(X_wb, body_com[body_idx])
+        torque = wp.cross(contact_point - com_world, reaction)
+        wp.atomic_add(body_f, body_idx, wp.spatial_vector(reaction, torque))
+
+
+@wp.kernel
+def clamp_body_wrench_kernel(
+    max_force: float,
+    # outputs (in-place)
+    body_f: wp.array[wp.spatial_vector],
+):
+    """Uniformly scale a body wrench so its linear force stays under ``max_force``.
+
+    Explosion guard for penalty-force feedback: a deep-penetration spike scaled
+    down keeps its direction, so behaviour degrades gracefully.
+    """
+    tid = wp.tid()
+    f = body_f[tid]
+    force = wp.vec3(f[0], f[1], f[2])
+    mag = wp.length(force)
+    if mag > max_force:
+        body_f[tid] = f * (max_force / mag)
+
+
+@wp.kernel
 def handle_vertex_triangle_contacts_kernel(
     thickness: float,
     stiff_factor: float,
