@@ -1207,6 +1207,7 @@ def solve_untangling_kernel(
 def project_body_particle_contacts_kernel(
     slack: float,
     friction_scale: float,
+    friction_mu: float,
     pos: wp.array[wp.vec3],
     pos_prev: wp.array[wp.vec3],
     accum: wp.array[wp.vec3],
@@ -1234,6 +1235,17 @@ def project_body_particle_contacts_kernel(
     leaves. This is the half our original projection was missing -- PBD engines
     solve normal non-penetration and friction in the SAME iteration loop, and
     friction is the part that actually consumes the iterations.
+
+    Cone half-width is ``mu * |normal correction applied this pass|``, the XPBD
+    form. It has to be the correction and not the standing overlap: the
+    correction is what a squeeze produces each pass and what a contact at rest
+    stops producing, so friction fades on its own when the jaw opens. Riding the
+    cone on the standing overlap instead glues the cloth to the finger forever
+    whenever ``slack > 0``, since slack guarantees the overlap never reaches
+    zero (measured: cloth still hanging 3-14 mm off the open jaw, 198/198
+    frames penetrating). The corollary is that static friction and slack are
+    incompatible -- run this branch with ``slack = 0`` and take the reaction
+    force from the pre-projection state instead.
     """
     t_id = wp.tid()
     count = wp.min(contact_max, contact_count[0])
@@ -1250,10 +1262,13 @@ def project_body_particle_contacts_kernel(
     gap = wp.dot(n, pos[particle] - bx) - particle_radius[particle]
     if gap >= -slack:
         return
-    corr = n * (-slack - gap)
+    dn = -slack - gap
+    corr = n * dn
 
     if friction_scale > 0.0:
-        mu = shape_material_mu[shape] * friction_scale
+        # Same mixing rule as the penalty channel (geometric mean of the global
+        # and per-shape coefficients), so both contact channels agree on mu.
+        mu = wp.sqrt(friction_mu * shape_material_mu[shape]) * friction_scale
         if mu > 0.0:
             # Contact-point motion of the shape over the substep; without it a
             # closing gripper would read its own approach as cloth slip.
@@ -1268,13 +1283,7 @@ def project_body_particle_contacts_kernel(
             rel_t = rel - n * wp.dot(n, rel)
             slip = wp.length(rel_t)
             if slip > 1.0e-9:
-                # Cone half-width = mu * |normal correction applied this pass|,
-                # which is the XPBD form. Using the raw penetration depth here
-                # instead is wrong and badly so: with particle_radius = 8 mm the
-                # depth is millimetres, so the tangential term dwarfs the
-                # sub-millimetre normal correction and drags the cloth into the
-                # jaw (measured -4.0 mm even at 1/10 strength).
-                limit = mu * (-slack - gap)
+                limit = mu * dn
                 if slip <= limit:
                     corr = corr - rel_t                      # stick: cancel it
                 else:

@@ -747,6 +747,12 @@ class Collision:
         self.proj_accum = wp.zeros(self.model.particle_count, dtype=wp.vec3, device=device)
         self.proj_accum_kept = wp.zeros(self.model.particle_count, dtype=wp.vec3, device=device)
         self.proj_contact_share = wp.zeros(self.model.particle_count, dtype=float, device=device)
+        # Positions as the solve left them, before the last sweep moved them.
+        # With slack = 0 the projected state carries no penetration and so no
+        # penalty reaction; this snapshot is where the reaction has to be read
+        # instead (ke x the depth the solve settled at = the load the jaw is
+        # actually pressing with).
+        self.proj_pre_q = wp.zeros(self.model.particle_count, dtype=wp.vec3, device=device)
         print(
             "[collision] contact projection: "
             f"slack={self.projection_slack:g} m, iterations={self.projection_iterations}, "
@@ -853,12 +859,14 @@ class Collision:
         body_q_prev: wp.array[wp.transform] | None,
     ):
         """One Jacobi sweep: accumulate corrections from all contact types, apply."""
+        self.proj_pre_q.assign(particle_q)
         wp.launch(
             project_body_particle_contacts_kernel,
             dim=self.body_contact_max,
             inputs=[
                 self.projection_slack,
                 self.projection_friction_scale,
+                self.model.soft_contact_mu,
                 particle_q,
                 particle_q_prev,
                 self.proj_accum,
@@ -958,6 +966,7 @@ class Collision:
                 inputs=[
                     self.projection_slack,
                     self.projection_friction_scale,
+                    self.model.soft_contact_mu,
                     particle_q,
                     particle_q_prev,
                     self.proj_accum,
