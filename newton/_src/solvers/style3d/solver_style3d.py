@@ -404,6 +404,21 @@ class SolverStyle3D(SolverBase):
                 device=self.device,
             )
 
+            if self.collision is not None:
+                # PBD-style alternation: project contacts BEFORE the assign, so
+                # the next iteration's nonlinear_step_kernel (which reads
+                # state_in) starts from the projected positions. Projecting
+                # after the assign would silently discard the correction every
+                # iteration. No-op unless projection is in interleaved mode.
+                self.collision.project_contacts_iteration(
+                    particle_q=state_out.particle_q,
+                    particle_q_prev=self.x_prev,
+                    contacts=contacts,
+                    body_q=state_out.body_q if self.collision.integrate_with_external_rigid_solver else state_in.body_q,
+                    dt=dt,
+                    body_q_prev=state_in.body_q if self.collision.integrate_with_external_rigid_solver else None,
+                )
+
             state_in.particle_q.assign(state_out.particle_q)
 
         wp.launch(
