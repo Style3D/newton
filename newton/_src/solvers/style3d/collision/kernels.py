@@ -35,6 +35,35 @@ def triangle_barycentric(A: wp.vec3, B: wp.vec3, C: wp.vec3, P: wp.vec3):
 
 
 @wp.func
+def particle_contact_stiffness(
+    material_ke: float,
+    particle_contact_ke: wp.array[float],
+    shape_contact_ke: wp.array[float],
+    particle_idx: int,
+    shape_idx: int,
+):
+    """Contact stiffness for one particle-shape pair.
+
+    ``material_ke <= 0`` keeps the per-shape constant (stock behaviour, and the
+    multiplication-free path, so the default is bit-identical). Above zero the
+    stiffness comes from the CLOTH MATERIAL instead:
+
+        k_i = E_t * A_i / t0
+
+    with ``A_i`` the particle's tributary area on the rest mesh, ``t0`` the cloth
+    thickness and ``E_t`` a transverse compression modulus [Pa]. A per-shape
+    constant is mesh-coupled -- refining 9k -> 40k multiplies the particle count
+    by ~4 and so multiplies the total normal load by ~4 -- while sum_i A_i is the
+    cloth's area no matter how it is tessellated, so this form keeps the load
+    invariant under remeshing. The gate is a uniform scalar, so there is no
+    divergence and the branch is resolved identically for every thread.
+    """
+    if material_ke > 0.0:
+        return particle_contact_ke[particle_idx]
+    return shape_contact_ke[shape_idx]
+
+
+@wp.func
 def combine_contact_stiffness(stiff_factor: float, stiff_0: float, stiff_1: float):
     if stiff_0 <= 1.0e-12 and stiff_1 <= 1.0e-12:
         return 0.0
@@ -630,6 +659,8 @@ def eval_body_contact_kernel(
     contact_count: wp.array[int],
     contact_max: int,
     shape_contact_ke: wp.array[float],
+    material_ke: float,
+    particle_contact_ke: wp.array[float],
     shape_material_mu: wp.array[float],
     shape_body: wp.array[int],
     body_q: wp.array[wp.transform],
@@ -665,7 +696,7 @@ def eval_body_contact_kernel(
                 pos[particle_idx],
                 pos_prev[particle_idx],
                 t_id,
-                shape_contact_ke[shape_idx],
+                particle_contact_stiffness(material_ke, particle_contact_ke, shape_contact_ke, particle_idx, shape_idx),
                 soft_contact_kd,
                 friction_mu,
                 avbd_dual_k,
@@ -691,7 +722,7 @@ def eval_body_contact_kernel(
                 pos[particle_idx],
                 pos_prev[particle_idx],
                 t_id,
-                shape_contact_ke[shape_idx],
+                particle_contact_stiffness(material_ke, particle_contact_ke, shape_contact_ke, particle_idx, shape_idx),
                 soft_contact_kd,
                 friction_mu,
                 anchor_kt_ratio,
@@ -716,7 +747,7 @@ def eval_body_contact_kernel(
             pos[particle_idx],
             pos_prev[particle_idx],
             t_id,
-            shape_contact_ke[shape_idx],
+            particle_contact_stiffness(material_ke, particle_contact_ke, shape_contact_ke, particle_idx, shape_idx),
             soft_contact_kd,
             friction_mu,
             friction_epsilon,
@@ -753,6 +784,8 @@ def accumulate_body_reaction_kernel(
     contact_count: wp.array[int],
     contact_max: int,
     shape_contact_ke: wp.array[float],
+    material_ke: float,
+    particle_contact_ke: wp.array[float],
     shape_material_mu: wp.array[float],
     shape_body: wp.array[int],
     body_q: wp.array[wp.transform],
@@ -801,7 +834,7 @@ def accumulate_body_reaction_kernel(
                 pos[particle_idx],
                 pos_prev[particle_idx],
                 t_id,
-                shape_contact_ke[shape_idx],
+                particle_contact_stiffness(material_ke, particle_contact_ke, shape_contact_ke, particle_idx, shape_idx),
                 soft_contact_kd,
                 friction_mu,
                 avbd_dual_k,
@@ -834,7 +867,7 @@ def accumulate_body_reaction_kernel(
                 pos[particle_idx],
                 pos_prev[particle_idx],
                 t_id,
-                shape_contact_ke[shape_idx],
+                particle_contact_stiffness(material_ke, particle_contact_ke, shape_contact_ke, particle_idx, shape_idx),
                 soft_contact_kd,
                 friction_mu,
                 anchor_kt_ratio,
@@ -866,7 +899,7 @@ def accumulate_body_reaction_kernel(
             pos[particle_idx],
             pos_prev[particle_idx],
             t_id,
-            shape_contact_ke[shape_idx],
+            particle_contact_stiffness(material_ke, particle_contact_ke, shape_contact_ke, particle_idx, shape_idx),
             soft_contact_kd,
             friction_mu,
             friction_epsilon,

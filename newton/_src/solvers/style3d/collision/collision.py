@@ -81,6 +81,11 @@ class Collision:
             dtype=float,
             device=self.model.device,
         )
+        # Material-derived contact stiffness (default off: material_ke <= 0 keeps
+        # the per-shape constant, and the kernel takes the same branch it always
+        # did, so the default path is bit-identical).
+        self.material_ke = 0.0
+        self.particle_contact_ke = wp.zeros(model.particle_count, dtype=float, device=self.model.device)
         self.feature_vertex_shape = None
         self.feature_edge_shape = None
         self.projection_iterations = 0
@@ -506,6 +511,8 @@ class Collision:
                 contacts.soft_contact_count,
                 contacts.soft_contact_max,
                 self.shape_contact_ke,
+                self.material_ke,
+                self.particle_contact_ke,
                 self.model.shape_material_mu,
                 self.model.shape_body,
                 state_out.body_q if self.integrate_with_external_rigid_solver else state_in.body_q,
@@ -633,6 +640,8 @@ class Collision:
                 contacts.soft_contact_count,
                 contacts.soft_contact_max,
                 self.shape_contact_ke,
+                self.material_ke,
+                self.particle_contact_ke,
                 self.model.shape_material_mu,
                 self.model.shape_body,
                 body_q,
@@ -773,6 +782,48 @@ class Collision:
             f"slack={self.projection_slack:g} m, iterations={self.projection_iterations}, "
             f"friction_scale={self.projection_friction_scale:g}, "
             f"mode={'interleaved' if self.projection_interleaved else 'post'}",
+            flush=True,
+        )
+
+    def enable_material_contact_stiffness(self, modulus: float, thickness: float) -> None:
+        """Derive the contact stiffness from the cloth material instead of a constant.
+
+        ``k_i = modulus * A_i / thickness`` with ``A_i`` the particle's tributary
+        area on the rest mesh (each incident triangle contributes a third of its
+        area). A per-shape constant ``ke`` is mesh-coupled: the penalty is
+        per-particle, so refining the cloth 9k -> 40k multiplies the particle
+        count by ~4 and the total normal load with it, and the constant has to be
+        retuned per mesh. ``sum_i A_i`` is the cloth's area whatever the
+        tessellation, so this form holds the load invariant under remeshing and
+        leaves ONE parameter with physical units (a transverse compression
+        modulus [Pa]) instead of a per-configuration knob.
+
+        Args:
+            modulus: E_t [Pa]. <= 0 disables and restores the per-shape constant.
+            thickness: cloth thickness t0 [m] (asset meta ``thickness``).
+        """
+        modulus = float(modulus)
+        if modulus <= 0.0 or thickness <= 0.0:
+            self.material_ke = 0.0
+            return
+        pos = self.model.particle_q.numpy().astype(np.float64)
+        tris = self.model.tri_indices.numpy().astype(np.int64)
+        e1 = pos[tris[:, 1]] - pos[tris[:, 0]]
+        e2 = pos[tris[:, 2]] - pos[tris[:, 0]]
+        area = 0.5 * np.linalg.norm(np.cross(e1, e2), axis=1)
+        tributary = np.zeros(self.model.particle_count, dtype=np.float64)
+        for corner in range(3):
+            np.add.at(tributary, tris[:, corner], area / 3.0)
+        ke = modulus * tributary / float(thickness)
+        self.particle_contact_ke.assign(ke.astype(np.float32))
+        self.material_ke = modulus
+        nz = tributary[tributary > 0.0]
+        print(
+            "[collision] material contact stiffness: "
+            f"E_t={modulus:g} Pa, t0={thickness * 1000:g} mm, "
+            f"cloth area={tributary.sum():.5f} m^2, "
+            f"A_i mean={nz.mean() * 1e6:.3f} mm^2 -> k_i mean={ke[tributary > 0.0].mean():.1f} N/m "
+            f"(range {ke[tributary > 0.0].min():.1f}..{ke.max():.1f})",
             flush=True,
         )
 
