@@ -1514,3 +1514,248 @@ def accumulate_projection_impulse_kernel(
     cp = wp.transform_point(X_wb, contact_body_pos[t_id])
     com = wp.transform_point(X_wb, body_com[body])
     wp.atomic_add(body_f, body, wp.spatial_vector(reaction, wp.cross(cp - com, reaction)))
+
+
+# ---------------------------------------------------------------------------
+# E3: triangle-level rigid contact against a precomputed shape SDF.
+#
+# Vertex-sphere detection cannot see a blade crossing the INTERIOR of a cloth
+# triangle; the stack has been hiding that by inflating ``particle_radius``
+# until the sphere covers the mesh aperture, which couples the contact model to
+# the cloth tessellation. These kernels replace that with the mesh-independent
+# form: constrain min_{x in tri} SDF_shape(x) >= h, h = cloth half-thickness.
+# The shape SDF is baked ONCE per shape (rigid), sampled trilinearly, and the
+# per-triangle minimum is found by 3 vertices + centroid seeding followed by a
+# few projected steepest-descent steps in barycentric coordinates. The
+# correction is distributed to the three vertices by barycentric weight, so one
+# constraint covers vertex-face, edge-face and face-vertex at once.
+# ---------------------------------------------------------------------------
+
+
+@wp.func
+def sdf_grid_sample(
+    sdf: wp.array(dtype=float),
+    base: int,
+    nx: int,
+    ny: int,
+    nz: int,
+    origin: wp.vec3,
+    inv_voxel: float,
+    bg: float,
+    p: wp.vec3,
+):
+    """Trilinear lookup in a dense per-shape SDF grid (shape-local frame).
+
+    Returns ``bg`` (a large positive number) outside the grid, so a triangle
+    that never enters the shape's neighbourhood costs one compare.
+    """
+    q = (p - origin) * inv_voxel
+    fx = q[0]
+    fy = q[1]
+    fz = q[2]
+    if fx < 0.0:
+        return bg
+    if fy < 0.0:
+        return bg
+    if fz < 0.0:
+        return bg
+    ix = int(fx)
+    iy = int(fy)
+    iz = int(fz)
+    if ix >= nx - 1:
+        return bg
+    if iy >= ny - 1:
+        return bg
+    if iz >= nz - 1:
+        return bg
+    tx = fx - float(ix)
+    ty = fy - float(iy)
+    tz = fz - float(iz)
+    s0 = base + (ix * ny + iy) * nz + iz
+    s1 = base + (ix * ny + iy + 1) * nz + iz
+    s2 = base + ((ix + 1) * ny + iy) * nz + iz
+    s3 = base + ((ix + 1) * ny + iy + 1) * nz + iz
+    c00 = sdf[s0] * (1.0 - tz) + sdf[s0 + 1] * tz
+    c01 = sdf[s1] * (1.0 - tz) + sdf[s1 + 1] * tz
+    c10 = sdf[s2] * (1.0 - tz) + sdf[s2 + 1] * tz
+    c11 = sdf[s3] * (1.0 - tz) + sdf[s3 + 1] * tz
+    c0 = c00 * (1.0 - ty) + c01 * ty
+    c1 = c10 * (1.0 - ty) + c11 * ty
+    return c0 * (1.0 - tx) + c1 * tx
+
+
+@wp.func
+def sdf_grid_gradient(
+    sdf: wp.array(dtype=float),
+    base: int,
+    nx: int,
+    ny: int,
+    nz: int,
+    origin: wp.vec3,
+    inv_voxel: float,
+    bg: float,
+    voxel: float,
+    p: wp.vec3,
+):
+    """Central-difference gradient of the SDF grid (unit-length if non-degenerate)."""
+    e = voxel
+    gx = sdf_grid_sample(sdf, base, nx, ny, nz, origin, inv_voxel, bg, p + wp.vec3(e, 0.0, 0.0)) - sdf_grid_sample(
+        sdf, base, nx, ny, nz, origin, inv_voxel, bg, p - wp.vec3(e, 0.0, 0.0)
+    )
+    gy = sdf_grid_sample(sdf, base, nx, ny, nz, origin, inv_voxel, bg, p + wp.vec3(0.0, e, 0.0)) - sdf_grid_sample(
+        sdf, base, nx, ny, nz, origin, inv_voxel, bg, p - wp.vec3(0.0, e, 0.0)
+    )
+    gz = sdf_grid_sample(sdf, base, nx, ny, nz, origin, inv_voxel, bg, p + wp.vec3(0.0, 0.0, e)) - sdf_grid_sample(
+        sdf, base, nx, ny, nz, origin, inv_voxel, bg, p - wp.vec3(0.0, 0.0, e)
+    )
+    g = wp.vec3(gx, gy, gz)
+    ln = wp.length(g)
+    if ln < 1.0e-12:
+        return wp.vec3(0.0, 0.0, 1.0)
+    return g / ln
+
+
+@wp.kernel
+def bake_shape_sdf_kernel(
+    mesh: wp.uint64,
+    origin: wp.vec3,
+    voxel: float,
+    nx: int,
+    ny: int,
+    nz: int,
+    base: int,
+    max_dist: float,
+    # outputs
+    sdf: wp.array(dtype=float),
+):
+    """One-time signed-distance bake of a rigid shape onto a dense grid.
+
+    Signed by ``mesh_query_point_sign_parity`` so points inside the solid are
+    unambiguous (the shape meshes are closed thick solids).
+    """
+    i, j, k = wp.tid()
+    p = origin + wp.vec3(float(i) * voxel, float(j) * voxel, float(k) * voxel)
+    d = max_dist
+    q = wp.mesh_query_point_sign_parity(mesh, p, max_dist)
+    if q.result:
+        cp = wp.mesh_eval_position(mesh, q.face, q.u, q.v)
+        d = wp.length(p - cp) * q.sign
+    sdf[base + (i * ny + j) * nz + k] = d
+
+
+@wp.kernel
+def project_tri_sdf_kernel(
+    pos: wp.array(dtype=wp.vec3),
+    tri_indices: wp.array2d(dtype=wp.int32),
+    tri_count: int,
+    sdf: wp.array(dtype=float),
+    sdf_base: wp.array(dtype=int),
+    sdf_nx: wp.array(dtype=int),
+    sdf_ny: wp.array(dtype=int),
+    sdf_nz: wp.array(dtype=int),
+    sdf_origin: wp.array(dtype=wp.vec3),
+    voxel: float,
+    bg: float,
+    slot_shape: wp.array(dtype=int),
+    shape_body: wp.array(dtype=int),
+    shape_transform: wp.array(dtype=wp.transform),
+    body_q: wp.array(dtype=wp.transform),
+    half_thickness: float,
+    max_correction: float,
+    refine_steps: int,
+    # outputs
+    delta: wp.array(dtype=wp.vec3),
+    delta_weight: wp.array(dtype=float),
+):
+    """Constrain min_{x in tri} SDF_shape(x) >= h and share the fix barycentrically.
+
+    One thread per (shape slot, cloth triangle). Mesh-independent: nothing here
+    reads ``particle_radius`` or the triangle's edge lengths.
+    """
+    tid = wp.tid()
+    slot = tid / tri_count
+    t = tid - slot * tri_count
+
+    shape = slot_shape[slot]
+    body = shape_body[shape]
+    X_ws = shape_transform[shape]
+    if body >= 0:
+        X_ws = body_q[body] * shape_transform[shape]
+    X_sw = wp.transform_inverse(X_ws)
+
+    i0 = tri_indices[t, 0]
+    i1 = tri_indices[t, 1]
+    i2 = tri_indices[t, 2]
+    a = wp.transform_point(X_sw, pos[i0])
+    b = wp.transform_point(X_sw, pos[i1])
+    c = wp.transform_point(X_sw, pos[i2])
+
+    base = sdf_base[slot]
+    nx = sdf_nx[slot]
+    ny = sdf_ny[slot]
+    nz = sdf_nz[slot]
+    org = sdf_origin[slot]
+    inv_voxel = 1.0 / voxel
+
+    # seed: three vertices + centroid
+    third = 1.0 / 3.0
+    w = wp.vec3(third, third, third)
+    p = a * third + b * third + c * third
+    best = sdf_grid_sample(sdf, base, nx, ny, nz, org, inv_voxel, bg, p)
+    da = sdf_grid_sample(sdf, base, nx, ny, nz, org, inv_voxel, bg, a)
+    if da < best:
+        best = da
+        w = wp.vec3(1.0, 0.0, 0.0)
+    db = sdf_grid_sample(sdf, base, nx, ny, nz, org, inv_voxel, bg, b)
+    if db < best:
+        best = db
+        w = wp.vec3(0.0, 1.0, 0.0)
+    dc = sdf_grid_sample(sdf, base, nx, ny, nz, org, inv_voxel, bg, c)
+    if dc < best:
+        best = dc
+        w = wp.vec3(0.0, 0.0, 1.0)
+    if best >= bg:
+        return
+
+    # projected steepest descent in barycentric coordinates (scale-free steps)
+    step = float(0.5)
+    for _s in range(refine_steps):
+        p = a * w[0] + b * w[1] + c * w[2]
+        g = sdf_grid_gradient(sdf, base, nx, ny, nz, org, inv_voxel, bg, voxel, p)
+        ga = wp.dot(g, a)
+        gb = wp.dot(g, b)
+        gc = wp.dot(g, c)
+        m = (ga + gb + gc) * third
+        gw = wp.vec3(ga - m, gb - m, gc - m)
+        gn = wp.length(gw)
+        if gn > 1.0e-12:
+            cand = w - gw * (step / gn)
+            cand = wp.vec3(wp.max(cand[0], 0.0), wp.max(cand[1], 0.0), wp.max(cand[2], 0.0))
+            s = cand[0] + cand[1] + cand[2]
+            if s > 1.0e-9:
+                cand = cand / s
+                pc = a * cand[0] + b * cand[1] + c * cand[2]
+                dcand = sdf_grid_sample(sdf, base, nx, ny, nz, org, inv_voxel, bg, pc)
+                if dcand < best:
+                    best = dcand
+                    w = cand
+        step = step * 0.5
+
+    if best >= half_thickness:
+        return
+
+    p = a * w[0] + b * w[1] + c * w[2]
+    n_local = sdf_grid_gradient(sdf, base, nx, ny, nz, org, inv_voxel, bg, voxel, p)
+    push = wp.min(half_thickness - best, max_correction)
+    n_world = wp.transform_vector(X_ws, n_local)
+    denom = w[0] * w[0] + w[1] * w[1] + w[2] * w[2]
+    scale = push / wp.max(denom, 1.0e-6)
+    if w[0] > 0.0:
+        wp.atomic_add(delta, i0, n_world * (scale * w[0]))
+        wp.atomic_add(delta_weight, i0, w[0])
+    if w[1] > 0.0:
+        wp.atomic_add(delta, i1, n_world * (scale * w[1]))
+        wp.atomic_add(delta_weight, i1, w[1])
+    if w[2] > 0.0:
+        wp.atomic_add(delta, i2, n_world * (scale * w[2]))
+        wp.atomic_add(delta_weight, i2, w[2])

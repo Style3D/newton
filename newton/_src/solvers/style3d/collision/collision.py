@@ -12,6 +12,7 @@ from newton._src.solvers.style3d.collision.kernels import (
     accumulate_body_reaction_kernel,
     accumulate_projection_impulse_kernel,
     apply_contact_projection_kernel,
+    bake_shape_sdf_kernel,
     count_particle_contacts_kernel,
     clamp_body_wrench_kernel,
     eval_rigid_edge_cloth_edge_contacts_kernel,
@@ -24,6 +25,7 @@ from newton._src.solvers.style3d.collision.kernels import (
     project_body_particle_contacts_kernel,
     project_rigid_edge_cloth_edge_kernel,
     project_rigid_vertex_cloth_face_kernel,
+    project_tri_sdf_kernel,
     solve_untangling_kernel,
     summarize_feature_query_kernel,
     transform_rigid_feature_vertices_kernel,
@@ -83,6 +85,11 @@ class Collision:
         self.feature_edge_shape = None
         self.projection_iterations = 0
         self.projection_interleaved = False
+        # E3 triangle-level SDF contact. ``None`` = disabled; nothing is
+        # allocated and no kernel is launched, so the default path is unchanged.
+        self.tri_sdf_slot_shape = None
+        self.proj_delta = None
+        self.projection_relaxation = None
 
         self.edge_bvh.build(model.particle_q, self.model.edge_indices, self.radius)
         self.tri_bvh.build(model.particle_q, self.model.tri_indices, self.radius)
@@ -769,6 +776,164 @@ class Collision:
             flush=True,
         )
 
+    def enable_triangle_sdf_contacts(
+        self,
+        shape_ids,
+        half_thickness: float,
+        voxel: float = 1.0e-3,
+        pad: float = 6.0e-3,
+        refine_steps: int = 3,
+        max_correction: float = 5.0e-3,
+    ) -> None:
+        """Enable E3 triangle-level contact against a baked per-shape SDF.
+
+        Vertex-sphere detection is blind to a blade crossing the INTERIOR of a
+        cloth triangle, which is why ``particle_radius`` had to be inflated to
+        the mesh aperture (8 mm for a 7.5 mm p99 aperture) -- a contact model
+        coupled to the tessellation. This constrains the whole triangle instead:
+        ``min_{x in tri} SDF_shape(x) >= half_thickness``. Nothing in the kernel
+        reads ``particle_radius`` or an edge length, so the constraint is mesh
+        independent.
+
+        The SDF is baked once per shape (rigid bodies, so the local-frame field
+        never changes) on a dense ``voxel`` grid padded by ``pad``; a 45x71x22 mm
+        finger at 1 mm is ~0.2 M voxels, i.e. under a megabyte.
+
+        Args:
+            shape_ids: Shapes to constrain against (typically the gripper fingers).
+            half_thickness: h [m] -- the cloth half-thickness the surface is held
+                off the solid by. This is the ONLY length scale in the model.
+            voxel: SDF grid spacing [m].
+            pad: Grid padding around the shape bounds [m]; triangles further than
+                this from the shape are rejected by one compare.
+            refine_steps: Projected steepest-descent steps in barycentric space
+                after the 3-vertex + centroid seeding.
+            max_correction: Per-sweep displacement cap [m]. Bounds the response
+                to a triangle that is already deep inside (e.g. right after a
+                teleporting reset) instead of launching it.
+        """
+        shape_ids = [int(s) for s in shape_ids]
+        if not shape_ids:
+            return
+        device = self.model.device
+        shape_scale = self.model.shape_scale.numpy()
+
+        blocks, bases, dims, origins, slots = [], [], [], [], []
+        total = 0
+        # ``bg`` is the out-of-grid sentinel only. The bake itself queries out to
+        # ``bake_max_dist`` so the SOLID INTERIOR carries a true negative
+        # distance: querying only to the pad would leave anything deeper than the
+        # pad reading +pad, i.e. a deeply penetrated triangle would look free and
+        # the constraint would release it.
+        bg = 1.0e3
+        bake_max_dist = 0.05
+        for shape in shape_ids:
+            source = self.model.shape_source[shape]
+            vertices = np.asarray(source.vertices, dtype=np.float32)
+            indices = np.asarray(source.indices, dtype=np.int32).reshape(-1)
+            if not len(vertices) or not len(indices):
+                continue
+            vertices = vertices * np.asarray(shape_scale[shape], dtype=np.float32)
+            mesh = wp.Mesh(
+                points=wp.array(vertices, dtype=wp.vec3, device=device),
+                indices=wp.array(indices, dtype=wp.int32, device=device),
+            )
+            lo = vertices.min(axis=0) - pad
+            hi = vertices.max(axis=0) + pad
+            n = np.maximum(np.ceil((hi - lo) / voxel).astype(np.int32) + 1, 2)
+            count = int(n[0]) * int(n[1]) * int(n[2])
+            grid = wp.zeros(count, dtype=float, device=device)
+            wp.launch(
+                bake_shape_sdf_kernel,
+                dim=(int(n[0]), int(n[1]), int(n[2])),
+                inputs=[
+                    mesh.id,
+                    wp.vec3(float(lo[0]), float(lo[1]), float(lo[2])),
+                    float(voxel),
+                    int(n[0]),
+                    int(n[1]),
+                    int(n[2]),
+                    0,
+                    bake_max_dist,
+                ],
+                outputs=[grid],
+                device=device,
+            )
+            blocks.append(grid.numpy())
+            bases.append(total)
+            dims.append(n)
+            origins.append(lo)
+            slots.append(shape)
+            total += count
+
+        if not blocks:
+            return
+        dims = np.asarray(dims, dtype=np.int32)
+        self.tri_sdf_data = wp.array(np.concatenate(blocks).astype(np.float32), dtype=float, device=device)
+        self.tri_sdf_base = wp.array(np.asarray(bases, dtype=np.int32), dtype=int, device=device)
+        self.tri_sdf_nx = wp.array(dims[:, 0].copy(), dtype=int, device=device)
+        self.tri_sdf_ny = wp.array(dims[:, 1].copy(), dtype=int, device=device)
+        self.tri_sdf_nz = wp.array(dims[:, 2].copy(), dtype=int, device=device)
+        self.tri_sdf_origin = wp.array(np.asarray(origins, dtype=np.float32), dtype=wp.vec3, device=device)
+        self.tri_sdf_slot_shape = wp.array(np.asarray(slots, dtype=np.int32), dtype=int, device=device)
+        self.tri_sdf_voxel = float(voxel)
+        self.tri_sdf_bg = bg
+        self.tri_sdf_h = float(half_thickness)
+        self.tri_sdf_refine = max(int(refine_steps), 0)
+        self.tri_sdf_max_correction = float(max_correction)
+        self.tri_sdf_slots = len(slots)
+        # Jacobi accumulators. The position-projection pass owns the same three
+        # buffers; allocate only if it did not (the two are independent switches).
+        if getattr(self, "proj_delta", None) is None:
+            self.proj_delta = wp.zeros(self.model.particle_count, dtype=wp.vec3, device=device)
+            self.proj_weight = wp.zeros(self.model.particle_count, dtype=float, device=device)
+            self.proj_accum = wp.zeros(self.model.particle_count, dtype=wp.vec3, device=device)
+        if getattr(self, "projection_relaxation", None) is None:
+            self.projection_relaxation = 1.0
+        print(
+            "[collision] triangle SDF contacts: "
+            f"{len(slots)} shapes, {total} voxels @ {voxel * 1000:g} mm, "
+            f"h={half_thickness * 1000:g} mm, refine={self.tri_sdf_refine}, "
+            f"max_corr={max_correction * 1000:g} mm",
+            flush=True,
+        )
+
+    def _tri_sdf_sweep(self, particle_q: wp.array[wp.vec3], body_q: wp.array[wp.transform]):
+        """One Jacobi sweep of the triangle-level SDF constraint."""
+        wp.launch(
+            project_tri_sdf_kernel,
+            dim=self.tri_sdf_slots * self.model.tri_count,
+            inputs=[
+                particle_q,
+                self.model.tri_indices,
+                int(self.model.tri_count),
+                self.tri_sdf_data,
+                self.tri_sdf_base,
+                self.tri_sdf_nx,
+                self.tri_sdf_ny,
+                self.tri_sdf_nz,
+                self.tri_sdf_origin,
+                self.tri_sdf_voxel,
+                self.tri_sdf_bg,
+                self.tri_sdf_slot_shape,
+                self.model.shape_body,
+                self.model.shape_transform,
+                body_q,
+                self.tri_sdf_h,
+                self.tri_sdf_max_correction,
+                self.tri_sdf_refine,
+            ],
+            outputs=[self.proj_delta, self.proj_weight],
+            device=self.model.device,
+        )
+        wp.launch(
+            apply_contact_projection_kernel,
+            dim=self.model.particle_count,
+            inputs=[self.projection_relaxation, self.model.particle_flags],
+            outputs=[self.proj_delta, self.proj_weight, particle_q, self.proj_accum],
+            device=self.model.device,
+        )
+
     def set_projection_shapes(self, shape_indices) -> None:
         """Restrict the position projection to the given shapes.
 
@@ -870,9 +1035,13 @@ class Collision:
         No-op unless :meth:`enable_contact_projection` was called with
         ``interleaved=True``.
         """
-        if not self.projection_interleaved or self.projection_iterations <= 0:
-            return
-        self._project_sweep(particle_q, particle_q_prev, contacts, body_q, body_q_prev)
+        if self.projection_interleaved and self.projection_iterations > 0:
+            self._project_sweep(particle_q, particle_q_prev, contacts, body_q, body_q_prev)
+        # E3 triangle-level SDF constraint: an independent switch, so it can run
+        # on the simplified stack (position projection off, E0c) without
+        # dragging the particle-radius projection back in.
+        if self.tri_sdf_slot_shape is not None:
+            self._tri_sdf_sweep(particle_q, body_q)
 
     def _project_sweep(
         self,
