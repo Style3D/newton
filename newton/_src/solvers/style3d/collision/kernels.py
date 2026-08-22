@@ -1220,6 +1220,7 @@ def project_body_particle_contacts_kernel(
     contact_normal: wp.array[wp.vec3],
     shape_body: wp.array[int],
     shape_material_mu: wp.array[float],
+    shape_enabled: wp.array[int],
     body_q: wp.array[wp.transform],
     body_q_prev: wp.array[wp.transform],
     # outputs
@@ -1253,6 +1254,8 @@ def project_body_particle_contacts_kernel(
         return
     particle = soft_contact_particle[t_id]
     shape = contact_shape[t_id]
+    if shape_enabled[shape] == 0:
+        return
     body = shape_body[shape]
     bx_local = contact_body_pos[t_id]
     bx = bx_local

@@ -753,6 +753,14 @@ class Collision:
         # instead (ke x the depth the solve settled at = the load the jaw is
         # actually pressing with).
         self.proj_pre_q = wp.zeros(self.model.particle_count, dtype=wp.vec3, device=device)
+        # Which shapes the projection acts on. It exists to fix gripper-cloth
+        # penetration; applying it to the table as well makes the cloth resist
+        # sliding as it spreads (measured: 0.22 of flatten coverage). Default
+        # keeps every shape so behaviour is unchanged unless a caller narrows it.
+        if getattr(self, "projection_shape_enabled", None) is None:
+            self.projection_shape_enabled = wp.ones(
+                self.model.shape_count, dtype=int, device=device
+            )
         print(
             "[collision] contact projection: "
             f"slack={self.projection_slack:g} m, iterations={self.projection_iterations}, "
@@ -760,6 +768,22 @@ class Collision:
             f"mode={'interleaved' if self.projection_interleaved else 'post'}",
             flush=True,
         )
+
+    def set_projection_shapes(self, shape_indices) -> None:
+        """Restrict the position projection to the given shapes.
+
+        Args:
+            shape_indices: Shapes the projection may move particles out of.
+                Everything else keeps only its penalty contact.
+        """
+        import numpy as np
+
+        mask = np.zeros(self.model.shape_count, dtype=np.int32)
+        idx = np.asarray(list(shape_indices), dtype=np.int32)
+        if len(idx):
+            mask[idx] = 1
+        self.projection_shape_enabled = wp.array(mask, dtype=int, device=self.model.device)
+        print(f"[collision] contact projection limited to {int(mask.sum())} shapes", flush=True)
 
     def accumulate_projection_impulse(
         self,
@@ -879,6 +903,7 @@ class Collision:
                 contacts.soft_contact_normal,
                 self.model.shape_body,
                 self.model.shape_material_mu,
+                self.projection_shape_enabled,
                 body_q,
                 body_q if body_q_prev is None else body_q_prev,
             ],
@@ -979,6 +1004,7 @@ class Collision:
                     contacts.soft_contact_normal,
                     self.model.shape_body,
                     self.model.shape_material_mu,
+                    self.projection_shape_enabled,
                     body_q,
                     body_q if body_q_prev is None else body_q_prev,
                 ],
