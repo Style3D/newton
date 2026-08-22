@@ -26,6 +26,8 @@ from newton._src.solvers.style3d.collision.kernels import (
     project_rigid_edge_cloth_edge_kernel,
     project_rigid_vertex_cloth_face_kernel,
     project_tri_sdf_kernel,
+    eval_tri_sdf_contact_kernel,
+    accumulate_tri_sdf_reaction_kernel,
     solve_untangling_kernel,
     summarize_feature_query_kernel,
     transform_rigid_feature_vertices_kernel,
@@ -93,6 +95,7 @@ class Collision:
         # E3 triangle-level SDF contact. ``None`` = disabled; nothing is
         # allocated and no kernel is launched, so the default path is unchanged.
         self.tri_sdf_slot_shape = None
+        self.tri_sdf_compliant = False
         self.proj_delta = None
         self.projection_relaxation = None
 
@@ -592,6 +595,80 @@ class Collision:
                 device=self.model.device,
             )
 
+        if self.tri_sdf_slot_shape is not None and self.tri_sdf_compliant:
+            wp.launch(
+                eval_tri_sdf_contact_kernel,
+                dim=self.tri_sdf_slots * self.model.tri_count,
+                inputs=[
+                    state_out.particle_q,
+                    self.model.tri_indices,
+                    int(self.model.tri_count),
+                    self.tri_sdf_stiffness,
+                    self.tri_sdf_data,
+                    self.tri_sdf_base,
+                    self.tri_sdf_nx,
+                    self.tri_sdf_ny,
+                    self.tri_sdf_nz,
+                    self.tri_sdf_origin,
+                    self.tri_sdf_voxel,
+                    self.tri_sdf_bg,
+                    self.tri_sdf_slot_shape,
+                    self.model.shape_body,
+                    self.model.shape_transform,
+                    state_out.body_q if self.integrate_with_external_rigid_solver else state_in.body_q,
+                    self.tri_sdf_h,
+                    self.tri_sdf_max_correction,
+                    self.tri_sdf_refine,
+                ],
+                outputs=[particle_forces, self.contact_hessian_diags],
+                device=self.model.device,
+            )
+
+    def accumulate_tri_sdf_reaction(
+        self,
+        particle_q: wp.array[wp.vec3],
+        body_q: wp.array[wp.transform],
+        body_com: wp.array[wp.vec3],
+        body_enabled: wp.array[int],
+        body_f: wp.array[wp.spatial_vector],
+    ):
+        """Equal-and-opposite wrench of the compliant triangle contact.
+
+        Call AFTER :meth:`accumulate_body_reaction` (which zeroes ``body_f``) so
+        both channels land in the same buffer.
+        """
+        if self.tri_sdf_slot_shape is None or not self.tri_sdf_compliant:
+            return
+        wp.launch(
+            accumulate_tri_sdf_reaction_kernel,
+            dim=self.tri_sdf_slots * self.model.tri_count,
+            inputs=[
+                particle_q,
+                self.model.tri_indices,
+                int(self.model.tri_count),
+                self.tri_sdf_stiffness,
+                self.tri_sdf_data,
+                self.tri_sdf_base,
+                self.tri_sdf_nx,
+                self.tri_sdf_ny,
+                self.tri_sdf_nz,
+                self.tri_sdf_origin,
+                self.tri_sdf_voxel,
+                self.tri_sdf_bg,
+                self.tri_sdf_slot_shape,
+                self.model.shape_body,
+                self.model.shape_transform,
+                body_q,
+                body_com,
+                body_enabled,
+                self.tri_sdf_h,
+                self.tri_sdf_max_correction,
+                self.tri_sdf_refine,
+            ],
+            outputs=[body_f],
+            device=self.model.device,
+        )
+
     def accumulate_body_reaction(
         self,
         dt: float,
@@ -835,6 +912,8 @@ class Collision:
         pad: float = 6.0e-3,
         refine_steps: int = 3,
         max_correction: float = 5.0e-3,
+        compliant: bool = False,
+        modulus: float = 0.0,
     ) -> None:
         """Enable E3 triangle-level contact against a baked per-shape SDF.
 
@@ -862,6 +941,16 @@ class Collision:
             max_correction: Per-sweep displacement cap [m]. Bounds the response
                 to a triangle that is already deep inside (e.g. right after a
                 teleporting reset) instead of launching it.
+            compliant: Run the constraint as a PENALTY FORCE into the implicit
+                solve (and its equal-and-opposite onto the body) instead of as a
+                position projection. The projection form removes exactly the
+                overlap the penalty channel needs, so the two compete for the
+                same quantity and the reaction collapses once the collision
+                radius is retired; the compliant form has ONE mechanism carrying
+                both the geometry and the force.
+            modulus: E_t [Pa] for the compliant form. ``k_tri = E_t * A_tri / t0``
+                with A_tri the REST triangle area, so sum_tri A_tri is the cloth's
+                area regardless of tessellation and the load is mesh independent.
         """
         shape_ids = [int(s) for s in shape_ids]
         if not shape_ids:
@@ -933,6 +1022,23 @@ class Collision:
         self.tri_sdf_refine = max(int(refine_steps), 0)
         self.tri_sdf_max_correction = float(max_correction)
         self.tri_sdf_slots = len(slots)
+        self.tri_sdf_compliant = bool(compliant)
+        pos_rest = self.model.particle_q.numpy().astype(np.float64)
+        tris = self.model.tri_indices.numpy().astype(np.int64)
+        e1 = pos_rest[tris[:, 1]] - pos_rest[tris[:, 0]]
+        e2 = pos_rest[tris[:, 2]] - pos_rest[tris[:, 0]]
+        tri_area = 0.5 * np.linalg.norm(np.cross(e1, e2), axis=1)
+        t0 = max(float(half_thickness) * 2.0, 1.0e-9)
+        k_tri = (float(modulus) * tri_area / t0) if modulus > 0.0 else np.zeros_like(tri_area)
+        self.tri_sdf_stiffness = wp.array(k_tri.astype(np.float32), dtype=float, device=device)
+        if self.tri_sdf_compliant:
+            print(
+                "[collision] triangle SDF contact is COMPLIANT: "
+                f"E_t={modulus:g} Pa, t0={t0 * 1000:g} mm, "
+                f"cloth area={tri_area.sum():.5f} m^2, "
+                f"k_tri mean={k_tri.mean():.1f} N/m (range {k_tri.min():.1f}..{k_tri.max():.1f})",
+                flush=True,
+            )
         # Jacobi accumulators. The position-projection pass owns the same three
         # buffers; allocate only if it did not (the two are independent switches).
         if getattr(self, "proj_delta", None) is None:
@@ -1091,7 +1197,9 @@ class Collision:
         # E3 triangle-level SDF constraint: an independent switch, so it can run
         # on the simplified stack (position projection off, E0c) without
         # dragging the particle-radius projection back in.
-        if self.tri_sdf_slot_shape is not None:
+        if self.tri_sdf_slot_shape is not None and not self.tri_sdf_compliant:
+            # compliant mode carries the constraint as a force instead (see
+            # accumulate_contact_force), so there is no position sweep here.
             self._tri_sdf_sweep(particle_q, body_q)
 
     def _project_sweep(

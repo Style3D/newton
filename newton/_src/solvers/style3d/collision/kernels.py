@@ -59,6 +59,12 @@ def particle_contact_stiffness(
     divergence and the branch is resolved identically for every thread.
     """
     if material_ke > 0.0:
+        # a shape whose constant was zeroed has the stock per-particle penalty
+        # switched OFF (e.g. the gripper, once the compliant triangle contact
+        # carries that load); the material branch must honour it too, or the two
+        # channels double-count.
+        if shape_contact_ke[shape_idx] <= 0.0:
+            return 0.0
         return particle_contact_ke[particle_idx]
     return shape_contact_ke[shape_idx]
 
@@ -1792,3 +1798,224 @@ def project_tri_sdf_kernel(
     if w[2] > 0.0:
         wp.atomic_add(delta, i2, n_world * (scale * w[2]))
         wp.atomic_add(delta_weight, i2, w[2])
+
+
+@wp.func
+def tri_sdf_closest(
+    a: wp.vec3,
+    b: wp.vec3,
+    c: wp.vec3,
+    sdf: wp.array(dtype=float),
+    base: int,
+    nx: int,
+    ny: int,
+    nz: int,
+    org: wp.vec3,
+    inv_voxel: float,
+    voxel: float,
+    bg: float,
+    refine_steps: int,
+):
+    """Triangle's minimum-SDF point: 3-vertex + centroid seeding, then projected
+    steepest descent in barycentric coordinates. Returns (w, best)."""
+    third = 1.0 / 3.0
+    w = wp.vec3(third, third, third)
+    p = a * third + b * third + c * third
+    best = sdf_grid_sample(sdf, base, nx, ny, nz, org, inv_voxel, bg, p)
+    da = sdf_grid_sample(sdf, base, nx, ny, nz, org, inv_voxel, bg, a)
+    if da < best:
+        best = da
+        w = wp.vec3(1.0, 0.0, 0.0)
+    db = sdf_grid_sample(sdf, base, nx, ny, nz, org, inv_voxel, bg, b)
+    if db < best:
+        best = db
+        w = wp.vec3(0.0, 1.0, 0.0)
+    dc = sdf_grid_sample(sdf, base, nx, ny, nz, org, inv_voxel, bg, c)
+    if dc < best:
+        best = dc
+        w = wp.vec3(0.0, 0.0, 1.0)
+    step = float(0.5)
+    for _s in range(refine_steps):
+        p = a * w[0] + b * w[1] + c * w[2]
+        g = sdf_grid_gradient(sdf, base, nx, ny, nz, org, inv_voxel, bg, voxel, p)
+        ga = wp.dot(g, a)
+        gb = wp.dot(g, b)
+        gc = wp.dot(g, c)
+        m = (ga + gb + gc) * third
+        gw = wp.vec3(ga - m, gb - m, gc - m)
+        gn = wp.length(gw)
+        if gn > 1.0e-12:
+            cand = w - gw * (step / gn)
+            cand = wp.vec3(wp.max(cand[0], 0.0), wp.max(cand[1], 0.0), wp.max(cand[2], 0.0))
+            s = cand[0] + cand[1] + cand[2]
+            if s > 1.0e-9:
+                cand = cand / s
+                pc = a * cand[0] + b * cand[1] + c * cand[2]
+                dcand = sdf_grid_sample(sdf, base, nx, ny, nz, org, inv_voxel, bg, pc)
+                if dcand < best:
+                    best = dcand
+                    w = cand
+        step = step * 0.5
+    return w, best
+
+
+@wp.kernel
+def eval_tri_sdf_contact_kernel(
+    pos: wp.array(dtype=wp.vec3),
+    tri_indices: wp.array2d(dtype=wp.int32),
+    tri_count: int,
+    tri_stiffness: wp.array(dtype=float),
+    sdf: wp.array(dtype=float),
+    sdf_base: wp.array(dtype=int),
+    sdf_nx: wp.array(dtype=int),
+    sdf_ny: wp.array(dtype=int),
+    sdf_nz: wp.array(dtype=int),
+    sdf_origin: wp.array(dtype=wp.vec3),
+    voxel: float,
+    bg: float,
+    slot_shape: wp.array(dtype=int),
+    shape_body: wp.array(dtype=int),
+    shape_transform: wp.array(dtype=wp.transform),
+    body_q: wp.array(dtype=wp.transform),
+    half_thickness: float,
+    max_depth: float,
+    refine_steps: int,
+    # outputs
+    forces: wp.array(dtype=wp.vec3),
+    hessians: wp.array(dtype=wp.mat33),
+):
+    """COMPLIANT triangle-level contact: a penalty force into the implicit solve.
+
+    The position-projection form of this constraint fights the penalty channel:
+    the projection removes exactly the overlap the penalty needs to produce a
+    force, so the reaction collapses when the collision radius is retired
+    (measured: 8.5 N at r=4 mm -> 0.8 N at r=0.5 mm, and raising ke does not
+    bring it back). Here the SAME constraint carries the force:
+
+        F = k_tri * (h - min_{x in tri} SDF)      along the SDF gradient
+        k_tri = E_t * A_tri / t0                  (material, not a constant)
+
+    so geometry and reaction come from one mechanism and nothing competes for the
+    overlap. The compression that produces the force is the cloth's own
+    transverse compliance, not an inflated collision radius; sum_tri A_tri is the
+    cloth's area whatever the tessellation, so the load is mesh independent.
+    """
+    tid = wp.tid()
+    slot = tid / tri_count
+    t = tid - slot * tri_count
+
+    shape = slot_shape[slot]
+    body = shape_body[shape]
+    X_ws = shape_transform[shape]
+    if body >= 0:
+        X_ws = body_q[body] * shape_transform[shape]
+    X_sw = wp.transform_inverse(X_ws)
+
+    i0 = tri_indices[t, 0]
+    i1 = tri_indices[t, 1]
+    i2 = tri_indices[t, 2]
+    a = wp.transform_point(X_sw, pos[i0])
+    b = wp.transform_point(X_sw, pos[i1])
+    c = wp.transform_point(X_sw, pos[i2])
+
+    base = sdf_base[slot]
+    nx = sdf_nx[slot]
+    ny = sdf_ny[slot]
+    nz = sdf_nz[slot]
+    org = sdf_origin[slot]
+    inv_voxel = 1.0 / voxel
+
+    w, best = tri_sdf_closest(a, b, c, sdf, base, nx, ny, nz, org, inv_voxel, voxel, bg, refine_steps)
+    if best >= half_thickness:
+        return
+
+    depth = wp.min(half_thickness - best, max_depth)
+    p = a * w[0] + b * w[1] + c * w[2]
+    n_local = sdf_grid_gradient(sdf, base, nx, ny, nz, org, inv_voxel, bg, voxel, p)
+    n_world = wp.transform_vector(X_ws, n_local)
+    k = tri_stiffness[t]
+    f = n_world * (k * depth)
+    nn = wp.outer(n_world, n_world) * k
+    if w[0] > 0.0:
+        wp.atomic_add(forces, i0, f * w[0])
+        wp.atomic_add(hessians, i0, nn * (w[0] * w[0]))
+    if w[1] > 0.0:
+        wp.atomic_add(forces, i1, f * w[1])
+        wp.atomic_add(hessians, i1, nn * (w[1] * w[1]))
+    if w[2] > 0.0:
+        wp.atomic_add(forces, i2, f * w[2])
+        wp.atomic_add(hessians, i2, nn * (w[2] * w[2]))
+
+
+@wp.kernel
+def accumulate_tri_sdf_reaction_kernel(
+    pos: wp.array(dtype=wp.vec3),
+    tri_indices: wp.array2d(dtype=wp.int32),
+    tri_count: int,
+    tri_stiffness: wp.array(dtype=float),
+    sdf: wp.array(dtype=float),
+    sdf_base: wp.array(dtype=int),
+    sdf_nx: wp.array(dtype=int),
+    sdf_ny: wp.array(dtype=int),
+    sdf_nz: wp.array(dtype=int),
+    sdf_origin: wp.array(dtype=wp.vec3),
+    voxel: float,
+    bg: float,
+    slot_shape: wp.array(dtype=int),
+    shape_body: wp.array(dtype=int),
+    shape_transform: wp.array(dtype=wp.transform),
+    body_q: wp.array(dtype=wp.transform),
+    body_com: wp.array(dtype=wp.vec3),
+    body_enabled: wp.array(dtype=int),
+    half_thickness: float,
+    max_depth: float,
+    refine_steps: int,
+    # outputs
+    body_f: wp.array(dtype=wp.spatial_vector),
+):
+    """Equal-and-opposite wrench of the compliant triangle contact onto the body.
+
+    Re-evaluates the same force at the converged positions and adds -F to the
+    rigid side at the contact point (world frame, referenced at the body COM),
+    matching accumulate_body_reaction_kernel's convention. This is the reaction
+    channel the position-projection form could not provide.
+    """
+    tid = wp.tid()
+    slot = tid / tri_count
+    t = tid - slot * tri_count
+
+    shape = slot_shape[slot]
+    body = shape_body[shape]
+    if body < 0:
+        return
+    if body_enabled[body] == 0:
+        return
+    X_ws = body_q[body] * shape_transform[shape]
+    X_sw = wp.transform_inverse(X_ws)
+
+    i0 = tri_indices[t, 0]
+    i1 = tri_indices[t, 1]
+    i2 = tri_indices[t, 2]
+    a = wp.transform_point(X_sw, pos[i0])
+    b = wp.transform_point(X_sw, pos[i1])
+    c = wp.transform_point(X_sw, pos[i2])
+
+    base = sdf_base[slot]
+    nx = sdf_nx[slot]
+    ny = sdf_ny[slot]
+    nz = sdf_nz[slot]
+    org = sdf_origin[slot]
+    inv_voxel = 1.0 / voxel
+
+    w, best = tri_sdf_closest(a, b, c, sdf, base, nx, ny, nz, org, inv_voxel, voxel, bg, refine_steps)
+    if best >= half_thickness:
+        return
+
+    depth = wp.min(half_thickness - best, max_depth)
+    p_local = a * w[0] + b * w[1] + c * w[2]
+    n_local = sdf_grid_gradient(sdf, base, nx, ny, nz, org, inv_voxel, bg, voxel, p_local)
+    n_world = wp.transform_vector(X_ws, n_local)
+    reaction = n_world * (-tri_stiffness[t] * depth)
+    p_world = wp.transform_point(X_ws, p_local)
+    com = wp.transform_point(body_q[body], body_com[body])
+    wp.atomic_add(body_f, body, wp.spatial_vector(reaction, wp.cross(p_world - com, reaction)))
