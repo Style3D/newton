@@ -6,7 +6,7 @@ import warp as wp
 from newton._src.geometry import ParticleFlags
 from newton._src.geometry.kernels import triangle_closest_point
 from newton._src.solvers.vbd.rigid_vbd_kernels import (
-    evaluate_body_particle_contact,
+    _eval_body_particle_contact_banded,
 )
 
 
@@ -67,6 +67,88 @@ def particle_contact_stiffness(
             return 0.0
         return particle_contact_ke[particle_idx]
     return shape_contact_ke[shape_idx]
+
+
+@wp.func
+def contact_band_radius(
+    particle_radius: wp.array[float],
+    shape_contact_offset: wp.array[float],
+    particle_idx: int,
+    shape_idx: int,
+):
+    """Range band of the particle-shape penalty ``f = ke * (band - d)`` [m].
+
+    E4.  The stock law reads ``particle_radius``, which is simultaneously the
+    geometric probe radius (how far the cloth's collision shell sticks out) and
+    the force band.  Retiring the shell to the cloth's physical half-thickness
+    therefore also collapses the normal load and, with it, mu*N -- measured
+    15.4 N (r=8 mm) -> 8.5 N (4 mm) -> 0.8 N (0.5 mm), doc GRIPPER-CONTACT 5(25).
+
+    ``shape_contact_offset[shape] > 0`` overrides the band for that shape only
+    (PhysX ``contact_offset``); the geometric stop stays whatever the geometry
+    channel says (``particle_radius`` for the vertex projection, the triangle
+    constraint's half-thickness for the SDF one).  The default array is all
+    zeros, so every shape takes the stock branch and the default path is
+    bit-identical.  The value is a per-shape scalar, so the branch is uniform
+    across the warp.
+    """
+    band = shape_contact_offset[shape_idx]
+    if band > 0.0:
+        return band
+    return particle_radius[particle_idx]
+
+
+@wp.func
+def evaluate_body_particle_contact_banded(
+    particle_pos: wp.vec3,
+    particle_prev_pos: wp.vec3,
+    contact_index: int,
+    body_particle_contact_ke: float,
+    body_particle_contact_kd: float,
+    friction_mu: float,
+    friction_epsilon: float,
+    contact_radius: float,
+    shape_material_mu: wp.array[float],
+    shape_body: wp.array[int],
+    body_q: wp.array[wp.transform],
+    body_q_prev: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_com: wp.array[wp.vec3],
+    contact_shape: wp.array[int],
+    contact_body_pos: wp.array[wp.vec3],
+    contact_body_vel: wp.array[wp.vec3],
+    contact_normal: wp.array[wp.vec3],
+    dt: float,
+):
+    """``evaluate_body_particle_contact`` with an explicit force band.
+
+    Same per-shape mu mixing; the band comes in as a scalar instead of being
+    read from ``particle_radius``.  Friction rides on ``f_n = ke * depth`` inside
+    the stock law, so widening the band widens the friction band with it -- N and
+    mu*N act over the same interval by construction.
+    """
+    shape_index = contact_shape[contact_index]
+    mixed_mu = wp.sqrt(friction_mu * shape_material_mu[shape_index])
+    return _eval_body_particle_contact_banded(
+        particle_pos,
+        particle_prev_pos,
+        contact_index,
+        body_particle_contact_ke,
+        body_particle_contact_kd,
+        mixed_mu,
+        friction_epsilon,
+        contact_radius,
+        shape_body,
+        body_q,
+        body_q_prev,
+        body_qd,
+        body_com,
+        contact_shape,
+        contact_body_pos,
+        contact_body_vel,
+        contact_normal,
+        dt,
+    )
 
 
 @wp.func
@@ -661,6 +743,8 @@ def eval_body_contact_kernel(
     friction_mu: float,
     friction_epsilon: float,
     particle_radius: wp.array[float],
+    # E4: per-shape penalty band (0 = use particle_radius, stock path)
+    shape_contact_offset: wp.array[float],
     soft_contact_particle: wp.array[int],
     contact_count: wp.array[int],
     contact_max: int,
@@ -748,8 +832,7 @@ def eval_body_contact_kernel(
             wp.atomic_add(forces, particle_idx, f_a)
             wp.atomic_add(hessians, particle_idx, h_a)
             return
-        body_contact_force, body_contact_hessian = evaluate_body_particle_contact(
-            particle_idx,
+        body_contact_force, body_contact_hessian = evaluate_body_particle_contact_banded(
             pos[particle_idx],
             pos_prev[particle_idx],
             t_id,
@@ -757,7 +840,7 @@ def eval_body_contact_kernel(
             soft_contact_kd,
             friction_mu,
             friction_epsilon,
-            particle_radius,
+            contact_band_radius(particle_radius, shape_contact_offset, particle_idx, shape_idx),
             shape_material_mu,
             shape_body,
             body_q,
@@ -786,6 +869,8 @@ def accumulate_body_reaction_kernel(
     friction_mu: float,
     friction_epsilon: float,
     particle_radius: wp.array[float],
+    # E4: per-shape penalty band (0 = use particle_radius, stock path)
+    shape_contact_offset: wp.array[float],
     soft_contact_particle: wp.array[int],
     contact_count: wp.array[int],
     contact_max: int,
@@ -900,8 +985,7 @@ def accumulate_body_reaction_kernel(
                 wp.spatial_vector(reaction_a, wp.cross(cp_a - com_a, reaction_a)),
             )
             return
-        body_contact_force, _hessian = evaluate_body_particle_contact(
-            particle_idx,
+        body_contact_force, _hessian = evaluate_body_particle_contact_banded(
             pos[particle_idx],
             pos_prev[particle_idx],
             t_id,
@@ -909,7 +993,7 @@ def accumulate_body_reaction_kernel(
             soft_contact_kd,
             friction_mu,
             friction_epsilon,
-            particle_radius,
+            contact_band_radius(particle_radius, shape_contact_offset, particle_idx, shape_idx),
             shape_material_mu,
             shape_body,
             body_q,

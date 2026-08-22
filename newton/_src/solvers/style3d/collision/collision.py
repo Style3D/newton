@@ -83,6 +83,12 @@ class Collision:
             dtype=float,
             device=self.model.device,
         )
+        # E4 per-shape penalty band (PhysX ``contact_offset``). Allocated always
+        # (fixed size, CUDA-graph safe); all zeros = every shape uses
+        # ``particle_radius`` as its band, i.e. the stock law, bit-identical.
+        self.shape_contact_offset = wp.zeros(
+            model.shape_count, dtype=float, device=self.model.device
+        )
         # Material-derived contact stiffness (default off: material_ke <= 0 keeps
         # the per-shape constant, and the kernel takes the same branch it always
         # did, so the default path is bit-identical).
@@ -134,6 +140,38 @@ class Collision:
         values = self.shape_contact_ke.numpy()
         values[np.asarray(shape_ids, dtype=np.int64)] = max(float(stiffness), 0.0)
         self.shape_contact_ke.assign(values)
+
+    def set_shape_contact_offset(self, shape_ids, offset: float):
+        """E4: decouple the penalty's range band from ``particle_radius``.
+
+        The stock law ``f = ke * (r - d)`` uses ``particle_radius`` both as the
+        geometric probe radius and as the band the force acts over, so taking the
+        radius down to the cloth's physical half-thickness collapses the normal
+        load and, with it, the Coulomb cone mu*N (measured 15.4 / 8.5 / 0.8 N at
+        r = 8 / 4 / 0.5 mm). Setting an offset on the gripper shapes gives those
+        shapes their own band -- normal load AND friction act over
+        ``h < d < offset`` -- while the geometric stop stays wherever the geometry
+        channel puts it.
+
+        Args:
+            shape_ids: shapes that get the band (typically the gripper fingers).
+            offset: band [m]. 0 restores the stock ``particle_radius`` behaviour.
+                It must be LARGER than the geometric stop of whatever holds the
+                cloth out (``particle_radius`` for the vertex projection, the
+                triangle constraint's half-thickness for the SDF one); an offset
+                at or below that stop leaves zero overlap, hence N = 0 and
+                mu*N = 0 -- a frictionless wall.
+
+        Note: the contact-generation margin must also cover the band, otherwise
+        no contact is even generated at ``d`` inside it (see
+        ``CollisionPipeline(soft_contact_margin=...)``: a pair is emitted while
+        ``d < margin + particle_radius``).
+        """
+        values = self.shape_contact_offset.numpy()
+        values[np.asarray(shape_ids, dtype=np.int64)] = max(float(offset), 0.0)
+        self.shape_contact_offset.assign(values)
+        print(f"[collision] contact offset band: shapes={list(np.asarray(shape_ids).ravel())} "
+              f"offset={float(offset) * 1000:.2f}mm", flush=True)
 
     def enable_rigid_feature_contacts(
         self,
@@ -510,6 +548,7 @@ class Collision:
                 self.model.soft_contact_mu,
                 self.friction_epsilon,
                 self.model.particle_radius,
+                self.shape_contact_offset,
                 contacts.soft_contact_particle,
                 contacts.soft_contact_count,
                 contacts.soft_contact_max,
@@ -713,6 +752,7 @@ class Collision:
                 self.model.soft_contact_mu,
                 self.friction_epsilon,
                 self.model.particle_radius,
+                self.shape_contact_offset,
                 contacts.soft_contact_particle,
                 contacts.soft_contact_count,
                 contacts.soft_contact_max,

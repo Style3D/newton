@@ -774,8 +774,7 @@ def _compute_body_particle_contact_force(
 
 
 @wp.func
-def _eval_body_particle_contact(
-    particle_index: int,
+def _eval_body_particle_contact_banded(
     particle_pos: wp.vec3,
     particle_prev_pos: wp.vec3,
     contact_index: int,
@@ -783,7 +782,7 @@ def _eval_body_particle_contact(
     body_particle_contact_kd: float,
     friction_mu: float,
     friction_epsilon: float,
-    particle_radius: wp.array[float],
+    contact_radius: float,
     shape_body: wp.array[int],
     body_q: wp.array[wp.transform],
     body_q_prev: wp.array[wp.transform],
@@ -795,8 +794,15 @@ def _eval_body_particle_contact(
     contact_normal: wp.array[wp.vec3],
     dt: float,
 ):
-    """Particle-rigid contact force/Hessian - resolves geometry from arrays then
-    delegates to ``_compute_body_particle_contact_force``.
+    """Particle-rigid contact force/Hessian with an EXPLICIT force band.
+
+    Identical to :func:`_eval_body_particle_contact` except that the length that
+    sets where the penalty starts is passed in as a scalar instead of being read
+    from ``particle_radius``.  The stock law overloads ``particle_radius`` with
+    two unrelated jobs -- the geometric probe radius AND the range band of
+    ``f = ke * (r - d)`` -- so shrinking the radius to the cloth's physical
+    half-thickness also collapses the normal load (and with it mu*N).  Splitting
+    the band out is the PhysX ``rest_offset`` / ``contact_offset`` layering.
 
     Prefer calling ``_compute_body_particle_contact_force`` directly when the
     caller already has the contact geometry and relative displacement.
@@ -813,7 +819,7 @@ def _eval_body_particle_contact(
     bx = wp.transform_point(X_wb, contact_body_pos[contact_index])
     n = contact_normal[contact_index]
 
-    penetration_depth = -(wp.dot(n, particle_pos - bx) - particle_radius[particle_index])
+    penetration_depth = -(wp.dot(n, particle_pos - bx) - contact_radius)
     if penetration_depth > 0.0:
         dx = particle_pos - particle_prev_pos
 
@@ -846,6 +852,56 @@ def _eval_body_particle_contact(
         )
     else:
         return wp.vec3(0.0), wp.mat33(0.0)
+
+
+@wp.func
+def _eval_body_particle_contact(
+    particle_index: int,
+    particle_pos: wp.vec3,
+    particle_prev_pos: wp.vec3,
+    contact_index: int,
+    body_particle_contact_ke: float,
+    body_particle_contact_kd: float,
+    friction_mu: float,
+    friction_epsilon: float,
+    particle_radius: wp.array[float],
+    shape_body: wp.array[int],
+    body_q: wp.array[wp.transform],
+    body_q_prev: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_com: wp.array[wp.vec3],
+    contact_shape: wp.array[int],
+    contact_body_pos: wp.array[wp.vec3],
+    contact_body_vel: wp.array[wp.vec3],
+    contact_normal: wp.array[wp.vec3],
+    dt: float,
+):
+    """Particle-rigid contact force/Hessian - resolves geometry from arrays then
+    delegates to ``_compute_body_particle_contact_force``.
+
+    Stock behaviour: the force band equals ``particle_radius``.  Thin wrapper
+    over :func:`_eval_body_particle_contact_banded`; the arithmetic is unchanged.
+    """
+    return _eval_body_particle_contact_banded(
+        particle_pos,
+        particle_prev_pos,
+        contact_index,
+        body_particle_contact_ke,
+        body_particle_contact_kd,
+        friction_mu,
+        friction_epsilon,
+        particle_radius[particle_index],
+        shape_body,
+        body_q,
+        body_q_prev,
+        body_qd,
+        body_com,
+        contact_shape,
+        contact_body_pos,
+        contact_body_vel,
+        contact_normal,
+        dt,
+    )
 
 
 @wp.func
