@@ -29,6 +29,7 @@ from newton._src.solvers.style3d.collision.kernels import (
     eval_tri_sdf_contact_kernel,
     accumulate_tri_sdf_reaction_kernel,
     solve_untangling_kernel,
+    solve_rigid_untangling_kernel,
     summarize_feature_query_kernel,
     transform_rigid_feature_vertices_kernel,
 )
@@ -96,6 +97,13 @@ class Collision:
         self.particle_contact_ke = wp.zeros(model.particle_count, dtype=float, device=self.model.device)
         self.feature_vertex_shape = None
         self.feature_edge_shape = None
+        # R2-3 rigid untangling (ICM against rigid triangles). ``None`` =
+        # disabled; nothing is allocated and no kernel is launched, so the
+        # default path is unchanged.
+        self.icm_tri_indices = None
+        self.icm_stiff_factor = 0.0
+        self.icm_thickness = 0.0
+        self.icm_query_radius = 0.0
         self.projection_iterations = 0
         self.projection_interleaved = False
         # E3 triangle-level SDF contact. ``None`` = disabled; nothing is
@@ -387,6 +395,168 @@ class Collision:
             device=self.model.device,
         )
 
+    def enable_rigid_untangling(
+        self,
+        shape_ids,
+        stiff_factor: float = 1.0,
+        thickness: float = -1.0,
+        query_radius: float = -1.0,
+        candidate_capacity: int = 32,
+    ) -> None:
+        """R2-3: enable Intersection Contour Minimisation against rigid shapes.
+
+        The stock cloth-cloth ICM (``stiff_ef``) is the only channel in this
+        solver that can recover from an ALREADY-tangled state; every other
+        channel is a proximity law that pushes a particle to the nearest
+        surface. For a blade thinner than the penetration depth "nearest" is the
+        wrong side, and an edge can thread a triangle with both its endpoints
+        outside the shell -- neither the penalty nor the projection sees it.
+        This gives the same contour-length gradient a rigid face side.
+
+        Args:
+            shape_ids: rigid shapes whose triangles take part (typically the
+                gripper fingers). An empty list leaves the channel disabled.
+            stiff_factor: multiplies the cloth's own PD diagonal, exactly like
+                ``stiff_ef`` does for cloth-cloth. 0 disables.
+            thickness: displacement scale [m]; the per-iteration correction is
+                ``2 * thickness``. Negative takes the cloth-cloth default
+                (``2 * self.radius``), which is the same number the stock ICM
+                uses, so "same law, rigid face" is the literal default.
+            query_radius: broad-phase padding [m]. Negative takes ``self.radius``.
+            candidate_capacity: max rigid triangles examined per cloth edge.
+
+        Default OFF: unless this is called, ``icm_tri_indices`` stays ``None``,
+        nothing is allocated and the kernel is never launched.
+        """
+        shape_ids = [int(s) for s in shape_ids]
+        if not shape_ids or float(stiff_factor) <= 0.0:
+            return
+        local_vertices = []
+        vertex_shapes = []
+        rigid_tris = []
+        shape_scale = self.model.shape_scale.numpy()
+        vertex_offset = 0
+        for shape in shape_ids:
+            source = self.model.shape_source[shape]
+            if source is None:
+                continue
+            vertices = np.asarray(source.vertices, dtype=np.float32)
+            faces = np.asarray(source.indices, dtype=np.int32).reshape(-1, 3)
+            if not len(vertices) or not len(faces):
+                continue
+            vertices = vertices * np.asarray(shape_scale[shape], dtype=np.float32)
+            local_vertices.append(vertices)
+            vertex_shapes.append(np.full(len(vertices), shape, dtype=np.int32))
+            rigid_tris.append(faces + vertex_offset)
+            vertex_offset += len(vertices)
+
+        if not rigid_tris:
+            return
+
+        device = self.model.device
+        self.icm_local_pos = wp.array(
+            np.concatenate(local_vertices), dtype=wp.vec3, device=device)
+        self.icm_vertex_shape = wp.array(
+            np.concatenate(vertex_shapes), dtype=int, device=device)
+        self.icm_tri_indices = wp.array(
+            np.concatenate(rigid_tris), dtype=int, device=device)
+        self.icm_pos = wp.zeros(len(self.icm_local_pos), dtype=wp.vec3, device=device)
+        self.icm_stiff_factor = float(stiff_factor)
+        self.icm_thickness = (
+            2.0 * self.radius if float(thickness) < 0.0 else float(thickness)
+        )
+        self.icm_query_radius = (
+            self.radius if float(query_radius) < 0.0 else float(query_radius)
+        )
+        capacity = max(4, int(candidate_capacity))
+        self.icm_capacity = capacity
+        self.icm_broad_phase = wp.zeros(
+            (capacity + 1, self.model.edge_count), dtype=int, device=device)
+        # [0] = cloth-edge x rigid-triangle intersections found this substep,
+        # [1] = broad-phase candidates handed to the kernel. Zeroed every substep.
+        self.icm_stats = wp.zeros(2, dtype=int, device=device)
+        # Never zeroed: episode totals, so "did the cloth EVER thread a finger"
+        # can be answered without a readback inside the substep loop.
+        self.icm_stats_total = wp.zeros(4, dtype=int, device=device)
+        self.icm_bvh = BvhTri(self.icm_tri_indices.shape[0], device)
+        # Seed the hierarchy from the rest pose; every substep only refits it.
+        # ``build`` allocates, so it must stay outside any graph capture.
+        wp.launch(
+            transform_rigid_feature_vertices_kernel,
+            dim=len(self.icm_local_pos),
+            inputs=[
+                self.icm_local_pos,
+                self.icm_vertex_shape,
+                self.model.shape_body,
+                self.model.shape_transform,
+                self.model.body_q,
+            ],
+            outputs=[self.icm_pos],
+            device=device,
+        )
+        self.icm_bvh.build(self.icm_pos, self.icm_tri_indices, self.icm_query_radius)
+        import atexit
+
+        def _report_icm_totals(stats=self.icm_stats_total):
+            # One line at process exit: crossings summed over the run and the
+            # worst single substep. Zero here means the channel had nothing to
+            # recover from, which is a result, not a silence.
+            try:
+                t = stats.numpy()
+                print(
+                    f"[collision] rigid untangling (ICM) totals: crossings={int(t[0])} "
+                    f"max_per_substep={int(t[1])} max_candidates={int(t[2])} "
+                    f"capacity_hits={int(t[3])}",
+                    flush=True,
+                )
+            except Exception:
+                pass
+
+        atexit.register(_report_icm_totals)
+        print(
+            "[collision] rigid untangling (ICM): "
+            f"{len(shape_ids)} shapes, {len(self.icm_local_pos)} vertices, "
+            f"{self.icm_tri_indices.shape[0]} triangles, "
+            f"stiff_factor={self.icm_stiff_factor:g}, "
+            f"thickness={self.icm_thickness * 1000.0:.2f}mm, "
+            f"query_radius={self.icm_query_radius * 1000.0:.2f}mm",
+            flush=True,
+        )
+
+    def _update_rigid_untangling_query(
+        self,
+        cloth_pos: wp.array[wp.vec3],
+        body_q: wp.array[wp.transform],
+    ) -> None:
+        """Refresh the per-cloth-edge candidate list of rigid triangles.
+
+        Same shape as the cloth-cloth EF broad phase (``frame_begin``): the
+        query boxes are the cloth EDGE bounds, the BVH holds the rigid
+        triangles. All in-place, so it is safe inside a graph capture.
+        """
+        wp.launch(
+            transform_rigid_feature_vertices_kernel,
+            dim=len(self.icm_local_pos),
+            inputs=[
+                self.icm_local_pos,
+                self.icm_vertex_shape,
+                self.model.shape_body,
+                self.model.shape_transform,
+                body_q,
+            ],
+            outputs=[self.icm_pos],
+            device=self.model.device,
+        )
+        self.icm_bvh.refit(self.icm_pos, self.icm_tri_indices, self.icm_query_radius)
+        self.edge_bvh.refit(cloth_pos, self.model.edge_indices, self.radius)
+        self.icm_bvh.aabb_vs_aabb(
+            self.edge_bvh.lower_bounds,
+            self.edge_bvh.upper_bounds,
+            self.icm_broad_phase,
+            self.icm_query_radius,
+            False,
+        )
+
     def rebuild_bvh(self, pos: wp.array[wp.vec3]):
         """
         Rebuild triangle and edge BVHs.
@@ -532,6 +702,47 @@ class Collision:
                     particle_stiff,
                 ],
                 outputs=[particle_forces, self.contact_hessian_diags],
+                device=self.model.device,
+            )
+
+        if self.icm_tri_indices is not None:
+            # R2-3 rigid untangling. Guarded on a Python attribute that is
+            # ``None`` unless ``enable_rigid_untangling`` ran, so on the default
+            # path nothing below is even queued -- and the branch is resolved at
+            # capture time, so the captured graph stays fixed.
+            icm_body_q = (
+                state_out.body_q
+                if self.integrate_with_external_rigid_solver
+                else state_in.body_q
+            )
+            if _iter == 0:
+                # The gripper pose is constant within a substep, so the
+                # candidate list only has to be rebuilt once per substep; the
+                # query box padding covers the cloth's motion across iterations.
+                self.icm_stats.zero_()
+                self._update_rigid_untangling_query(state_in.particle_q, icm_body_q)
+            wp.launch(
+                solve_rigid_untangling_kernel,
+                dim=self.model.edge_indices.shape[0],
+                inputs=[
+                    self.icm_thickness,
+                    self.icm_stiff_factor,
+                    state_in.particle_q,
+                    self.model.tri_indices,
+                    self.model.edge_indices,
+                    self.icm_pos,
+                    self.icm_tri_indices,
+                    self.icm_broad_phase,
+                    particle_stiff,
+                    self.icm_capacity,
+                    1 if _iter == 0 else 0,
+                ],
+                outputs=[
+                    particle_forces,
+                    self.contact_hessian_diags,
+                    self.icm_stats,
+                    self.icm_stats_total,
+                ],
                 device=self.model.device,
             )
 

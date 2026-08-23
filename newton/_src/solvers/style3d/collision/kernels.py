@@ -1316,6 +1316,173 @@ def solve_untangling_kernel(
 
 
 ########################################################################################################################
+#########################   Rigid untangling (ICM: cloth edge x rigid triangle)   ######################################
+########################################################################################################################
+# R2-3.  Volino's Intersection Contour Minimisation with the "face" side taken
+# from a RIGID mesh instead of the cloth.  ``solve_untangling_kernel`` above is
+# the stock cloth-cloth version; what it implements -- once the cloth is ALREADY
+# through, shrink the intersection contour until it is gone -- has no
+# counterpart for cloth-vs-gripper.  The penalty and projection channels only
+# know how to push a particle towards the NEAREST surface, which for a blade
+# thinner than the penetration depth is the wrong side half of the time, and
+# neither of them sees a particle that sits outside the shell while its EDGE
+# threads straight through the plate.
+#
+# Signed distance cannot express "which way is out" for a thin plate; the
+# intersection CONTOUR can, because its length is zero exactly when the cloth is
+# untangled.  The gradient of that length w.r.t. the crossing edge is Volino's
+# ``intersection_gradient_vector`` (already used above), so this kernel is the
+# same law with ``rigid_pos``/``rigid_tri_indices`` on the face side.
+#
+# Default OFF.  Nothing is allocated and no kernel is launched unless
+# ``Collision.enable_rigid_untangling`` has been called, so the default path
+# never reaches this code.
+#
+# Asymmetric by construction: the reaction on the rigid body is NOT accumulated.
+# ICM is a topological recovery force, not a contact force -- the normal load and
+# its reaction stay with the penalty channel (2.4).  Feeding a recovery impulse
+# back into MuJoCo would show up as a fake grip force.
+
+
+@wp.kernel
+def solve_rigid_untangling_kernel(
+    thickness: float,
+    stiff_factor: float,
+    pos: wp.array[wp.vec3],
+    tri_indices: wp.array2d[int],
+    edge_indices: wp.array2d[int],
+    rigid_pos: wp.array[wp.vec3],
+    rigid_tri_indices: wp.array2d[int],
+    broad_phase: wp.array2d[int],
+    static_diags: wp.array[float],
+    capacity: int,
+    count_stats: int,
+    # outputs
+    forces: wp.array[wp.vec3],
+    hessian_diags: wp.array[wp.mat33],
+    stats: wp.array[int],
+    stats_total: wp.array[int],
+):
+    eid = wp.tid()
+    edge = wp.vec4i(edge_indices[eid, 2], edge_indices[eid, 3], edge_indices[eid, 0], edge_indices[eid, 1])
+    v0 = pos[edge[0]]
+    v1 = pos[edge[1]]
+
+    # Skip invalid edge
+    len0 = wp.length(v0 - v1)
+    if len0 < 5e-4:
+        return
+
+    force0 = wp.vec3(0.0)
+    force1 = wp.vec3(0.0)
+    hess0 = wp.identity(n=3, dtype=float) * 0.0
+    hess1 = wp.identity(n=3, dtype=float) * 0.0
+    stiff_0 = (static_diags[edge[0]] + static_diags[edge[1]]) / 2.0
+    is_collided = wp.int32(0)
+    pair_count = wp.int32(0)
+
+    # Edge direction and the normals of the cloth faces sharing this edge.
+    E = wp.normalize(v0 - v1)
+    N2 = wp.vec3(0.0) if edge[2] < 0 else triangle_normal(v0, v1, pos[edge[2]])
+    N3 = wp.vec3(0.0) if edge[3] < 0 else triangle_normal(v0, v1, pos[edge[3]])
+
+    count = broad_phase[0, eid]
+    for i in range(count):
+        fid = broad_phase[i + 1, eid]
+        face = wp.vec3i(
+            rigid_tri_indices[fid, 0],
+            rigid_tri_indices[fid, 1],
+            rigid_tri_indices[fid, 2],
+        )
+        x0 = rigid_pos[face[0]]
+        x1 = rigid_pos[face[1]]
+        x2 = rigid_pos[face[2]]
+        face_normal = wp.cross(x1 - x0, x2 - x1)
+        normal_len = wp.length(face_normal)
+        if normal_len < 1e-8:
+            continue  # invalid triangle
+
+        face_normal = face_normal / normal_len
+        d1 = wp.dot(face_normal, v0 - x0)
+        d2 = wp.dot(face_normal, v1 - x0)
+        if d1 * d2 >= 0.0:
+            continue  # on same side
+
+        d1, d2 = wp.abs(d1), wp.abs(d2)
+        hit_point = (v0 * d2 + v1 * d1) / (d2 + d1)
+        bary_coord = triangle_barycentric(x0, x1, x2, hit_point)
+
+        if (bary_coord[0] < 1e-2) or (bary_coord[1] < 1e-2) or (bary_coord[2] < 1e-2):
+            continue  # hit outside
+
+        # Counted here, BEFORE the gradient can degenerate: this is the number
+        # the unit scene reports as "still tangled", so it must not depend on
+        # whether the force ends up non-zero.
+        pair_count += 1
+
+        G = wp.vec3(0.0)
+
+        if edge[2] >= 0:
+            R = wp.cross(face_normal, N2)
+            R = wp.vec3(0.0) if wp.length(R) < 1e-6 else wp.normalize(R)
+            if wp.dot(wp.cross(E, R), wp.cross(E, pos[edge[2]] - hit_point)) < 0.0:
+                R *= -1.0
+            G += intersection_gradient_vector(R, E, face_normal)
+
+        if edge[3] >= 0:
+            R = wp.cross(face_normal, N3)
+            R = wp.vec3(0.0) if wp.length(R) < 1e-6 else wp.normalize(R)
+            if wp.dot(wp.cross(E, R), wp.cross(E, pos[edge[3]] - hit_point)) < 0.0:
+                R *= -1.0
+            G += intersection_gradient_vector(R, E, face_normal)
+
+        if wp.length(G) < 1.0e-12:
+            continue
+        G = wp.normalize(G)
+
+        stiff = combine_contact_stiffness(stiff_factor, stiff_0, 0.0)
+        if stiff <= 0.0:
+            continue
+        disp = 2.0 * thickness
+
+        force = stiff * G * disp
+        hess = stiff * wp.outer(G, G)
+        edge_bary = wp.vec2(d2, d1) / (d1 + d2)
+
+        force0 += force * edge_bary[0]
+        force1 += force * edge_bary[1]
+        hess0 += hess * edge_bary[0] * edge_bary[0]
+        hess1 += hess * edge_bary[1] * edge_bary[1]
+
+        is_collided = 1
+
+    if count_stats != 0:
+        # [1] = broad-phase candidates seen. Without it a zero in [0] is
+        # ambiguous: "the kernel looked and found nothing tangled" and "the
+        # broad phase handed it nothing to look at" read the same.
+        wp.atomic_max(stats, 1, count)
+        # ``stats_total`` is never zeroed: [0] = crossings summed over the whole
+        # episode, [1] = the largest number in one substep, [2] = the largest
+        # candidate list, [3] = how many times a candidate list hit the cap.
+        # [2]/[3] separate "nothing was tangled" from "the broad phase truncated
+        # the list before the tangled triangle was reached" -- with a 20k-triangle
+        # finger those are very different failures and read the same in [0].
+        wp.atomic_max(stats_total, 1, pair_count)
+        wp.atomic_max(stats_total, 2, count)
+        if count >= capacity:
+            wp.atomic_add(stats_total, 3, 1)
+        if pair_count > 0:
+            wp.atomic_add(stats, 0, pair_count)
+            wp.atomic_add(stats_total, 0, pair_count)
+
+    if is_collided != 0:
+        wp.atomic_add(forces, edge[0], force0)
+        wp.atomic_add(forces, edge[1], force1)
+        wp.atomic_add(hessian_diags, edge[0], hess0)
+        wp.atomic_add(hessian_diags, edge[1], hess1)
+
+
+########################################################################################################################
 ##############################################    Contact projection    ###############################################
 ########################################################################################################################
 # Position-level non-penetration pass (PBD-style), run after the implicit
