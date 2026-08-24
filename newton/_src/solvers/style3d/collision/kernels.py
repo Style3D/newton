@@ -99,6 +99,38 @@ def contact_band_radius(
 
 
 @wp.func
+def contact_hardening_inv_dmax(
+    shape_hardening_eps: wp.array[float],
+    band: float,
+    shape_idx: int,
+):
+    """``1/d_max`` for the R9 hardening compression law, per shape.  0 = off.
+
+    ``p(eps) = k0*eps/(1 - eps/eps_max)`` (doc GRIPPER-CONTACT 2.2) needs a
+    reference length for the strain.  In THIS stack the compressible layer is
+    the penalty band itself: the geometric stop sits at the cloth's physical
+    half-thickness and everything between it and the band is the padding the
+    force law is allowed to squeeze.  So ``eps = d / band`` and
+
+        d_max = eps_max * band,    eps_max in (0, 1)
+
+    which makes the law self-scaling -- narrow the band and the asymptote
+    follows it -- and gives ONE dimensionless knob, as 2.2 asks for.
+
+    PER SHAPE, not global: the table is a half-space the cloth is meant to lie
+    on with a 0.5 mm band, and an asymptote at 0.5*eps_max mm there would turn
+    resting on the table into a wall.  The default array is all zeros, so every
+    shape returns 0.0 and the force law takes its stock linear branch --
+    bit-identical default path.  The value is a per-shape scalar, so the branch
+    is uniform across the warp and there is no host-side decision (CUDA graph).
+    """
+    eps_max = shape_hardening_eps[shape_idx]
+    if eps_max > 0.0 and band > 0.0:
+        return 1.0 / (eps_max * band)
+    return 0.0
+
+
+@wp.func
 def evaluate_body_particle_contact_banded(
     particle_pos: wp.vec3,
     particle_prev_pos: wp.vec3,
@@ -119,6 +151,7 @@ def evaluate_body_particle_contact_banded(
     contact_body_vel: wp.array[wp.vec3],
     contact_normal: wp.array[wp.vec3],
     dt: float,
+    hardening_inv_dmax: float,
 ):
     """``evaluate_body_particle_contact`` with an explicit force band.
 
@@ -148,6 +181,7 @@ def evaluate_body_particle_contact_banded(
         contact_body_vel,
         contact_normal,
         dt,
+        hardening_inv_dmax,
     )
 
 
@@ -745,6 +779,8 @@ def eval_body_contact_kernel(
     particle_radius: wp.array[float],
     # E4: per-shape penalty band (0 = use particle_radius, stock path)
     shape_contact_offset: wp.array[float],
+    # R9: per-shape hardening eps_max (0 = stock linear law, bit-identical)
+    shape_hardening_eps: wp.array[float],
     soft_contact_particle: wp.array[int],
     contact_count: wp.array[int],
     contact_max: int,
@@ -852,6 +888,11 @@ def eval_body_contact_kernel(
             contact_body_vel,
             contact_normal,
             dt,
+            contact_hardening_inv_dmax(
+                shape_hardening_eps,
+                contact_band_radius(particle_radius, shape_contact_offset, particle_idx, shape_idx),
+                shape_idx,
+            ),
         )
         wp.atomic_add(forces, particle_idx, body_contact_force)
         wp.atomic_add(hessians, particle_idx, body_contact_hessian)
@@ -871,6 +912,8 @@ def accumulate_body_reaction_kernel(
     particle_radius: wp.array[float],
     # E4: per-shape penalty band (0 = use particle_radius, stock path)
     shape_contact_offset: wp.array[float],
+    # R9: per-shape hardening eps_max (0 = stock linear law, bit-identical)
+    shape_hardening_eps: wp.array[float],
     soft_contact_particle: wp.array[int],
     contact_count: wp.array[int],
     contact_max: int,
@@ -1005,6 +1048,11 @@ def accumulate_body_reaction_kernel(
             contact_body_vel,
             contact_normal,
             dt,
+            contact_hardening_inv_dmax(
+                shape_hardening_eps,
+                contact_band_radius(particle_radius, shape_contact_offset, particle_idx, shape_idx),
+                shape_idx,
+            ),
         )
         reaction = -body_contact_force
         X_wb = body_q[body_idx]

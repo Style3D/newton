@@ -90,6 +90,13 @@ class Collision:
         self.shape_contact_offset = wp.zeros(
             model.shape_count, dtype=float, device=self.model.device
         )
+        # R9 per-shape hardening eps_max for the compression law
+        # ``f = ke*d/(1 - d/(eps_max*band))``. Allocated always (fixed size,
+        # CUDA-graph safe); all zeros = every shape keeps the stock LINEAR
+        # ``f = ke*d``, i.e. the default path is bit-identical.
+        self.shape_hardening_eps = wp.zeros(
+            model.shape_count, dtype=float, device=self.model.device
+        )
         # Material-derived contact stiffness (default off: material_ke <= 0 keeps
         # the per-shape constant, and the kernel takes the same branch it always
         # did, so the default path is bit-identical).
@@ -180,6 +187,41 @@ class Collision:
         self.shape_contact_offset.assign(values)
         print(f"[collision] contact offset band: shapes={list(np.asarray(shape_ids).ravel())} "
               f"offset={float(offset) * 1000:.2f}mm", flush=True)
+
+    def set_shape_contact_hardening(self, shape_ids, eps_max: float):
+        """R9: hardening compression law on the given shapes' penalty band.
+
+        The stock band law is LINEAR, ``f = ke*d``.  Its only handle on the
+        normal load is the band width, and a wide band is exactly what rakes
+        cloth into the jaw (doc GRIPPER-CONTACT R3(b): jaw stop = 1.60*offset,
+        gathered material = 169*offset + 1844 mm^2).  A fabric squeezed
+        transversely does not behave linearly -- it is soft, then hardens, then
+        hits an incompressible core.  Doc 2.2 writes that as
+        ``p(eps) = k0*eps/(1 - eps/eps_max)``.  Here the compressible layer is
+        the band, so ``eps = d/band``, ``k0 = ke*band`` and
+
+            f = ke * d / (1 - d/(eps_max*band))
+
+        which is the same two-parameter law with the stiffness kept in the units
+        the stack already uses.  Consequences: (i) penetration is bounded by
+        ``eps_max*band`` BY CONSTRUCTION, not by tuning; (ii) the load can be
+        raised without widening the band, which is the whole point -- narrow
+        band for a tight stop, hardening for the newtons; (iii) friction rides
+        on ``f_n`` downstream, so mu*N hardens with it.
+
+        Per shape on purpose.  The table's band is ``particle_radius`` (0.5 mm);
+        an asymptote there would make lying on the table a wall.
+
+        Args:
+            shape_ids: shapes that get the law (typically the gripper fingers).
+            eps_max: strain at the incompressible core, in (0, 1) as a fraction
+                of that shape's band.  <= 0 restores the stock linear law.
+        """
+        values = self.shape_hardening_eps.numpy()
+        values[np.asarray(shape_ids, dtype=np.int64)] = max(float(eps_max), 0.0)
+        self.shape_hardening_eps.assign(values)
+        print(f"[collision] contact hardening: shapes={list(np.asarray(shape_ids).ravel())} "
+              f"eps_max={float(eps_max):.3f} (d_max = eps_max x band)", flush=True)
 
     def enable_rigid_feature_contacts(
         self,
@@ -760,6 +802,7 @@ class Collision:
                 self.friction_epsilon,
                 self.model.particle_radius,
                 self.shape_contact_offset,
+                self.shape_hardening_eps,
                 contacts.soft_contact_particle,
                 contacts.soft_contact_count,
                 contacts.soft_contact_max,
@@ -964,6 +1007,7 @@ class Collision:
                 self.friction_epsilon,
                 self.model.particle_radius,
                 self.shape_contact_offset,
+                self.shape_hardening_eps,
                 contacts.soft_contact_particle,
                 contacts.soft_contact_count,
                 contacts.soft_contact_max,

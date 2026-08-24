@@ -739,6 +739,15 @@ def evaluate_rigid_contact_from_collision(
     )
 
 
+# R9: floor on the hardening denominator ``1 - eps/eps_max``.  The law is a
+# vertical asymptote by construction, so a particle driven past ``d_max`` would
+# otherwise produce inf/NaN.  0.05 caps the force multiplier at 20x and the
+# stiffness multiplier at 400x -- past that the contact is already a wall.  It
+# is a wp.constant, i.e. compiled in, so it costs nothing on the default path
+# and adds no host-side branch (CUDA-graph safe).
+HARDENING_DEN_MIN = wp.constant(0.05)
+
+
 @wp.func
 def _compute_body_particle_contact_force(
     penetration_depth: float,
@@ -749,16 +758,46 @@ def _compute_body_particle_contact_force(
     mu: float,
     friction_epsilon: float,
     dt: float,
+    hardening_inv_dmax: float,
 ):
     """Pure force law for body-particle contacts: normal penalty + damping + friction.
 
     All geometry and kinematics (penetration, normal, relative displacement) are
     resolved by the caller.  This function only computes the contact force and
     Hessian from those scalar/vector inputs.
+
+    R9 -- HARDENING COMPRESSION LAW (``hardening_inv_dmax > 0``).  The stock law
+    ``f = ke*d`` is linear, so the only way to raise the normal load is to widen
+    the band, and widening the band is what gathers cloth into the jaw.  A real
+    fabric instead stiffens as it is squeezed: soft, then hardening, then an
+    incompressible core.  Doc GRIPPER-CONTACT 2.2 writes that as
+
+        p(eps) = k0 * eps / (1 - eps/eps_max),      eps = d / t
+
+    with ``t`` the thickness of the compressible layer and ``eps_max`` the strain
+    at which the core is reached.  Substituting ``k0 = ke*t`` (so the two laws
+    agree to first order, ``p -> ke*d`` as ``eps -> 0``) and ``d_max =
+    eps_max*t``:
+
+        f_n = ke * d / (1 - d/d_max)                  [force]
+        df_n/dd = ke / (1 - d/d_max)^2                [Hessian scale, exact]
+
+    The caller passes ``1/d_max``; ``<= 0`` keeps the stock linear branch, which
+    is why the default path runs the three original statements untouched (the
+    hardened branch RECOMPUTES ``force``/``hessian`` rather than editing them).
+    The penetration bound ``d < d_max`` is by construction, not by tuning.
+    Friction rides on ``f_n`` downstream, so mu*N hardens with it automatically.
     """
     f_n = penetration_depth * ke
     force = n * f_n
     hessian = ke * wp.outer(n, n)
+
+    if hardening_inv_dmax > 0.0:
+        den = wp.max(1.0 - penetration_depth * hardening_inv_dmax, HARDENING_DEN_MIN)
+        inv_den = 1.0 / den
+        f_n = f_n * inv_den
+        force = n * f_n
+        hessian = (ke * inv_den * inv_den) * wp.outer(n, n)
 
     if wp.dot(n, relative_translation) < 0.0:
         damping_hessian = (kd / dt) * wp.outer(n, n)
@@ -793,6 +832,7 @@ def _eval_body_particle_contact_banded(
     contact_body_vel: wp.array[wp.vec3],
     contact_normal: wp.array[wp.vec3],
     dt: float,
+    hardening_inv_dmax: float,
 ):
     """Particle-rigid contact force/Hessian with an EXPLICIT force band.
 
@@ -849,6 +889,7 @@ def _eval_body_particle_contact_banded(
             friction_mu,
             friction_epsilon,
             dt,
+            hardening_inv_dmax,
         )
     else:
         return wp.vec3(0.0), wp.mat33(0.0)
@@ -901,6 +942,7 @@ def _eval_body_particle_contact(
         contact_body_vel,
         contact_normal,
         dt,
+        0.0,                    # R9: hardening off -- stock linear law
     )
 
 
@@ -2989,6 +3031,7 @@ def accumulate_body_particle_contacts_per_body(
             body_particle_contact_material_mu[contact_idx],
             friction_epsilon,
             dt,
+            0.0,                # R9: hardening off -- stock linear law
         )
 
         f_body = -force_on_particle
