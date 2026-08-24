@@ -28,6 +28,10 @@ from newton._src.solvers.style3d.collision.kernels import (
     project_tri_sdf_kernel,
     eval_tri_sdf_contact_kernel,
     accumulate_tri_sdf_reaction_kernel,
+    gjs_accumulate_kernel,
+    gjs_setup_kernel,
+    gjs_solve_kernel,
+    gjs_writeback_kernel,
     solve_untangling_kernel,
     solve_rigid_untangling_kernel,
     summarize_feature_query_kernel,
@@ -101,6 +105,10 @@ class Collision:
         # disabled; nothing is allocated and no kernel is launched, so the
         # default path is unchanged.
         self.icm_tri_indices = None
+        # R5-B gripper joint DOFs inside the cloth solve. ``None`` = disabled;
+        # nothing is allocated and no kernel is launched, so the default path
+        # is unchanged.
+        self.gjs_joint_coord = None
         self.icm_stiff_factor = 0.0
         self.icm_thickness = 0.0
         self.icm_query_radius = 0.0
@@ -523,6 +531,179 @@ class Collision:
             flush=True,
         )
 
+    def enable_gripper_joint_solve(
+        self,
+        joint_coord,
+        joint_dof,
+        child_bodies,
+        finger_shapes,
+        axis_child,
+        kp,
+        kd,
+        effort,
+        mass,
+        limit_lo,
+        limit_hi,
+    ) -> None:
+        """R5-B: make prismatic finger joint coordinates unknowns of the cloth solve.
+
+        Each nonlinear iteration solves, per finger, the closed-form 1D
+        minimisation of finger inertia + PD drive (effort-clamped) + the
+        finger's own contact penalty energy, and translates a solver-side copy
+        of that finger's body pose by the resulting ``dq`` — so the NEXT
+        iteration's contact forces and friction see the blade move within the
+        substep instead of one substep late (doc GRIPPER-CONTACT R5-B).
+
+        Args:
+            joint_coord: per-finger ``joint_q`` coordinate index.
+            joint_dof: per-finger ``joint_qd``/DOF index (PD target array index).
+            child_bodies: per-finger child body index (the moving blade).
+            finger_shapes: list of per-finger collision shape id lists.
+            axis_child: per-finger prismatic axis in the CHILD body frame
+                (``rot(X_cj) @ joint_axis``), so the world axis is just the
+                child rotation applied to it.
+            kp / kd / effort / mass: per-finger PD gains [N/m, N·s/m], actuator
+                effort rating [N] (<=0 = unclamped) and blade mass [kg].
+            limit_lo / limit_hi: per-finger joint limits [m].
+
+        Default OFF: unless this is called, ``gjs_joint_coord`` stays ``None``,
+        nothing is allocated and no kernel is launched.
+        """
+        device = self.model.device
+        n = len(joint_coord)
+        if n == 0:
+            return
+        slot_map = np.full(self.model.shape_count, -1, dtype=np.int32)
+        for slot, shapes in enumerate(finger_shapes):
+            for s in shapes:
+                slot_map[int(s)] = slot
+        self.gjs_joint_coord = wp.array(np.asarray(joint_coord, dtype=np.int32), dtype=int, device=device)
+        self.gjs_joint_dof = wp.array(np.asarray(joint_dof, dtype=np.int32), dtype=int, device=device)
+        self.gjs_body = wp.array(np.asarray(child_bodies, dtype=np.int32), dtype=int, device=device)
+        self.gjs_shape_slot = wp.array(slot_map, dtype=int, device=device)
+        self.gjs_axis_child = wp.array(np.asarray(axis_child, dtype=np.float32), dtype=wp.vec3, device=device)
+        self.gjs_kp = wp.array(np.asarray(kp, dtype=np.float32), dtype=float, device=device)
+        self.gjs_kd = wp.array(np.asarray(kd, dtype=np.float32), dtype=float, device=device)
+        self.gjs_effort = wp.array(np.asarray(effort, dtype=np.float32), dtype=float, device=device)
+        self.gjs_mass = wp.array(np.asarray(mass, dtype=np.float32), dtype=float, device=device)
+        self.gjs_limit_lo = wp.array(np.asarray(limit_lo, dtype=np.float32), dtype=float, device=device)
+        self.gjs_limit_hi = wp.array(np.asarray(limit_hi, dtype=np.float32), dtype=float, device=device)
+        self.gjs_q = wp.zeros(n, dtype=float, device=device)
+        self.gjs_q_prev = wp.zeros(n, dtype=float, device=device)
+        self.gjs_q_inertia = wp.zeros(n, dtype=float, device=device)
+        self.gjs_axis_w = wp.zeros(n, dtype=wp.vec3, device=device)
+        self.gjs_s1 = wp.zeros(n, dtype=float, device=device)
+        self.gjs_s2 = wp.zeros(n, dtype=float, device=device)
+        self.gjs_body_q = wp.zeros(self.model.body_count, dtype=wp.transform, device=device)
+        print(
+            "[collision] gripper joint DOFs in cloth solve (R5-B): "
+            f"{n} fingers, shapes/slot={[len(s) for s in finger_shapes]}, "
+            f"kp={list(np.asarray(kp, dtype=float))}, kd={list(np.asarray(kd, dtype=float))}, "
+            f"effort={list(np.asarray(effort, dtype=float))}, mass={list(np.asarray(mass, dtype=float))}",
+            flush=True,
+        )
+
+    def gripper_joint_begin(self, state_in: State, state_out: State) -> None:
+        """Per-substep init: seed jaw pose + DOF state from the rigid solver's step.
+
+        ``state_out.joint_q`` is the external rigid solver's integration of the
+        actuator-disabled finger joint (its actuator on these DOFs must be
+        disabled by the caller), i.e. the inertial prediction the 1D energy
+        needs. All launches are fixed-dimension, so this captures.
+        """
+        wp.copy(self.gjs_body_q, state_out.body_q)
+        wp.launch(
+            gjs_setup_kernel,
+            dim=len(self.gjs_joint_coord),
+            inputs=[
+                state_in.joint_q,
+                state_out.joint_q,
+                self.gjs_body_q,
+                self.gjs_joint_coord,
+                self.gjs_body,
+                self.gjs_axis_child,
+            ],
+            outputs=[self.gjs_q_prev, self.gjs_q_inertia, self.gjs_q, self.gjs_axis_w],
+            device=self.model.device,
+        )
+
+    def gripper_joint_iteration(
+        self,
+        dt: float,
+        state_out: State,
+        contacts: Contacts,
+        control,
+    ) -> None:
+        """One per-iteration finger DOF update (call after ``nonlinear_step``)."""
+        self.gjs_s1.zero_()
+        self.gjs_s2.zero_()
+        wp.launch(
+            gjs_accumulate_kernel,
+            dim=self.body_contact_max,
+            inputs=[
+                state_out.particle_q,
+                self.model.particle_radius,
+                self.shape_contact_offset,
+                contacts.soft_contact_particle,
+                contacts.soft_contact_count,
+                contacts.soft_contact_max,
+                self.shape_contact_ke,
+                self.material_ke,
+                self.particle_contact_ke,
+                contacts.soft_contact_shape,
+                contacts.soft_contact_body_pos,
+                contacts.soft_contact_normal,
+                self.gjs_shape_slot,
+                self.gjs_body,
+                self.gjs_axis_w,
+                self.gjs_body_q,
+            ],
+            outputs=[self.gjs_s1, self.gjs_s2],
+            device=self.model.device,
+        )
+        wp.launch(
+            gjs_solve_kernel,
+            dim=len(self.gjs_joint_coord),
+            inputs=[
+                dt,
+                self.gjs_q_prev,
+                self.gjs_q_inertia,
+                self.gjs_axis_w,
+                self.gjs_s1,
+                self.gjs_s2,
+                self.gjs_kp,
+                self.gjs_kd,
+                self.gjs_effort,
+                self.gjs_mass,
+                self.gjs_limit_lo,
+                self.gjs_limit_hi,
+                self.gjs_joint_dof,
+                self.gjs_body,
+                control.joint_target_q,
+                control.joint_target_qd,
+            ],
+            outputs=[self.gjs_q, self.gjs_body_q],
+            device=self.model.device,
+        )
+
+    def gripper_joint_finish(self, state_out: State, dt: float) -> None:
+        """Publish converged q / qd / blade pose into ``state_out`` (see kernel doc)."""
+        wp.launch(
+            gjs_writeback_kernel,
+            dim=len(self.gjs_joint_coord),
+            inputs=[
+                dt,
+                self.gjs_q,
+                self.gjs_q_prev,
+                self.gjs_joint_coord,
+                self.gjs_joint_dof,
+                self.gjs_body,
+                self.gjs_body_q,
+            ],
+            outputs=[state_out.joint_q, state_out.joint_qd, state_out.body_q],
+            device=self.model.device,
+        )
+
     def _update_rigid_untangling_query(
         self,
         cloth_pos: wp.array[wp.vec3],
@@ -746,6 +927,14 @@ class Collision:
                 device=self.model.device,
             )
 
+        # R5-B: when the finger DOF solve is on, the current body pose the
+        # contact law sees is the per-iteration jaw pose buffer (only the
+        # finger entries ever differ from state_out.body_q). Python-level
+        # branch, resolved at capture time; with the feature off the value is
+        # exactly the expression that was passed inline before.
+        body_q_cur = state_out.body_q if self.integrate_with_external_rigid_solver else state_in.body_q
+        if self.gjs_joint_coord is not None:
+            body_q_cur = self.gjs_body_q
         wp.launch(
             kernel=eval_body_contact_kernel,
             dim=self.body_contact_max,
@@ -768,7 +957,7 @@ class Collision:
                 self.particle_contact_ke,
                 self.model.shape_material_mu,
                 self.model.shape_body,
-                state_out.body_q if self.integrate_with_external_rigid_solver else state_in.body_q,
+                body_q_cur,
                 state_in.body_q if self.integrate_with_external_rigid_solver else None,
                 self.model.body_qd,
                 self.model.body_com,

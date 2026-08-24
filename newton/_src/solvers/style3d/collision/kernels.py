@@ -2270,3 +2270,208 @@ def accumulate_tri_sdf_reaction_kernel(
     p_world = wp.transform_point(X_ws, p_local)
     com = wp.transform_point(body_q[body], body_com[body])
     wp.atomic_add(body_f, body, wp.spatial_vector(reaction, wp.cross(p_world - com, reaction)))
+
+
+########################################################################################################################
+###################################    R5-B gripper joint DOF inside the cloth solve    ################################
+########################################################################################################################
+# The co-sim couples cloth and gripper by exchanging forces one substep late:
+# during the cloth's 20 nonlinear iterations the finger is an infinite-mass
+# collider, and the reaction it should have felt arrives at MuJoCo only on the
+# NEXT substep (doc GRIPPER-CONTACT 2.4). These kernels make the prismatic
+# finger coordinates unknowns of the cloth's implicit solve instead: each
+# iteration solves, per finger, the 1D minimisation
+#
+#   E(q) = 1/2 (m/dt^2) (q - q_inertia)^2            (finger inertia)
+#        + 1/2 kp (q - q_cmd)^2                       (PD spring, effort-clamped)
+#        + 1/2 (kd/dt) (q - q_prev - qd_des dt)^2     (PD damping)
+#        + sum_c 1/2 ke depth_c(q)^2                  (this finger's contacts)
+#
+# with depth_c(q) = band - dot(n, x_p - bx(q)) linear in q: a prismatic child
+# translates rigidly along the joint's world axis, so d(bx)/dq = a_w and
+# d(depth)/dq = dot(n, a_w). The closed form needs only the two contact sums
+# S1 = sum ke depth g and S2 = sum ke g^2 (g = dot(n, a_w)), reduced with
+# fixed-dimension atomics, so the whole thing is CUDA-graph capturable.
+# Everything is guarded by ``Collision.gjs_joint_coord is None`` at the Python
+# level: the default path launches none of this.
+
+
+@wp.kernel
+def gjs_setup_kernel(
+    joint_q_prev: wp.array[float],     # state_in.joint_q  (substep start)
+    joint_q_pred: wp.array[float],     # state_out.joint_q (rigid solver's passive prediction)
+    body_q: wp.array[wp.transform],    # gjs_body_q, already copied from state_out
+    gjs_coord: wp.array[int],
+    gjs_body: wp.array[int],
+    gjs_axis_child: wp.array[wp.vec3],
+    # outputs
+    gjs_q_prev: wp.array[float],
+    gjs_q_inertia: wp.array[float],
+    gjs_q: wp.array[float],
+    gjs_axis_w: wp.array[wp.vec3],
+):
+    """Per-substep initialisation of the finger DOF solve.
+
+    ``q_inertia`` is taken from the external rigid solver's own integration of
+    the (actuator-disabled) finger joint, so it already contains the joint's
+    passive dynamics (armature, joint damping) and the momentum carried over
+    from the previous substep's write-back. The world joint axis is the child
+    rotation applied to the child-frame axis (constant within a substep: a
+    prismatic joint never rotates its child).
+    """
+    i = wp.tid()
+    c = gjs_coord[i]
+    gjs_q_prev[i] = joint_q_prev[c]
+    gjs_q_inertia[i] = joint_q_pred[c]
+    gjs_q[i] = joint_q_pred[c]
+    gjs_axis_w[i] = wp.quat_rotate(wp.transform_get_rotation(body_q[gjs_body[i]]), gjs_axis_child[i])
+
+
+@wp.kernel
+def gjs_accumulate_kernel(
+    pos: wp.array[wp.vec3],            # current iterate (state_out.particle_q)
+    particle_radius: wp.array[float],
+    shape_contact_offset: wp.array[float],
+    soft_contact_particle: wp.array[int],
+    contact_count: wp.array[int],
+    contact_max: int,
+    shape_contact_ke: wp.array[float],
+    material_ke: float,
+    particle_contact_ke: wp.array[float],
+    contact_shape: wp.array[int],
+    contact_body_pos: wp.array[wp.vec3],
+    contact_normal: wp.array[wp.vec3],
+    gjs_shape_slot: wp.array[int],     # shape -> finger slot, -1 = not a finger
+    gjs_body: wp.array[int],
+    gjs_axis_w: wp.array[wp.vec3],
+    body_q: wp.array[wp.transform],    # gjs_body_q (jaw pose of THIS iteration)
+    # outputs
+    gjs_s1: wp.array[float],           # sum ke * depth * g
+    gjs_s2: wp.array[float],           # sum ke * g^2
+):
+    """Reduce each finger's contact terms for the 1D closed form.
+
+    Same band and stiffness as the force law (:func:`contact_band_radius`,
+    :func:`particle_contact_stiffness`), evaluated at the current particle
+    iterate against the current per-iteration jaw pose. Damping and friction are
+    left out of the 1D energy on purpose: the normal penalty is what balances
+    the PD drive, and the heavy kd/dt term in the denominator already
+    over-damps the DOF update.
+    """
+    t_id = wp.tid()
+    if t_id >= wp.min(contact_max, contact_count[0]):
+        return
+    shape_idx = contact_shape[t_id]
+    slot = gjs_shape_slot[shape_idx]
+    if slot < 0:
+        return
+    particle_idx = soft_contact_particle[t_id]
+    bx = wp.transform_point(body_q[gjs_body[slot]], contact_body_pos[t_id])
+    n = contact_normal[t_id]
+    band = contact_band_radius(particle_radius, shape_contact_offset, particle_idx, shape_idx)
+    depth = band - wp.dot(n, pos[particle_idx] - bx)
+    if depth <= 0.0:
+        return
+    ke = particle_contact_stiffness(material_ke, particle_contact_ke, shape_contact_ke, particle_idx, shape_idx)
+    g = wp.dot(n, gjs_axis_w[slot])
+    wp.atomic_add(gjs_s1, slot, ke * depth * g)
+    wp.atomic_add(gjs_s2, slot, ke * g * g)
+
+
+@wp.kernel
+def gjs_solve_kernel(
+    dt: float,
+    gjs_q_prev: wp.array[float],
+    gjs_q_inertia: wp.array[float],
+    gjs_axis_w: wp.array[wp.vec3],
+    gjs_s1: wp.array[float],
+    gjs_s2: wp.array[float],
+    gjs_kp: wp.array[float],
+    gjs_kd: wp.array[float],
+    gjs_effort: wp.array[float],       # <= 0 disables the clamp
+    gjs_mass: wp.array[float],
+    gjs_limit_lo: wp.array[float],
+    gjs_limit_hi: wp.array[float],
+    gjs_dof: wp.array[int],
+    gjs_body: wp.array[int],
+    joint_target_q: wp.array[float],
+    joint_target_qd: wp.array[float],
+    # outputs (in/out)
+    gjs_q: wp.array[float],
+    body_q: wp.array[wp.transform],    # gjs_body_q, finger entries advanced by dq
+):
+    """Closed-form 1D Newton step of E(q) per finger, then move the blade.
+
+    Stationarity of the quadratic model around the current iterate q0:
+
+        dq = [ (m/dt^2)(q_in - q0) + F_pd(q0) - S1 ] /
+             [  m/dt^2 + kp + kd/dt + S2 ]
+
+    with F_pd(q0) = kp (q_cmd - q0) + kd (qd_des - (q0 - q_prev)/dt). If the PD
+    force at the solution exceeds the effort rating (MJCF ``actfrcrange``,
+    Config ``gripper_effort``), the spring is replaced by the constant clamped
+    force and the step is re-solved without the PD stiffness — the same
+    saturation MuJoCo's actuator clamp produces. The result is clamped to the
+    joint limits. Distinct fingers write distinct body entries, so the pose
+    update needs no atomics.
+    """
+    i = wp.tid()
+    q0 = gjs_q[i]
+    m_dt2 = gjs_mass[i] / (dt * dt)
+    kp = gjs_kp[i]
+    kd_dt = gjs_kd[i] / dt
+    q_cmd = joint_target_q[gjs_dof[i]]
+    qd_des = joint_target_qd[gjs_dof[i]]
+    qd0 = (q0 - gjs_q_prev[i]) / dt
+
+    f_pd = kp * (q_cmd - q0) + gjs_kd[i] * (qd_des - qd0)
+    num = m_dt2 * (gjs_q_inertia[i] - q0) + f_pd - gjs_s1[i]
+    den = m_dt2 + kp + kd_dt + gjs_s2[i]
+    dq = num / den
+
+    eff = gjs_effort[i]
+    if eff > 0.0:
+        q1 = q0 + dq
+        f_at = kp * (q_cmd - q1) + gjs_kd[i] * (qd_des - (q1 - gjs_q_prev[i]) / dt)
+        if wp.abs(f_at) > eff:
+            f_c = eff * wp.sign(f_at)
+            num = m_dt2 * (gjs_q_inertia[i] - q0) + f_c - gjs_s1[i]
+            den = m_dt2 + gjs_s2[i]
+            dq = num / den
+
+    q_new = wp.clamp(q0 + dq, gjs_limit_lo[i], gjs_limit_hi[i])
+    gjs_q[i] = q_new
+
+    b = gjs_body[i]
+    X = body_q[b]
+    body_q[b] = wp.transform(
+        wp.transform_get_translation(X) + gjs_axis_w[i] * (q_new - q0),
+        wp.transform_get_rotation(X),
+    )
+
+
+@wp.kernel
+def gjs_writeback_kernel(
+    dt: float,
+    gjs_q: wp.array[float],
+    gjs_q_prev: wp.array[float],
+    gjs_coord: wp.array[int],
+    gjs_dof: wp.array[int],
+    gjs_body: wp.array[int],
+    gjs_body_q: wp.array[wp.transform],
+    # outputs
+    joint_q: wp.array[float],
+    joint_qd: wp.array[float],
+    body_q: wp.array[wp.transform],
+):
+    """Publish the converged finger state back into the Newton state.
+
+    ``joint_q``/``joint_qd`` are what the external rigid solver's per-step
+    ``_update_mjc_data`` sync reads next substep (its own actuator on these DOFs
+    is disabled by the caller), and ``body_q`` is what the next substep's
+    contact generation sees.
+    """
+    i = wp.tid()
+    joint_q[gjs_coord[i]] = gjs_q[i]
+    joint_qd[gjs_dof[i]] = (gjs_q[i] - gjs_q_prev[i]) / dt
+    body_q[gjs_body[i]] = gjs_body_q[gjs_body[i]]

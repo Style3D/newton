@@ -237,6 +237,11 @@ class SolverStyle3D(SolverBase):
         """
         if self.collision is not None:
             self.collision.frame_begin(state_in.particle_q, state_in.particle_qd, dt)
+            if self.collision.gjs_joint_coord is not None:
+                # R5-B: seed the per-substep finger DOF solve from the external
+                # rigid solver's (actuator-disabled) integration. Python-level
+                # guard, resolved at capture time; default path launches nothing.
+                self.collision.gripper_joint_begin(state_in, state_out)
         self._translation_preconditioner_dt = dt
         self._translation_contact_hessian_diags = self._translation_zero_contact_hessian
 
@@ -418,6 +423,11 @@ class SolverStyle3D(SolverBase):
                     dt=dt,
                     body_q_prev=state_in.body_q if self.collision.integrate_with_external_rigid_solver else None,
                 )
+                if self.collision.gjs_joint_coord is not None:
+                    # R5-B: per-iteration closed-form finger DOF update against
+                    # the fresh particle iterate; the next iteration's contact
+                    # force then sees the blade at the updated pose.
+                    self.collision.gripper_joint_iteration(dt, state_out, contacts, control)
 
             state_in.particle_q.assign(state_out.particle_q)
 
@@ -431,6 +441,10 @@ class SolverStyle3D(SolverBase):
 
         if self.collision is not None:
             self.collision.frame_end(state_out.particle_q, state_out.particle_qd, dt)
+            if self.collision.gjs_joint_coord is not None:
+                # R5-B: publish the converged finger q / qd / blade pose so the
+                # external rigid solver's next-substep state sync adopts them.
+                self.collision.gripper_joint_finish(state_out, dt)
 
     def rebuild_bvh(self, state: State):
         if self.collision is not None:
