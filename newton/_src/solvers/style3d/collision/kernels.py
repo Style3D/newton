@@ -6,8 +6,80 @@ import warp as wp
 from newton._src.geometry import ParticleFlags
 from newton._src.geometry.kernels import triangle_closest_point
 from newton._src.solvers.vbd.rigid_vbd_kernels import (
+    HARDENING_DEN_MIN,
     _eval_body_particle_contact_banded,
+    compute_projected_isotropic_friction,
 )
+
+# R13f: Coulomb friction on the COMPLIANT tri-SDF channel.  The compliant SDF
+# force law is purely normal (F = k_tri*(h-SDF) along grad SDF), and the 1b/1c
+# stacks zero the vertex penalty channel (shape_contact_ke -> 0) where all of
+# the R2-R11 tangential physics lives, so those stacks run frictionless at the
+# gripper.  This flag ports the SAME law the vertex channel uses -- the
+# IPC-mollified isotropic Coulomb force of
+# ``compute_projected_isotropic_friction(mu, f_n, n, u_rel, eps_u)`` with the
+# same ``mu = sqrt(soft_contact_mu * shape_material_mu[shape])`` mixing -- onto
+# the triangle contact point.  Nothing new is invented.
+# 0 = OFF and the kernels run the pre-R13f statements untouched (bit-identical).
+_R13F_SDF_FRICTION = wp.constant(int(__import__("os").environ.get("R13F_SDF_FRICTION", "0")))
+
+# R13g: LUMPED Hessian for the compliant tri-SDF contact.  The triangle contact
+# is one constraint acting at a barycentric point, so its exact 9x9 Hessian is
+# the rank-1 block ``k (w (x) n)(w (x) n)^T``; its diagonal blocks are
+# ``w_i^2 k nn``.  The solver stores contacts as a PER-PARTICLE diagonal only
+# (``contact_hessian_diags`` feeds both the Jacobi preconditioner AND
+# ``hessian_multiply``), so the off-diagonal ``w_i w_j`` coupling is dropped and
+# the operator under-counts the stiffness of the mode that actually carries the
+# load -- the three vertices moving together along n.  That mode's true
+# stiffness is ``k (sum_i w_i)^2 = k``; the stored diagonal gives ``k sum_i
+# w_i^2``, which is 3x too soft at the centroid.  Row-sum (mass-lumping)
+# consistency uses ``sum_j H_ij = k w_i nn`` instead, which reproduces the
+# collective stiffness exactly and never under-counts.  Measured effect: with
+# w_i^2 the normal solve stalls at a permanent residual (sum of rhs_z = +0.145 x
+# cloth weight at E_t=6500 Pa, invariant under 20/40/60 nonlinear and 10/40
+# linear iterations), so the cloth sits 14.5% deeper than equilibrium and every
+# f(depth) rides on an inflated normal load.  0 = OFF, statements untouched.
+_R13G_SDF_HESS = wp.constant(int(__import__("os").environ.get("R13G_SDF_HESS", "0")))
+
+# R13g: FREEZE the compliant tri-SDF contact point inside a substep.
+# ``tri_sdf_closest`` re-runs a DISCRETE minimum search (centroid + 3 vertex
+# seeds, then projected steepest descent) on every Newton iteration, and the
+# whole normal load of the triangle is applied at whichever single point wins.
+# On a nominally flat contact the winner is decided by micro-noise, so the load
+# is winner-take-all: a vertex that wins all six of its triangles receives ~34x
+# its own weight, gets pushed off, and the next iteration hands the load to a
+# different vertex.  The Newton iteration therefore never converges -- measured
+# per-particle |residual| stays at 6.3e-5 N and |dx| at 7e-8 m for 200
+# iterations -- and because ``best`` is a MIN over the re-drawn candidates the
+# stall is biased deep: the contact delivers 1.145x the cloth weight at rest and
+# 2.4-3.3x once the cloth slides.  Every f(depth) rides on that, friction
+# (mu*f_n) included.
+# The remedy is the treatment this file already uses for every other channel --
+# resolve the contact geometry ONCE per substep and hold it for the iterations
+# (collision.py uses ``_iter == 0`` for the rigid feature queries, the friction
+# anchor advance and the untangling candidate list).  The force law is
+# untouched: same k_tri*(h - SDF) along grad SDF, same point, only the
+# barycentric location stops being re-searched mid-solve.
+# 0 = OFF: ``tri_sdf_closest`` runs exactly as before, bit-identical.
+_R13G_SDF_FREEZE = wp.constant(int(__import__("os").environ.get("R13G_SDF_FREEZE", "0")))
+
+# R16-A2': EXACT query backend for the compliant tri-SDF contact.
+# The contact geometry is queried from a 1 mm voxel bake read back with
+# trilinear interpolation.  The measured working regime is ENTIRELY SUB-VOXEL --
+# the cloth's median penetration into the blade is 0.193 mm, i.e. a fifth of a
+# cell -- and trilinear interpolation rounds every edge and corner over a
+# cell-sized neighbourhood.  That is the textbook signature the root-cause chain
+# read off the field: the force core under-states the intrusion by 3.4-4x and
+# mis-points the gradient by 1.9x, and it does so exactly where the cloth enters
+# (side walls 91.3% + blade tip 6.6%, the edge-dense regions), while missing
+# nothing (0/240000 misses).  So the defect is in the QUERY, not in the penalty
+# formulation.  This backend evaluates distance and gradient against the shape's
+# own triangle mesh -- the same closed mesh the bake itself queried -- so both
+# are exact to machine precision, with no grid, no interpolation and no
+# discretisation memory.  The force law, the hardening law, the friction law and
+# the search algorithm are untouched: ONLY the field evaluation changes.
+# 0 = OFF: the voxel statements run exactly as before.
+_R16_SDF_EXACT = wp.constant(int(__import__("os").environ.get("R16_SDF_EXACT", "0")))
 
 
 @wp.func
@@ -101,32 +173,45 @@ def contact_band_radius(
 @wp.func
 def contact_hardening_inv_dmax(
     shape_hardening_eps: wp.array[float],
-    band: float,
+    t0: float,
     shape_idx: int,
 ):
-    """``1/d_max`` for the R9 hardening compression law, per shape.  0 = off.
+    """``1/d_max`` for the hardening compression law, per shape.  0 = off.
 
-    ``p(eps) = k0*eps/(1 - eps/eps_max)`` (doc GRIPPER-CONTACT 2.2) needs a
-    reference length for the strain.  In THIS stack the compressible layer is
-    the penalty band itself: the geometric stop sits at the cloth's physical
-    half-thickness and everything between it and the band is the padding the
-    force law is allowed to squeeze.  So ``eps = d / band`` and
+    ``p(eps) = k0*eps/(1 - eps/eps_max)`` (doc GRIPPER-CONTACT 2.2) is a
+    TRANSVERSE COMPRESSION law for the fabric, so its reference length is the
+    cloth's own thickness ``t0``, not the penalty band:
 
-        d_max = eps_max * band,    eps_max in (0, 1)
+        eps = delta / t0,   d_max = eps_max * t0,   eps_max in (0, 1)
 
-    which makes the law self-scaling -- narrow the band and the asymptote
-    follows it -- and gives ONE dimensionless knob, as 2.2 asks for.
+    R13 (2026-08-28) corrects R9 here.  R9 used the band as the compressible
+    layer, on the stated premise that "the geometric stop sits at the cloth's
+    physical half-thickness and everything between it and the band is the
+    padding the force law is allowed to squeeze".  R12 measured that premise
+    false: with a 6 mm band the closest cloth particle during a HOLD sits
+    2.02 mm from the blade and every one of the 112 loaded contacts lies
+    3.75-6.00 mm out, i.e. the gripper never reaches the cloth at all and the
+    real compression is zero.  Referencing the strain to the band therefore
+    put the operating point at 39% of d_max (hardening factor 1.65, law
+    effectively dormant) while a 5.26 mm "graze" contact sat PAST d_max and
+    took the 20x cap.  Both are artefacts of the wrong reference length.
+
+    ``t0`` comes from the cloth itself (2 x particle_radius; the asset meta
+    carries ``thickness: 1e-3`` for blue_tshirt_9k), so the law is mesh- and
+    band-independent and the asymptote lands where de Jong's incompressible
+    core does: single-layer compression <= 0.32*t0, two layers in the jaw
+    <= 0.6 mm (archive cloth-pinch-contact-research.md).
 
     PER SHAPE, not global: the table is a half-space the cloth is meant to lie
-    on with a 0.5 mm band, and an asymptote at 0.5*eps_max mm there would turn
-    resting on the table into a wall.  The default array is all zeros, so every
-    shape returns 0.0 and the force law takes its stock linear branch --
-    bit-identical default path.  The value is a per-shape scalar, so the branch
-    is uniform across the warp and there is no host-side decision (CUDA graph).
+    on, and an asymptote there would turn resting on the table into a wall.
+    The default array is all zeros, so every shape returns 0.0 and the force
+    law takes its stock linear branch -- bit-identical default path.  The value
+    is a per-shape scalar, so the branch is uniform across the warp and there
+    is no host-side decision (CUDA graph safe).
     """
     eps_max = shape_hardening_eps[shape_idx]
-    if eps_max > 0.0 and band > 0.0:
-        return 1.0 / (eps_max * band)
+    if eps_max > 0.0 and t0 > 0.0:
+        return 1.0 / (eps_max * t0)
     return 0.0
 
 
@@ -890,7 +975,7 @@ def eval_body_contact_kernel(
             dt,
             contact_hardening_inv_dmax(
                 shape_hardening_eps,
-                contact_band_radius(particle_radius, shape_contact_offset, particle_idx, shape_idx),
+                2.0 * particle_radius[particle_idx],   # R13: t0 = cloth thickness
                 shape_idx,
             ),
         )
@@ -1050,7 +1135,7 @@ def accumulate_body_reaction_kernel(
             dt,
             contact_hardening_inv_dmax(
                 shape_hardening_eps,
-                contact_band_radius(particle_radius, shape_contact_offset, particle_idx, shape_idx),
+                2.0 * particle_radius[particle_idx],   # R13: t0 = cloth thickness
                 shape_idx,
             ),
         )
@@ -2158,6 +2243,110 @@ def tri_sdf_closest(
     return w, best
 
 
+@wp.func
+def sdf_mesh_query(mesh: wp.uint64, max_dist: float, bg: float, p: wp.vec3):
+    """Exact signed distance and unit gradient of a closed shape mesh at ``p``.
+
+    Returns ``(d, n)``: ``d`` negative inside the solid, ``n`` the unit gradient
+    of that field (the outward direction).  Both are exact -- the closest point
+    on the mesh is found by the BVH and the distance is a length, so there is no
+    interpolation and therefore none of the edge rounding a voxel field carries.
+    ``d = bg`` when the nearest surface is beyond ``max_dist`` (the caller's
+    rejection radius), which is the same sentinel the grid path returns off-grid.
+    """
+    d = bg
+    n = wp.vec3(0.0, 0.0, 1.0)
+    q = wp.mesh_query_point_sign_normal(mesh, p, max_dist)
+    if q.result:
+        cp = wp.mesh_eval_position(mesh, q.face, q.u, q.v)
+        delta = p - cp
+        ln = wp.length(delta)
+        if ln < 1.0e-9:
+            # exactly on the surface: the distance gradient is the face normal
+            d = 0.0
+            n = wp.mesh_eval_face_normal(mesh, q.face)
+        else:
+            d = ln * q.sign
+            n = delta * (q.sign / ln)
+    return d, n
+
+
+@wp.func
+def tri_sdf_closest_mesh(
+    a: wp.vec3,
+    b: wp.vec3,
+    c: wp.vec3,
+    mesh: wp.uint64,
+    bg: float,
+    cull: float,
+    refine_steps: int,
+):
+    """``tri_sdf_closest`` on the exact field: same search, exact evaluations.
+
+    Seeding (3 vertices + centroid) and the projected steepest descent in
+    barycentric space are line-for-line the grid version's; only the field
+    lookups are exact.  One rejection is added ahead of them, and it is
+    conservative rather than heuristic: a signed distance field is 1-Lipschitz
+    and every point of the triangle lies within ``reach`` of the centroid, so
+    ``SDF(centroid) > cull + reach`` implies ``min_tri SDF > cull``.  The query
+    radius that decides it is a few mm, so a triangle nowhere near the blade
+    costs one BVH root test.
+    """
+    third = 1.0 / 3.0
+    g = (a + b + c) * third
+    reach = wp.max(wp.length(a - g), wp.max(wp.length(b - g), wp.length(c - g)))
+    w = wp.vec3(third, third, third)
+    # radius that keeps every point of the triangle resolvable once the centroid
+    # is inside the cull band: |SDF(x)| <= SDF(g) + reach <= cull + 2*reach.
+    rq = cull + 2.0 * reach
+    # Each query returns distance AND gradient, and the descent only ever needs
+    # the gradient AT THE CURRENT BEST POINT -- which is the point whose query
+    # produced ``best``.  So carry its normal along instead of re-querying: the
+    # evaluated points are exactly the same, 7 queries per triangle instead of
+    # 11, and the caller gets the contact normal for free.
+    best, nbest = sdf_mesh_query(mesh, cull + reach, bg, g)
+    if best >= bg:
+        return w, bg, nbest
+    da, na = sdf_mesh_query(mesh, rq, bg, a)
+    if da < best:
+        best = da
+        w = wp.vec3(1.0, 0.0, 0.0)
+        nbest = na
+    db, nb = sdf_mesh_query(mesh, rq, bg, b)
+    if db < best:
+        best = db
+        w = wp.vec3(0.0, 1.0, 0.0)
+        nbest = nb
+    dc, nc = sdf_mesh_query(mesh, rq, bg, c)
+    if dc < best:
+        best = dc
+        w = wp.vec3(0.0, 0.0, 1.0)
+        nbest = nc
+    step = float(0.5)
+    for _s in range(refine_steps):
+        gvec = nbest
+        ga = wp.dot(gvec, a)
+        gb = wp.dot(gvec, b)
+        gc = wp.dot(gvec, c)
+        m = (ga + gb + gc) * third
+        gw = wp.vec3(ga - m, gb - m, gc - m)
+        gn = wp.length(gw)
+        if gn > 1.0e-12:
+            cand = w - gw * (step / gn)
+            cand = wp.vec3(wp.max(cand[0], 0.0), wp.max(cand[1], 0.0), wp.max(cand[2], 0.0))
+            sm = cand[0] + cand[1] + cand[2]
+            if sm > 1.0e-9:
+                cand = cand / sm
+                pc = a * cand[0] + b * cand[1] + c * cand[2]
+                dcand, ncand = sdf_mesh_query(mesh, rq, bg, pc)
+                if dcand < best:
+                    best = dcand
+                    w = cand
+                    nbest = ncand
+        step = step * 0.5
+    return w, best, nbest
+
+
 @wp.kernel
 def eval_tri_sdf_contact_kernel(
     pos: wp.array(dtype=wp.vec3),
@@ -2179,6 +2368,23 @@ def eval_tri_sdf_contact_kernel(
     half_thickness: float,
     max_depth: float,
     refine_steps: int,
+    # R13c: hardening compression law on the compliant SDF force (0 = off)
+    shape_hardening_eps: wp.array(dtype=float),
+    particle_radius: wp.array(dtype=float),
+    # R13f: Coulomb friction on this channel (inert unless _R13F_SDF_FRICTION)
+    pos_prev: wp.array(dtype=wp.vec3),
+    body_q_prev: wp.array(dtype=wp.transform),
+    shape_material_mu: wp.array(dtype=float),
+    friction_mu: float,
+    friction_epsilon: float,
+    dt: float,
+    # R13g: frozen contact point (inert unless _R13G_SDF_FREEZE)
+    tri_sdf_w: wp.array(dtype=wp.vec3),
+    resolve_w: int,
+    # R16-A2': per-slot shape mesh for the exact backend (inert unless
+    # _R16_SDF_EXACT); ``mesh_max_dist`` only bounds the single gradient query.
+    sdf_mesh: wp.array(dtype=wp.uint64),
+    mesh_max_dist: float,
     # outputs
     forces: wp.array(dtype=wp.vec3),
     hessians: wp.array(dtype=wp.mat33),
@@ -2224,26 +2430,97 @@ def eval_tri_sdf_contact_kernel(
     org = sdf_origin[slot]
     inv_voxel = 1.0 / voxel
 
-    w, best = tri_sdf_closest(a, b, c, sdf, base, nx, ny, nz, org, inv_voxel, voxel, bg, refine_steps)
+    w = wp.vec3(0.0)
+    best = float(0.0)
+    n_exact = wp.vec3(0.0, 0.0, 1.0)
+    if _R16_SDF_EXACT != 0:
+        # R16-A2': same search, exact field.  The freeze switch is a grid-path
+        # remedy for the winner-take-all redraw and is not combined with it.
+        w, best, n_exact = tri_sdf_closest_mesh(a, b, c, sdf_mesh[slot], bg, half_thickness, refine_steps)
+    elif _R13G_SDF_FREEZE == 0:
+        w, best = tri_sdf_closest(a, b, c, sdf, base, nx, ny, nz, org, inv_voxel, voxel, bg, refine_steps)
+    else:
+        # Resolve the barycentric contact point once per substep, then hold it.
+        if resolve_w != 0:
+            w, best = tri_sdf_closest(a, b, c, sdf, base, nx, ny, nz, org, inv_voxel, voxel, bg, refine_steps)
+            tri_sdf_w[tid] = w
+        else:
+            w = tri_sdf_w[tid]
+            best = sdf_grid_sample(
+                sdf, base, nx, ny, nz, org, inv_voxel, bg, a * w[0] + b * w[1] + c * w[2]
+            )
     if best >= half_thickness:
         return
 
     depth = wp.min(half_thickness - best, max_depth)
     p = a * w[0] + b * w[1] + c * w[2]
-    n_local = sdf_grid_gradient(sdf, base, nx, ny, nz, org, inv_voxel, bg, voxel, p)
+    n_local = wp.vec3(0.0, 0.0, 1.0)
+    if _R16_SDF_EXACT != 0:
+        # the gradient at the winning point, carried out of the search
+        n_local = n_exact
+    else:
+        n_local = sdf_grid_gradient(sdf, base, nx, ny, nz, org, inv_voxel, bg, voxel, p)
     n_world = wp.transform_vector(X_ws, n_local)
     k = tri_stiffness[t]
     f = n_world * (k * depth)
     nn = wp.outer(n_world, n_world) * k
+    # R13c: hardening compression law INSIDE the SDF force core.  R9 hung the
+    # law on the vertex penalty kernel only; the compliant SDF stack zeroes that
+    # channel (shape_contact_ke -> 0), so the law never ran.  Same closed form as
+    # _compute_body_particle_contact_force, with the strain referenced to the
+    # cloth thickness t0 = 2*particle_radius (the R13 gate-1 fix), averaged over
+    # the triangle's three vertices (uniform radius => exact).  eps_max = 0
+    # (default) keeps the three statements above untouched: bit-identical OFF.
+    t0_h = (2.0 / 3.0) * (particle_radius[i0] + particle_radius[i1] + particle_radius[i2])
+    hardening_inv_dmax = contact_hardening_inv_dmax(shape_hardening_eps, t0_h, shape)
+    if hardening_inv_dmax > 0.0:
+        den = wp.max(1.0 - depth * hardening_inv_dmax, HARDENING_DEN_MIN)
+        inv_den = 1.0 / den
+        f = n_world * (k * depth * inv_den)
+        nn = wp.outer(n_world, n_world) * (k * inv_den * inv_den)
+    # R13f: Coulomb friction, same law/mixing as the vertex penalty channel.
+    # f_n is the normal load this triangle actually carries (post-hardening);
+    # u_rel is the relative translation of the coincident material points over
+    # the substep -- the cloth contact point minus the shape point under it.
+    # OFF branch (_R13F_SDF_FRICTION == 0) leaves f/nn exactly as above.
+    if _R13F_SDF_FRICTION != 0:
+        mu = wp.sqrt(friction_mu * shape_material_mu[shape])
+        if mu > 0.0 and dt > 0.0:
+            f_n = k * depth
+            if hardening_inv_dmax > 0.0:
+                den_f = wp.max(1.0 - depth * hardening_inv_dmax, HARDENING_DEN_MIN)
+                f_n = f_n / den_f
+            a_p = wp.transform_point(X_sw, pos_prev[i0])
+            b_p = wp.transform_point(X_sw, pos_prev[i1])
+            c_p = wp.transform_point(X_sw, pos_prev[i2])
+            # cloth displacement of the contact point, in world
+            dp_cloth = wp.transform_vector(
+                X_ws, (a * w[0] + b * w[1] + c * w[2]) - (a_p * w[0] + b_p * w[1] + c_p * w[2])
+            )
+            # displacement of the SHAPE material point that sits under it
+            p_world = wp.transform_point(X_ws, p)
+            X_ws_prev = shape_transform[shape]
+            if body >= 0:
+                X_ws_prev = body_q_prev[body] * shape_transform[shape]
+            dp_body = p_world - wp.transform_point(X_ws_prev, p)
+            u_rel = dp_cloth - dp_body
+            eps_u = friction_epsilon * dt
+            f_t, k_t = compute_projected_isotropic_friction(mu, f_n, n_world, u_rel, eps_u)
+            f = f + f_t
+            nn = nn + k_t
+    # R13g: OFF keeps the exact w_i^2 diagonal blocks; ON uses the row-sum lump.
+    hw = wp.vec3(w[0] * w[0], w[1] * w[1], w[2] * w[2])
+    if _R13G_SDF_HESS != 0:
+        hw = w
     if w[0] > 0.0:
         wp.atomic_add(forces, i0, f * w[0])
-        wp.atomic_add(hessians, i0, nn * (w[0] * w[0]))
+        wp.atomic_add(hessians, i0, nn * hw[0])
     if w[1] > 0.0:
         wp.atomic_add(forces, i1, f * w[1])
-        wp.atomic_add(hessians, i1, nn * (w[1] * w[1]))
+        wp.atomic_add(hessians, i1, nn * hw[1])
     if w[2] > 0.0:
         wp.atomic_add(forces, i2, f * w[2])
-        wp.atomic_add(hessians, i2, nn * (w[2] * w[2]))
+        wp.atomic_add(hessians, i2, nn * hw[2])
 
 
 @wp.kernel
@@ -2269,6 +2546,23 @@ def accumulate_tri_sdf_reaction_kernel(
     half_thickness: float,
     max_depth: float,
     refine_steps: int,
+    # R13c: same hardening law as the force kernel (0 = off, bit-identical)
+    shape_hardening_eps: wp.array(dtype=float),
+    particle_radius: wp.array(dtype=float),
+    # R13f: same friction as the force kernel (inert unless _R13F_SDF_FRICTION)
+    pos_prev: wp.array(dtype=wp.vec3),
+    body_q_prev: wp.array(dtype=wp.transform),
+    shape_material_mu: wp.array(dtype=float),
+    friction_mu: float,
+    friction_epsilon: float,
+    dt: float,
+    # R13g: same frozen contact point the force kernel used (inert unless flag)
+    tri_sdf_w: wp.array(dtype=wp.vec3),
+    resolve_w: int,
+    # R16-A2': per-slot shape mesh for the exact backend (inert unless
+    # _R16_SDF_EXACT); ``mesh_max_dist`` only bounds the single gradient query.
+    sdf_mesh: wp.array(dtype=wp.uint64),
+    mesh_max_dist: float,
     # outputs
     body_f: wp.array(dtype=wp.spatial_vector),
 ):
@@ -2306,15 +2600,63 @@ def accumulate_tri_sdf_reaction_kernel(
     org = sdf_origin[slot]
     inv_voxel = 1.0 / voxel
 
-    w, best = tri_sdf_closest(a, b, c, sdf, base, nx, ny, nz, org, inv_voxel, voxel, bg, refine_steps)
+    w = wp.vec3(0.0)
+    best = float(0.0)
+    n_exact = wp.vec3(0.0, 0.0, 1.0)
+    if _R16_SDF_EXACT != 0:
+        # R16-A2': identical query to the force pass, so the two halves of the
+        # contact cannot disagree about where or how deep it is.
+        w, best, n_exact = tri_sdf_closest_mesh(a, b, c, sdf_mesh[slot], bg, half_thickness, refine_steps)
+    elif _R13G_SDF_FREEZE == 0:
+        w, best = tri_sdf_closest(a, b, c, sdf, base, nx, ny, nz, org, inv_voxel, voxel, bg, refine_steps)
+    else:
+        # the point the force kernel actually used this substep.  resolve_w != 0
+        # means the force pass has not run yet (``tri_sdf_w`` is still the zero
+        # vector, which is NOT a barycentric point), so resolve it here instead.
+        if resolve_w != 0:
+            w, best = tri_sdf_closest(a, b, c, sdf, base, nx, ny, nz, org, inv_voxel, voxel, bg, refine_steps)
+        else:
+            w = tri_sdf_w[tid]
+            best = sdf_grid_sample(
+                sdf, base, nx, ny, nz, org, inv_voxel, bg, a * w[0] + b * w[1] + c * w[2]
+            )
     if best >= half_thickness:
         return
 
     depth = wp.min(half_thickness - best, max_depth)
     p_local = a * w[0] + b * w[1] + c * w[2]
-    n_local = sdf_grid_gradient(sdf, base, nx, ny, nz, org, inv_voxel, bg, voxel, p_local)
+    n_local = wp.vec3(0.0, 0.0, 1.0)
+    if _R16_SDF_EXACT != 0:
+        n_local = n_exact
+    else:
+        n_local = sdf_grid_gradient(sdf, base, nx, ny, nz, org, inv_voxel, bg, voxel, p_local)
     n_world = wp.transform_vector(X_ws, n_local)
-    reaction = n_world * (-tri_stiffness[t] * depth)
+    f_n = tri_stiffness[t] * depth
+    t0_h = (2.0 / 3.0) * (particle_radius[i0] + particle_radius[i1] + particle_radius[i2])
+    hardening_inv_dmax = contact_hardening_inv_dmax(shape_hardening_eps, t0_h, shape)
+    if hardening_inv_dmax > 0.0:
+        den = wp.max(1.0 - depth * hardening_inv_dmax, HARDENING_DEN_MIN)
+        f_n = f_n / den
+    reaction = n_world * (-f_n)
     p_world = wp.transform_point(X_ws, p_local)
+    # R13f: the tangential half of the same contact, equal and opposite.
+    # Re-evaluated with the identical inputs as the force kernel so the two
+    # sides cannot disagree.  OFF branch leaves ``reaction`` untouched.
+    if _R13F_SDF_FRICTION != 0:
+        mu = wp.sqrt(friction_mu * shape_material_mu[shape])
+        if mu > 0.0 and dt > 0.0:
+            a_p = wp.transform_point(X_sw, pos_prev[i0])
+            b_p = wp.transform_point(X_sw, pos_prev[i1])
+            c_p = wp.transform_point(X_sw, pos_prev[i2])
+            dp_cloth = wp.transform_vector(
+                X_ws, p_local - (a_p * w[0] + b_p * w[1] + c_p * w[2])
+            )
+            X_ws_prev = body_q_prev[body] * shape_transform[shape]
+            dp_body = p_world - wp.transform_point(X_ws_prev, p_local)
+            u_rel = dp_cloth - dp_body
+            f_t, _k_t = compute_projected_isotropic_friction(
+                mu, f_n, n_world, u_rel, friction_epsilon * dt
+            )
+            reaction = reaction - f_t
     com = wp.transform_point(body_q[body], body_com[body])
     wp.atomic_add(body_f, body, wp.spatial_vector(reaction, wp.cross(p_world - com, reaction)))

@@ -117,6 +117,27 @@ class Collision:
         # allocated and no kernel is launched, so the default path is unchanged.
         self.tri_sdf_slot_shape = None
         self.tri_sdf_compliant = False
+        # R16-A2': the shape meshes the exact query backend evaluates against.
+        self.tri_sdf_meshes = None
+        self.tri_sdf_mesh_id = None
+        self.tri_sdf_mesh_max_dist = 0.0
+        # R13g: per-(slot, triangle) barycentric contact point, resolved once
+        # per substep and held for the Newton iterations (see _R13G_SDF_FREEZE).
+        self.tri_sdf_w = None
+        self.tri_sdf_w_valid = False
+        # R13g: how often inside a substep the barycentric contact point is
+        # re-searched.  0 = once, at iteration 0 (full freeze).  n > 0 = every
+        # n-th Newton iteration, a compromise between killing the chatter and
+        # still tracking a fast-moving shape.  Only read when R13G_SDF_FREEZE.
+        self.tri_sdf_resolve_every = int(
+            __import__("os").environ.get("R13G_SDF_RESOLVE_EVERY", "0")
+        )
+        # R13f: inputs the compliant-SDF friction needs in the reaction pass,
+        # stashed by accumulate_contact_force.  None => the reaction falls back
+        # to the current state (zero relative displacement => zero friction).
+        self._r13f_dt = 0.0
+        self._r13f_particle_q_prev = None
+        self._r13f_body_q_prev = None
         self.proj_delta = None
         self.projection_relaxation = None
 
@@ -912,9 +933,36 @@ class Collision:
                     self.tri_sdf_h,
                     self.tri_sdf_max_correction,
                     self.tri_sdf_refine,
+                    self.shape_hardening_eps,
+                    self.model.particle_radius,
+                    # R13f friction inputs (inert unless R13F_SDF_FRICTION)
+                    particle_q_prev,
+                    state_in.body_q if self.integrate_with_external_rigid_solver else state_out.body_q,
+                    self.model.shape_material_mu,
+                    self.model.soft_contact_mu,
+                    self.friction_epsilon,
+                    dt,
+                    # R13g frozen contact point (inert unless R13G_SDF_FREEZE)
+                    self.tri_sdf_w,
+                    (1 if _iter == 0 else 0)
+                    if self.tri_sdf_resolve_every <= 0
+                    else (1 if (_iter % self.tri_sdf_resolve_every) == 0 else 0),
+                    # R16-A2' exact backend (inert unless R16_SDF_EXACT)
+                    self.tri_sdf_mesh_id,
+                    self.tri_sdf_mesh_max_dist,
                 ],
                 outputs=[particle_forces, self.contact_hessian_diags],
                 device=self.model.device,
+            )
+            self.tri_sdf_w_valid = True
+            # R13f: the reaction pass runs outside the solver loop and gets no
+            # dt / previous state of its own.  Stash exactly what this pass used
+            # so both halves of the contact see identical inputs; no public
+            # signature changes, so the consumer repo is untouched.
+            self._r13f_dt = dt
+            self._r13f_particle_q_prev = particle_q_prev
+            self._r13f_body_q_prev = (
+                state_in.body_q if self.integrate_with_external_rigid_solver else state_out.body_q
             )
 
     def accumulate_tri_sdf_reaction(
@@ -957,6 +1005,24 @@ class Collision:
                 self.tri_sdf_h,
                 self.tri_sdf_max_correction,
                 self.tri_sdf_refine,
+                self.shape_hardening_eps,
+                self.model.particle_radius,
+                # R13f friction inputs (inert unless R13F_SDF_FRICTION)
+                self._r13f_particle_q_prev if self._r13f_particle_q_prev is not None else particle_q,
+                self._r13f_body_q_prev if self._r13f_body_q_prev is not None else body_q,
+                self.model.shape_material_mu,
+                self.model.soft_contact_mu,
+                self.friction_epsilon,
+                float(self._r13f_dt),
+                # R13g: the point the force pass used (inert unless flag).
+                # Before the first force pass there is no such point yet, so the
+                # reaction resolves it itself (frame 0 would otherwise read the
+                # zero vector as a barycentric point and land inside the shape).
+                self.tri_sdf_w,
+                0 if self.tri_sdf_w_valid else 1,
+                # R16-A2' exact backend (inert unless R16_SDF_EXACT)
+                self.tri_sdf_mesh_id,
+                self.tri_sdf_mesh_max_dist,
             ],
             outputs=[body_f],
             device=self.model.device,
@@ -1209,6 +1275,7 @@ class Collision:
         max_correction: float = 5.0e-3,
         compliant: bool = False,
         modulus: float = 0.0,
+        thickness: float = 0.0,
     ) -> None:
         """Enable E3 triangle-level contact against a baked per-shape SDF.
 
@@ -1246,6 +1313,13 @@ class Collision:
             modulus: E_t [Pa] for the compliant form. ``k_tri = E_t * A_tri / t0``
                 with A_tri the REST triangle area, so sum_tri A_tri is the cloth's
                 area regardless of tessellation and the load is mesh independent.
+            thickness: t0 [m] for that stiffness -- the CLOTH's transverse
+                thickness (a material property; the asset meta carries it), not
+                the numerical shell ``half_thickness``. 0 keeps the legacy
+                ``t0 = 2*half_thickness``, which is the same number whenever the
+                shell IS the cloth's half-thickness (every run to date). Passing
+                it explicitly is what keeps an h ladder from silently rescaling
+                the stiffness by ``2h/t0`` when the shell is raised.
         """
         shape_ids = [int(s) for s in shape_ids]
         if not shape_ids:
@@ -1253,7 +1327,7 @@ class Collision:
         device = self.model.device
         shape_scale = self.model.shape_scale.numpy()
 
-        blocks, bases, dims, origins, slots = [], [], [], [], []
+        blocks, bases, dims, origins, slots, meshes = [], [], [], [], [], []
         total = 0
         # ``bg`` is the out-of-grid sentinel only. The bake itself queries out to
         # ``bake_max_dist`` so the SOLID INTERIOR carries a true negative
@@ -1299,11 +1373,21 @@ class Collision:
             dims.append(n)
             origins.append(lo)
             slots.append(shape)
+            meshes.append(mesh)
             total += count
 
         if not blocks:
             return
         dims = np.asarray(dims, dtype=np.int32)
+        # R16-A2': keep the shape meshes alive (a wp.Mesh releases its BVH when
+        # collected) and hand their ids to the kernels.  The exact backend
+        # queries THESE -- the very meshes the bake above sampled -- so the two
+        # backends differ by the discretisation and nothing else.
+        self.tri_sdf_meshes = meshes
+        self.tri_sdf_mesh_id = wp.array(
+            np.asarray([m.id for m in meshes], dtype=np.uint64), dtype=wp.uint64, device=device
+        )
+        self.tri_sdf_mesh_max_dist = float(bake_max_dist)
         self.tri_sdf_data = wp.array(np.concatenate(blocks).astype(np.float32), dtype=float, device=device)
         self.tri_sdf_base = wp.array(np.asarray(bases, dtype=np.int32), dtype=int, device=device)
         self.tri_sdf_nx = wp.array(dims[:, 0].copy(), dtype=int, device=device)
@@ -1318,14 +1402,30 @@ class Collision:
         self.tri_sdf_max_correction = float(max_correction)
         self.tri_sdf_slots = len(slots)
         self.tri_sdf_compliant = bool(compliant)
+        _exact = int(__import__("os").environ.get("R16_SDF_EXACT", "0"))
+        print(
+            "[collision] tri-SDF query backend = "
+            + ("EXACT mesh (analytic closest point, no grid)" if _exact else "VOXEL grid (trilinear)")
+            + f": {len(slots)} shape(s), voxel={voxel * 1000:g} mm, h={half_thickness * 1000:g} mm, "
+            + f"grid={total} cells ({total * 4 / 1.0e6:.2f} MB)",
+            flush=True,
+        )
         pos_rest = self.model.particle_q.numpy().astype(np.float64)
         tris = self.model.tri_indices.numpy().astype(np.int64)
         e1 = pos_rest[tris[:, 1]] - pos_rest[tris[:, 0]]
         e2 = pos_rest[tris[:, 2]] - pos_rest[tris[:, 0]]
         tri_area = 0.5 * np.linalg.norm(np.cross(e1, e2), axis=1)
-        t0 = max(float(half_thickness) * 2.0, 1.0e-9)
+        t0 = float(thickness) if thickness > 0.0 else max(float(half_thickness) * 2.0, 1.0e-9)
         k_tri = (float(modulus) * tri_area / t0) if modulus > 0.0 else np.zeros_like(tri_area)
         self.tri_sdf_stiffness = wp.array(k_tri.astype(np.float32), dtype=float, device=device)
+        # R13g: storage for the frozen barycentric contact point.  Always
+        # allocated (the kernels take it as an argument either way); it is only
+        # read/written when R13G_SDF_FREEZE is set, so the default path is
+        # bit-identical and only pays one array allocation.
+        self.tri_sdf_w = wp.zeros(
+            self.tri_sdf_slots * int(self.model.tri_count), dtype=wp.vec3, device=device
+        )
+        self.tri_sdf_w_valid = False
         if self.tri_sdf_compliant:
             print(
                 "[collision] triangle SDF contact is COMPLIANT: "
