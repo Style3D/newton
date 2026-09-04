@@ -2385,6 +2385,16 @@ def eval_tri_sdf_contact_kernel(
     # _R16_SDF_EXACT); ``mesh_max_dist`` only bounds the single gradient query.
     sdf_mesh: wp.array(dtype=wp.uint64),
     mesh_max_dist: float,
+    # T8: true static friction on this channel.  ``anchor_kt_ratio <= 0`` (the
+    # default) skips every statement below and leaves the IPC law in charge, so
+    # the OFF path is bit-identical.  ``anchor_update`` is 1 only on the first
+    # Newton iteration of a substep: the anchor is a per-STEP state, not a
+    # per-iteration one, and re-mapping it inside the loop would let the spring
+    # chase its own solution.
+    anchor_p: wp.array(dtype=wp.vec3),
+    anchor_valid: wp.array(dtype=wp.int32),
+    anchor_kt_ratio: float,
+    anchor_update: int,
     # outputs
     forces: wp.array(dtype=wp.vec3),
     hessians: wp.array(dtype=wp.mat33),
@@ -2450,6 +2460,11 @@ def eval_tri_sdf_contact_kernel(
                 sdf, base, nx, ny, nz, org, inv_voxel, bg, a * w[0] + b * w[1] + c * w[2]
             )
     if best >= half_thickness:
+        # T8: the pair separated -> drop the anchor.  Seeding/holding is keyed on
+        # GEOMETRIC contact (best <= h), not on the force band, so a pair that
+        # leaves the shell starts clean the next time it comes back.
+        if anchor_kt_ratio > 0.0 and anchor_update != 0:
+            anchor_valid[tid] = 0
         return
 
     depth = wp.min(half_thickness - best, max_depth)
@@ -2483,7 +2498,63 @@ def eval_tri_sdf_contact_kernel(
     # u_rel is the relative translation of the coincident material points over
     # the substep -- the cloth contact point minus the shape point under it.
     # OFF branch (_R13F_SDF_FRICTION == 0) leaves f/nn exactly as above.
-    if _R13F_SDF_FRICTION != 0:
+    if anchor_kt_ratio > 0.0:
+        # T8: Coulomb stick-slip via a tangential anchor, replacing the IPC
+        # regularisation on this channel.
+        #
+        # Why: `compute_projected_isotropic_friction` is an IPC-type regularised
+        # Coulomb law -- correct while SLIDING (f_t = mu*N against the motion),
+        # but it has no sticking state.  Under any load below the cone it creeps
+        # at v = eps*(1 - sqrt(1 - rho)), rho = load/(mu*N); with eps = 1e-2 m/s
+        # that is 1.3 mm/s at rho = 0.25, i.e. 6.5 mm over a 5 s carry (measured:
+        # pack's left hand drifts 19-34 mm during B5 at mu_eff 0.70 and drops the
+        # strap in 2/3 runs).  Lowering eps only postpones it (v ~ eps^0.47).
+        #
+        # The anchor is the material point of the SHAPE that the cloth contact
+        # point was sitting on when contact formed, stored in the shape's local
+        # frame so rigid motion carries it for free.  While the spring force
+        # stays inside the cone the contact sticks exactly (zero drift); on the
+        # cone it slides at f_t = mu*N and the anchor is dragged along, which is
+        # the standard return mapping.
+        mu = wp.sqrt(friction_mu * shape_material_mu[shape])
+        if mu > 0.0:
+            f_n = k * depth
+            if hardening_inv_dmax > 0.0:
+                den_f = wp.max(1.0 - depth * hardening_inv_dmax, HARDENING_DEN_MIN)
+                f_n = f_n / den_f
+            # cloth contact point, in the shape's local frame (a/b/c already are)
+            q_loc = a * w[0] + b * w[1] + c * w[2]
+            if anchor_valid[tid] == 0:
+                if anchor_update != 0:
+                    anchor_p[tid] = q_loc
+                    anchor_valid[tid] = 1
+                slip_loc = wp.vec3(0.0, 0.0, 0.0)
+            else:
+                slip_loc = q_loc - anchor_p[tid]
+            slip_w = wp.transform_vector(X_ws, slip_loc)
+            slip_t = slip_w - n_world * wp.dot(slip_w, n_world)
+            kt = k * anchor_kt_ratio
+            f_t = slip_t * (-kt)
+            cone = mu * f_n
+            m = wp.length(f_t)
+            if m > cone:
+                # sliding: clamp to the cone and drag the anchor up behind it so
+                # the spring holds exactly mu*N next step (return mapping).
+                if m > 1.0e-12:
+                    f_t = f_t * (cone / m)
+                if kt > 1.0e-12 and anchor_update != 0:
+                    ln = wp.length(slip_t)
+                    if ln > 1.0e-12:
+                        keep = wp.transform_vector(X_sw, slip_t * (cone / (kt * ln)))
+                        anchor_p[tid] = q_loc - keep
+                f = f + f_t
+                # on the cone the tangential force is load-independent -> no
+                # tangential stiffness, same as the IPC law's s >= 1 branch.
+            else:
+                f = f + f_t
+                # sticking: the full tangential spring, projected off the normal.
+                nn = nn + (wp.identity(n=3, dtype=float) - wp.outer(n_world, n_world)) * kt
+    elif _R13F_SDF_FRICTION != 0:
         mu = wp.sqrt(friction_mu * shape_material_mu[shape])
         if mu > 0.0 and dt > 0.0:
             f_n = k * depth
@@ -2563,6 +2634,12 @@ def accumulate_tri_sdf_reaction_kernel(
     # _R16_SDF_EXACT); ``mesh_max_dist`` only bounds the single gradient query.
     sdf_mesh: wp.array(dtype=wp.uint64),
     mesh_max_dist: float,
+    # T8: same anchor state as the force kernel, READ ONLY here.  The reaction
+    # pass must report the force the solver actually applied, so it re-reads the
+    # anchor rather than advancing it (advancing twice would halve the drift).
+    anchor_p: wp.array(dtype=wp.vec3),
+    anchor_valid: wp.array(dtype=wp.int32),
+    anchor_kt_ratio: float,
     # outputs
     body_f: wp.array(dtype=wp.spatial_vector),
 ):
@@ -2642,7 +2719,19 @@ def accumulate_tri_sdf_reaction_kernel(
     # R13f: the tangential half of the same contact, equal and opposite.
     # Re-evaluated with the identical inputs as the force kernel so the two
     # sides cannot disagree.  OFF branch leaves ``reaction`` untouched.
-    if _R13F_SDF_FRICTION != 0:
+    if anchor_kt_ratio > 0.0:
+        # T8 mirror of the force kernel's anchor branch, minus every write.
+        mu = wp.sqrt(friction_mu * shape_material_mu[shape])
+        if mu > 0.0 and anchor_valid[tid] != 0:
+            slip_w = wp.transform_vector(X_ws, p_local - anchor_p[tid])
+            slip_t = slip_w - n_world * wp.dot(slip_w, n_world)
+            f_t = slip_t * (-tri_stiffness[t] * anchor_kt_ratio)
+            cone = mu * f_n
+            m = wp.length(f_t)
+            if m > cone and m > 1.0e-12:
+                f_t = f_t * (cone / m)
+            reaction = reaction - f_t
+    elif _R13F_SDF_FRICTION != 0:
         mu = wp.sqrt(friction_mu * shape_material_mu[shape])
         if mu > 0.0 and dt > 0.0:
             a_p = wp.transform_point(X_sw, pos_prev[i0])

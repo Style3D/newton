@@ -124,6 +124,10 @@ class Collision:
         # R13g: per-(slot, triangle) barycentric contact point, resolved once
         # per substep and held for the Newton iterations (see _R13G_SDF_FREEZE).
         self.tri_sdf_w = None
+        # T8: allocated by enable_triangle_sdf_contacts; None until then.
+        self.tri_sdf_anchor_p = None
+        self.tri_sdf_anchor_valid = None
+        self.tri_sdf_anchor_kt_ratio = 0.0
         self.tri_sdf_w_valid = False
         # R13g: how often inside a substep the barycentric contact point is
         # re-searched.  0 = once, at iteration 0 (full freeze).  n > 0 = every
@@ -950,6 +954,11 @@ class Collision:
                     # R16-A2' exact backend (inert unless R16_SDF_EXACT)
                     self.tri_sdf_mesh_id,
                     self.tri_sdf_mesh_max_dist,
+                    # T8 anchor (inert unless tri_sdf_anchor_kt_ratio > 0)
+                    self.tri_sdf_anchor_p,
+                    self.tri_sdf_anchor_valid,
+                    self.tri_sdf_anchor_kt_ratio,
+                    1 if _iter == 0 else 0,
                 ],
                 outputs=[particle_forces, self.contact_hessian_diags],
                 device=self.model.device,
@@ -1023,6 +1032,10 @@ class Collision:
                 # R16-A2' exact backend (inert unless R16_SDF_EXACT)
                 self.tri_sdf_mesh_id,
                 self.tri_sdf_mesh_max_dist,
+                # T8 anchor, read only (inert unless tri_sdf_anchor_kt_ratio > 0)
+                self.tri_sdf_anchor_p,
+                self.tri_sdf_anchor_valid,
+                self.tri_sdf_anchor_kt_ratio,
             ],
             outputs=[body_f],
             device=self.model.device,
@@ -1276,6 +1289,7 @@ class Collision:
         compliant: bool = False,
         modulus: float = 0.0,
         thickness: float = 0.0,
+        anchor_kt_ratio: float = 0.0,
     ) -> None:
         """Enable E3 triangle-level contact against a baked per-shape SDF.
 
@@ -1426,6 +1440,26 @@ class Collision:
             self.tri_sdf_slots * int(self.model.tri_count), dtype=wp.vec3, device=device
         )
         self.tri_sdf_w_valid = False
+        # T8: tangential anchor state, keyed by the same (slot, triangle) index
+        # the kernels are launched over -- one anchor per contactING PAIR, which
+        # is what "per-(triangle, shape)" means here.  Allocated unconditionally
+        # for the same reason as tri_sdf_w: the kernels take it either way, and
+        # with ratio 0 nothing reads or writes it.
+        self.tri_sdf_anchor_kt_ratio = float(anchor_kt_ratio)
+        self.tri_sdf_anchor_p = wp.zeros(
+            self.tri_sdf_slots * int(self.model.tri_count), dtype=wp.vec3, device=device
+        )
+        self.tri_sdf_anchor_valid = wp.zeros(
+            self.tri_sdf_slots * int(self.model.tri_count), dtype=wp.int32, device=device
+        )
+        if self.tri_sdf_anchor_kt_ratio > 0.0:
+            print(
+                "[collision] tri-SDF TRUE STATIC friction (T8 anchor): "
+                f"kt_ratio={self.tri_sdf_anchor_kt_ratio:g} "
+                f"(kt = kt_ratio * k_tri; predicted pre-slip at mu=0.7, depth=0.3mm: "
+                f"{0.7 * 0.3 / self.tri_sdf_anchor_kt_ratio * 1000:.0f} um)",
+                flush=True,
+            )
         if self.tri_sdf_compliant:
             print(
                 "[collision] triangle SDF contact is COMPLIANT: "
