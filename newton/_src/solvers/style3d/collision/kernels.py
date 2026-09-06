@@ -81,6 +81,10 @@ _R13G_SDF_FREEZE = wp.constant(int(__import__("os").environ.get("R13G_SDF_FREEZE
 # 0 = OFF: the voxel statements run exactly as before.
 _R16_SDF_EXACT = wp.constant(int(__import__("os").environ.get("R16_SDF_EXACT", "0")))
 
+# T12: 锚用播种时的重心坐标（材料点）当参照，1 = 修后（默认），0 = 修前
+# （每次牛顿迭代重搜的最近点）。留 0 这条只为做同二进制 A/B 与留档，不要在生产里设。
+_T12_ANCHOR_SEEDW = wp.constant(int(__import__("os").environ.get("T12_ANCHOR_SEEDW", "1")))
+
 
 @wp.func
 def triangle_normal(A: wp.vec3, B: wp.vec3, C: wp.vec3):
@@ -2393,8 +2397,16 @@ def eval_tri_sdf_contact_kernel(
     # chase its own solution.
     anchor_p: wp.array(dtype=wp.vec3),
     anchor_valid: wp.array(dtype=wp.int32),
+    # T12: barycentric coordinates of the MATERIAL point the anchor was seeded
+    # on.  Without it the spring is measured against whatever point this Newton
+    # iteration's closest-point search happened to win, which on a flat blade
+    # face is not the same point twice (see the seeding block below).
+    anchor_w: wp.array(dtype=wp.vec3),
     anchor_kt_ratio: float,
     anchor_update: int,
+    # T12 验法：每对写出 (|slip_t|, 是否在锥上, |搜索点-播种材料点|, f_n)。
+    # 纯诊断，力律不读它；关闭时传长度 1 的哑数组。
+    anchor_dbg: wp.array(dtype=wp.vec4),
     # outputs
     forces: wp.array(dtype=wp.vec3),
     hessians: wp.array(dtype=wp.mat33),
@@ -2498,6 +2510,13 @@ def eval_tri_sdf_contact_kernel(
     # u_rel is the relative translation of the coincident material points over
     # the substep -- the cloth contact point minus the shape point under it.
     # OFF branch (_R13F_SDF_FRICTION == 0) leaves f/nn exactly as above.
+    # T12-b: the anchor's tangential force is evaluated at the SEEDED material
+    # point, so it must also be distributed with the SEEDED weights -- adding it
+    # into ``f`` would spread it with this iteration's search weights, i.e. apply
+    # it at a different point of the triangle.
+    f_t_a = wp.vec3(0.0, 0.0, 0.0)
+    nn_t_a = wp.identity(n=3, dtype=float) * 0.0
+    aw_out = w
     if anchor_kt_ratio > 0.0:
         # T8: Coulomb stick-slip via a tangential anchor, replacing the IPC
         # regularisation on this channel.
@@ -2522,13 +2541,41 @@ def eval_tri_sdf_contact_kernel(
             if hardening_inv_dmax > 0.0:
                 den_f = wp.max(1.0 - depth * hardening_inv_dmax, HARDENING_DEN_MIN)
                 f_n = f_n / den_f
-            # cloth contact point, in the shape's local frame (a/b/c already are)
-            q_loc = a * w[0] + b * w[1] + c * w[2]
-            if anchor_valid[tid] == 0:
+            # T12 fix: the spring must measure the displacement of a MATERIAL
+            # point of the cloth, so the barycentric coordinates are seeded WITH
+            # the anchor and reused; the closest-point search keeps supplying
+            # only ``best`` and the normal.
+            #
+            # Why (T12, 16 runs, flatten): ``w`` is re-searched by
+            # ``tri_sdf_closest_mesh`` on every call (centroid + 3 vertices, then
+            # refinement, strict ``<``).  With the cloth lying flat on the blade
+            # face the four candidates are equally deep, so the winner flips on
+            # float noise and ``a*w0+b*w1+c*w2`` moves by a triangle edge
+            # (2-7 mm) with the cloth perfectly still.  That fake slip is orders
+            # of magnitude past the cone, so f_t is clamped to mu*N with its
+            # direction set by the jump: a per-step kick of arbitrary direction
+            # whose mean is ~0, not friction.  Measured consequence: the fold is
+            # squeezed OUT of the jaw over the last 20 mm of closing
+            # (jawpts 32->21->12->4->0 with the anchor vs 38->33->22->15->17
+            # without) and grasp fails 12/12.
+            #
+            # The IPC branch below never had this problem because it evaluates
+            # ``pos`` and ``pos_prev`` at the SAME ``w``, so the jump cancels;
+            # this is the accumulating form of that same rule.
+            seeded = anchor_valid[tid]
+            aw = anchor_w[tid]
+            if seeded == 0:
+                aw = w
+            if _T12_ANCHOR_SEEDW == 0:
+                aw = w          # 修前行为：参照点跟着每次迭代的搜索赢家跑
+            # cloth material point, in the shape's local frame (a/b/c already are)
+            q_loc = a * aw[0] + b * aw[1] + c * aw[2]
+            slip_loc = wp.vec3(0.0, 0.0, 0.0)
+            if seeded == 0:
                 if anchor_update != 0:
+                    anchor_w[tid] = w
                     anchor_p[tid] = q_loc
                     anchor_valid[tid] = 1
-                slip_loc = wp.vec3(0.0, 0.0, 0.0)
             else:
                 slip_loc = q_loc - anchor_p[tid]
             slip_w = wp.transform_vector(X_ws, slip_loc)
@@ -2537,6 +2584,14 @@ def eval_tri_sdf_contact_kernel(
             f_t = slip_t * (-kt)
             cone = mu * f_n
             m = wp.length(f_t)
+            if anchor_update != 0 and anchor_dbg.shape[0] > 1:
+                q_search = a * w[0] + b * w[1] + c * w[2]
+                anchor_dbg[tid] = wp.vec4(
+                    wp.length(slip_t),
+                    wp.where(m > cone, 1.0, 0.0),
+                    wp.length(q_search - q_loc),
+                    f_n,
+                )
             if m > cone:
                 # sliding: clamp to the cone and drag the anchor up behind it so
                 # the spring holds exactly mu*N next step (return mapping).
@@ -2547,13 +2602,33 @@ def eval_tri_sdf_contact_kernel(
                     if ln > 1.0e-12:
                         keep = wp.transform_vector(X_sw, slip_t * (cone / (kt * ln)))
                         anchor_p[tid] = q_loc - keep
-                f = f + f_t
-                # on the cone the tangential force is load-independent -> no
-                # tangential stiffness, same as the IPC law's s >= 1 branch.
+                f_t_a = f_t
+                # T12-b FIX: the sliding branch MUST return a tangential
+                # stiffness.  The old comment ("no tangential stiffness, same as
+                # the IPC law's s >= 1 branch") was wrong: IPC's sliding branch
+                # returns K = mu*N/|u| * (I - n n^T), it is not zero.  With K = 0
+                # the cloth vertex's only tangential stiffness is inertia
+                # (~2 N/m) plus in-plane stretch, so a 0.1 N cone force moves it
+                # ~0.1 mm in one Newton step, overshoots the anchor, the force
+                # flips, the next iteration walks back -- 20 iterations end mid
+                # oscillation, the return mapping then parks the anchor exactly
+                # on the cone boundary and any micro-motion leaves the cone
+                # again.  Measured: 70-90% of pairs on the cone at rho ~ 0.05,
+                # material point moving 0.1-0.3 mm per substep against the blade.
+                # That is oscillation, not sliding, and it pumps energy into the
+                # fold until it is squeezed out of the jaw.
+                # Using kt (the sticking stiffness) rather than the consistent
+                # cone/|slip_t|: the two coincide at the cone boundary and kt is
+                # the stiffer, unconditionally stable choice.  IPC-consistent
+                # alternative, one line:
+                #     nn_t_a = (wp.identity(n=3, dtype=float)
+                #               - wp.outer(n_world, n_world)) * (cone / ln_t)
+                nn_t_a = (wp.identity(n=3, dtype=float) - wp.outer(n_world, n_world)) * kt
             else:
-                f = f + f_t
+                f_t_a = f_t
                 # sticking: the full tangential spring, projected off the normal.
-                nn = nn + (wp.identity(n=3, dtype=float) - wp.outer(n_world, n_world)) * kt
+                nn_t_a = (wp.identity(n=3, dtype=float) - wp.outer(n_world, n_world)) * kt
+            aw_out = aw
     elif _R13F_SDF_FRICTION != 0:
         mu = wp.sqrt(friction_mu * shape_material_mu[shape])
         if mu > 0.0 and dt > 0.0:
@@ -2583,6 +2658,21 @@ def eval_tri_sdf_contact_kernel(
     hw = wp.vec3(w[0] * w[0], w[1] * w[1], w[2] * w[2])
     if _R13G_SDF_HESS != 0:
         hw = w
+    # T12-b: anchor tangential half, distributed with the SEEDED weights.
+    # aw_out == w whenever the anchor is off, so the OFF path is unchanged
+    # (f_t_a and nn_t_a are then identically zero and add nothing).
+    haw = wp.vec3(aw_out[0] * aw_out[0], aw_out[1] * aw_out[1], aw_out[2] * aw_out[2])
+    if _R13G_SDF_HESS != 0:
+        haw = aw_out
+    if aw_out[0] > 0.0:
+        wp.atomic_add(forces, i0, f_t_a * aw_out[0])
+        wp.atomic_add(hessians, i0, nn_t_a * haw[0])
+    if aw_out[1] > 0.0:
+        wp.atomic_add(forces, i1, f_t_a * aw_out[1])
+        wp.atomic_add(hessians, i1, nn_t_a * haw[1])
+    if aw_out[2] > 0.0:
+        wp.atomic_add(forces, i2, f_t_a * aw_out[2])
+        wp.atomic_add(hessians, i2, nn_t_a * haw[2])
     if w[0] > 0.0:
         wp.atomic_add(forces, i0, f * w[0])
         wp.atomic_add(hessians, i0, nn * hw[0])
@@ -2639,6 +2729,7 @@ def accumulate_tri_sdf_reaction_kernel(
     # anchor rather than advancing it (advancing twice would halve the drift).
     anchor_p: wp.array(dtype=wp.vec3),
     anchor_valid: wp.array(dtype=wp.int32),
+    anchor_w: wp.array(dtype=wp.vec3),
     anchor_kt_ratio: float,
     # outputs
     body_f: wp.array(dtype=wp.spatial_vector),
@@ -2723,7 +2814,12 @@ def accumulate_tri_sdf_reaction_kernel(
         # T8 mirror of the force kernel's anchor branch, minus every write.
         mu = wp.sqrt(friction_mu * shape_material_mu[shape])
         if mu > 0.0 and anchor_valid[tid] != 0:
-            slip_w = wp.transform_vector(X_ws, p_local - anchor_p[tid])
+            # T12: same seeded material point as the force kernel (p_local uses
+            # THIS iteration's winner and would reintroduce the jump).
+            aw = anchor_w[tid]
+            slip_w = wp.transform_vector(
+                X_ws, (a * aw[0] + b * aw[1] + c * aw[2]) - anchor_p[tid]
+            )
             slip_t = slip_w - n_world * wp.dot(slip_w, n_world)
             f_t = slip_t * (-tri_stiffness[t] * anchor_kt_ratio)
             cone = mu * f_n

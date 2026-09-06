@@ -957,8 +957,10 @@ class Collision:
                     # T8 anchor (inert unless tri_sdf_anchor_kt_ratio > 0)
                     self.tri_sdf_anchor_p,
                     self.tri_sdf_anchor_valid,
+                    self.tri_sdf_anchor_w,
                     self.tri_sdf_anchor_kt_ratio,
                     1 if _iter == 0 else 0,
+                    self.tri_sdf_anchor_dbg,
                 ],
                 outputs=[particle_forces, self.contact_hessian_diags],
                 device=self.model.device,
@@ -1035,6 +1037,7 @@ class Collision:
                 # T8 anchor, read only (inert unless tri_sdf_anchor_kt_ratio > 0)
                 self.tri_sdf_anchor_p,
                 self.tri_sdf_anchor_valid,
+                self.tri_sdf_anchor_w,
                 self.tri_sdf_anchor_kt_ratio,
             ],
             outputs=[body_f],
@@ -1452,6 +1455,19 @@ class Collision:
         self.tri_sdf_anchor_valid = wp.zeros(
             self.tri_sdf_slots * int(self.model.tri_count), dtype=wp.int32, device=device
         )
+        # T12: the barycentric coordinates the anchor was seeded on, so the
+        # tangential spring tracks one material point instead of the
+        # closest-point search's per-iteration winner.
+        self.tri_sdf_anchor_w = wp.zeros(
+            self.tri_sdf_slots * int(self.model.tri_count), dtype=wp.vec3, device=device
+        )
+        # T12 验法探针：T12_ANCHOR_DBG=1 时按对写出诊断量，否则哑数组（内核跳过写）。
+        import os as _os_t12
+        _dbg_n = (
+            self.tri_sdf_slots * int(self.model.tri_count)
+            if _os_t12.environ.get("T12_ANCHOR_DBG") else 1
+        )
+        self.tri_sdf_anchor_dbg = wp.zeros(_dbg_n, dtype=wp.vec4, device=device)
         if self.tri_sdf_anchor_kt_ratio > 0.0:
             print(
                 "[collision] tri-SDF TRUE STATIC friction (T8 anchor): "
