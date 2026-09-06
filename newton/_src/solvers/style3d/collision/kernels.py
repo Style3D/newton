@@ -2404,7 +2404,6 @@ def eval_tri_sdf_contact_kernel(
     anchor_w: wp.array(dtype=wp.vec3),
     anchor_kt_ratio: float,
     anchor_seed: int,
-    anchor_map: int,
     # T12 验法：每对写出 (|slip_t|, 是否在锥上, |搜索点-播种材料点|, f_n)。
     # 纯诊断，力律不读它；关闭时传长度 1 的哑数组。
     anchor_dbg: wp.array(dtype=wp.vec4),
@@ -2482,9 +2481,7 @@ def eval_tri_sdf_contact_kernel(
         # T8: the pair separated -> drop the anchor.  Seeding/holding is keyed on
         # GEOMETRIC contact (best <= h), not on the force band, so a pair that
         # leaves the shell starts clean the next time it comes back.
-        # T13 fix3: separation is judged on the CONVERGED state (last iteration),
-        # not on the trial state of iteration 0.
-        if anchor_kt_ratio > 0.0 and anchor_map != 0:
+        if anchor_kt_ratio > 0.0 and anchor_seed != 0:
             anchor_valid[tid] = 0
         return
 
@@ -2579,19 +2576,54 @@ def eval_tri_sdf_contact_kernel(
                 aw = w          # 修前行为：参照点跟着每次迭代的搜索赢家跑
             # cloth material point, in the shape's local frame (a/b/c already are)
             q_loc = a * aw[0] + b * aw[1] + c * aw[2]
-            slip_loc = wp.vec3(0.0, 0.0, 0.0)
-            if seeded == 0:
-                if anchor_seed != 0:
+            kt = k * anchor_kt_ratio
+            cone = mu * f_n
+            if anchor_seed != 0:
+                # T13 fix3': seeding and the elastoplastic RETURN MAPPING happen
+                # once per substep, on iteration 0, but evaluated in the PREVIOUS
+                # body pose -- i.e. on the previous substep's converged state
+                # (pos is still x_prev here, so x_prev with body_q_prev is a
+                # consistent configuration).  The original code did this with
+                # body_q (the NEW pose): the trial slip then already contained
+                # the blade's substep displacement delta, and whenever
+                # delta > slip_max the anchor was dragged back by (delta -
+                # slip_max) every substep regardless of load -- a velocity-driven
+                # ratchet (bench: cloth slipped at 96-99 % of plate speed at
+                # rho = 1/6; task: fold slid out at 80 mm/s during the lift).
+                # Mapping on the last Newton iteration instead (first attempt)
+                # removed the ratchet but turned un-converged iterates into
+                # permanent drift (bench: 0.9 mm/s creep at rho = 1/6 on a static
+                # plate).  The previous converged state has neither problem.
+                X_ws_p = shape_transform[shape]
+                if body >= 0:
+                    X_ws_p = body_q_prev[body] * shape_transform[shape]
+                X_sw_p = wp.transform_inverse(X_ws_p)
+                q_prev_loc = (
+                    wp.transform_point(X_sw_p, pos[i0]) * aw[0]
+                    + wp.transform_point(X_sw_p, pos[i1]) * aw[1]
+                    + wp.transform_point(X_sw_p, pos[i2]) * aw[2]
+                )
+                if seeded == 0:
                     anchor_w[tid] = w
-                    anchor_p[tid] = q_loc
+                    anchor_p[tid] = q_prev_loc
                     anchor_valid[tid] = 1
-            else:
+                    seeded = 1
+                else:
+                    sp_loc = q_prev_loc - anchor_p[tid]
+                    sp_w = wp.transform_vector(X_ws_p, sp_loc)
+                    sp_t = sp_w - n_world * wp.dot(sp_w, n_world)
+                    lp = wp.length(sp_t)
+                    if kt * lp > cone and kt > 1.0e-12 and lp > 1.0e-12:
+                        # sliding at the end of the previous substep: park the
+                        # anchor slip_max behind the material point.
+                        keep = wp.transform_vector(X_sw_p, sp_t * (cone / (kt * lp)))
+                        anchor_p[tid] = q_prev_loc - keep
+            slip_loc = wp.vec3(0.0, 0.0, 0.0)
+            if seeded != 0:
                 slip_loc = q_loc - anchor_p[tid]
             slip_w = wp.transform_vector(X_ws, slip_loc)
             slip_t = slip_w - n_world * wp.dot(slip_w, n_world)
-            kt = k * anchor_kt_ratio
             f_t = slip_t * (-kt)
-            cone = mu * f_n
             m = wp.length(f_t)
             if anchor_seed != 0 and anchor_dbg.shape[0] > 1:
                 q_search = a * w[0] + b * w[1] + c * w[2]
@@ -2602,23 +2634,11 @@ def eval_tri_sdf_contact_kernel(
                     f_n,
                 )
             if m > cone:
-                # sliding: clamp to the cone and drag the anchor up behind it so
-                # the spring holds exactly mu*N next step (return mapping).
+                # sliding: clamp to the cone.  The anchor itself is advanced on
+                # the next substep's iteration 0 (see above), never inside the
+                # Newton loop and never on a trial or un-converged state.
                 if m > 1.0e-12:
                     f_t = f_t * (cone / m)
-                # T13 fix3: RETURN MAPPING ONLY ON THE CONVERGED STATE.  Doing it on
-                # iteration 0 mapped the TRIAL slip, which already contains the
-                # blade's full substep displacement delta (body_q is the new pose,
-                # pos is still x_prev).  Whenever delta > slip_max the anchor was
-                # dragged back by (delta - slip_max) every substep regardless of
-                # load: a velocity-driven ratchet.  Measured: at 130 mm/s lift the
-                # fold slid out at ~80 mm/s under a 0.3 N load against a 3 N cone;
-                # at v = 0 (static hold) it held.  Threshold v* = slip_max/dt.
-                if kt > 1.0e-12 and anchor_map != 0:
-                    ln = wp.length(slip_t)
-                    if ln > 1.0e-12:
-                        keep = wp.transform_vector(X_sw, slip_t * (cone / (kt * ln)))
-                        anchor_p[tid] = q_loc - keep
                 f_t_a = f_t
                 # T12-b FIX: the sliding branch MUST return a tangential
                 # stiffness.  The old comment ("no tangential stiffness, same as

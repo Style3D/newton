@@ -237,9 +237,6 @@ class SolverStyle3D(SolverBase):
         """
         if self.collision is not None:
             self.collision.frame_begin(state_in.particle_q, state_in.particle_qd, dt)
-            # T13: the tri-SDF friction anchor return-maps on the LAST Newton
-            # iteration (converged state); the collision object needs the count.
-            self.collision.nonlinear_iterations = self.nonlinear_iterations
         self._translation_preconditioner_dt = dt
         self._translation_contact_hessian_diags = self._translation_zero_contact_hessian
 
