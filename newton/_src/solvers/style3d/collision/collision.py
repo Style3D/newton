@@ -1479,7 +1479,7 @@ class Collision:
         self.tri_sdf_anchor_dbg2 = wp.zeros((_dbg_n, 20), dtype=float, device=device)
         if self.tri_sdf_anchor_kt_ratio > 0.0:
             print(
-                "[collision] tri-SDF TRUE STATIC friction (T8 anchor, T13 map@last-iter): "
+                "[collision] tri-SDF TRUE STATIC friction (T8 anchor, T13 map@last-iter+consistent-tangent): "
                 f"kt_ratio={self.tri_sdf_anchor_kt_ratio:g} "
                 f"(kt = kt_ratio * k_tri; predicted pre-slip at mu=0.7, depth=0.3mm: "
                 f"{0.7 * 0.3 / self.tri_sdf_anchor_kt_ratio * 1000:.0f} um)",
