@@ -2672,10 +2672,18 @@ def eval_tri_sdf_contact_kernel(
                 # the first fling swing, 17 -> 0 particles in 16 frames while IPC
                 # held 13-14).  cone/|slip_t| equals kt exactly at the cone
                 # boundary (|slip_t| = slip_max), so the tangent is continuous.
+                # T13 fix6: blend.  Near the cone (|slip_t| <= 3*slip_max) keep
+                # the stiff kt tangent -- on a soft, non-converged cloth the soft
+                # cone/|slip| tangent let the iterates wander and the return map
+                # turned that into creep (bench, spec cloth: 0.69 -> 8.66 mm/s).
+                # Far from the cone (fast blade, |slip_t| = v*dt >> slip_max) the
+                # tangent must soften or Newton cannot catch up (fix4 finding).
+                # 3*cone/|slip_t| equals kt at |slip_t| = 3*slip_max (continuous)
+                # and still gives a catch-up step of |slip_t|/3 per iteration.
                 ln_t = wp.length(slip_t)
                 k_cone = kt
                 if ln_t > 1.0e-12:
-                    k_cone = wp.min(kt, cone / ln_t)
+                    k_cone = wp.min(kt, 3.0 * cone / ln_t)
                 nn_t_a = (wp.identity(n=3, dtype=float) - wp.outer(n_world, n_world)) * k_cone
             else:
                 f_t_a = f_t
