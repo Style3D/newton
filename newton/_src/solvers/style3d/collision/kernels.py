@@ -2640,7 +2640,23 @@ def eval_tri_sdf_contact_kernel(
                 # alternative, one line:
                 #     nn_t_a = (wp.identity(n=3, dtype=float)
                 #               - wp.outer(n_world, n_world)) * (cone / ln_t)
-                nn_t_a = (wp.identity(n=3, dtype=float) - wp.outer(n_world, n_world)) * kt
+                # T13 fix4: CONSISTENT tangent on the cone, cone/|slip_t| (the IPC
+                # sliding-branch form), not kt.  With kt the Newton step for a pair
+                # that must catch up delta = v*dt to the blade is only
+                # cone/kt = slip_max (~0.04-0.1 mm) per iteration: 20 iterations
+                # cover 0.8 mm, so at lift speed (0.26 mm/substep) the cloth
+                # converges but at fling speed (2-4 mm/substep) it lags, and the
+                # converged-state return map then parks the anchor behind the
+                # lagging cloth every substep -- the same ratchet, now caused by
+                # non-convergence (measured: fix3 held the lift, lost the fold in
+                # the first fling swing, 17 -> 0 particles in 16 frames while IPC
+                # held 13-14).  cone/|slip_t| equals kt exactly at the cone
+                # boundary (|slip_t| = slip_max), so the tangent is continuous.
+                ln_t = wp.length(slip_t)
+                k_cone = kt
+                if ln_t > 1.0e-12:
+                    k_cone = wp.min(kt, cone / ln_t)
+                nn_t_a = (wp.identity(n=3, dtype=float) - wp.outer(n_world, n_world)) * k_cone
             else:
                 f_t_a = f_t
                 # sticking: the full tangential spring, projected off the normal.
