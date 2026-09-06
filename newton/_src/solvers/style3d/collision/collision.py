@@ -128,6 +128,9 @@ class Collision:
         self.tri_sdf_anchor_p = None
         self.tri_sdf_anchor_valid = None
         self.tri_sdf_anchor_kt_ratio = 0.0
+        # T13: set by SolverStyle3D.step() every step; the anchor return map
+        # runs on the last Newton iteration (converged state).
+        self.nonlinear_iterations = 20
         self.tri_sdf_w_valid = False
         # R13g: how often inside a substep the barycentric contact point is
         # re-searched.  0 = once, at iteration 0 (full freeze).  n > 0 = every
@@ -959,7 +962,10 @@ class Collision:
                     self.tri_sdf_anchor_valid,
                     self.tri_sdf_anchor_w,
                     self.tri_sdf_anchor_kt_ratio,
+                    # T13 fix3: seed on the trial state (iter 0), return-map on
+                    # the converged state (last Newton iteration).
                     1 if _iter == 0 else 0,
+                    1 if _iter == self.nonlinear_iterations - 1 else 0,
                     self.tri_sdf_anchor_dbg,
                     self.tri_sdf_anchor_dbg2,
                 ],
@@ -1473,7 +1479,7 @@ class Collision:
         self.tri_sdf_anchor_dbg2 = wp.zeros((_dbg_n, 20), dtype=float, device=device)
         if self.tri_sdf_anchor_kt_ratio > 0.0:
             print(
-                "[collision] tri-SDF TRUE STATIC friction (T8 anchor): "
+                "[collision] tri-SDF TRUE STATIC friction (T8 anchor, T13 map@last-iter): "
                 f"kt_ratio={self.tri_sdf_anchor_kt_ratio:g} "
                 f"(kt = kt_ratio * k_tri; predicted pre-slip at mu=0.7, depth=0.3mm: "
                 f"{0.7 * 0.3 / self.tri_sdf_anchor_kt_ratio * 1000:.0f} um)",

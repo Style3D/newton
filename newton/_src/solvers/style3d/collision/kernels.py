@@ -2391,7 +2391,7 @@ def eval_tri_sdf_contact_kernel(
     mesh_max_dist: float,
     # T8: true static friction on this channel.  ``anchor_kt_ratio <= 0`` (the
     # default) skips every statement below and leaves the IPC law in charge, so
-    # the OFF path is bit-identical.  ``anchor_update`` is 1 only on the first
+    # the OFF path is bit-identical.  ``anchor_seed`` is 1 only on the first
     # Newton iteration of a substep: the anchor is a per-STEP state, not a
     # per-iteration one, and re-mapping it inside the loop would let the spring
     # chase its own solution.
@@ -2403,12 +2403,13 @@ def eval_tri_sdf_contact_kernel(
     # face is not the same point twice (see the seeding block below).
     anchor_w: wp.array(dtype=wp.vec3),
     anchor_kt_ratio: float,
-    anchor_update: int,
+    anchor_seed: int,
+    anchor_map: int,
     # T12 验法：每对写出 (|slip_t|, 是否在锥上, |搜索点-播种材料点|, f_n)。
     # 纯诊断，力律不读它；关闭时传长度 1 的哑数组。
     anchor_dbg: wp.array(dtype=wp.vec4),
     # T13 验法：逐对向量诊断，形状 [n_pairs, 20]，关闭时传 (1, 20) 哑数组。
-    # 与 anchor_dbg 同条件写（anchor_update != 0 且锚开启），力律不读它。
+    # 与 anchor_dbg 同条件写（anchor_seed != 0 且锚开启），力律不读它。
     # 0-2 n_world | 3 f_n | 4-6 f_t(钳制后, 世界) | 7-9 slip_t(世界, m)
     # 10-12 搜索点世界坐标 | 13-15 播种材料点世界坐标 | 16 播种点自身有符号距离
     # 17 newly_seeded | 18 slot | 19 cone(=mu*f_n)
@@ -2481,7 +2482,9 @@ def eval_tri_sdf_contact_kernel(
         # T8: the pair separated -> drop the anchor.  Seeding/holding is keyed on
         # GEOMETRIC contact (best <= h), not on the force band, so a pair that
         # leaves the shell starts clean the next time it comes back.
-        if anchor_kt_ratio > 0.0 and anchor_update != 0:
+        # T13 fix3: separation is judged on the CONVERGED state (last iteration),
+        # not on the trial state of iteration 0.
+        if anchor_kt_ratio > 0.0 and anchor_map != 0:
             anchor_valid[tid] = 0
         return
 
@@ -2578,7 +2581,7 @@ def eval_tri_sdf_contact_kernel(
             q_loc = a * aw[0] + b * aw[1] + c * aw[2]
             slip_loc = wp.vec3(0.0, 0.0, 0.0)
             if seeded == 0:
-                if anchor_update != 0:
+                if anchor_seed != 0:
                     anchor_w[tid] = w
                     anchor_p[tid] = q_loc
                     anchor_valid[tid] = 1
@@ -2590,7 +2593,7 @@ def eval_tri_sdf_contact_kernel(
             f_t = slip_t * (-kt)
             cone = mu * f_n
             m = wp.length(f_t)
-            if anchor_update != 0 and anchor_dbg.shape[0] > 1:
+            if anchor_seed != 0 and anchor_dbg.shape[0] > 1:
                 q_search = a * w[0] + b * w[1] + c * w[2]
                 anchor_dbg[tid] = wp.vec4(
                     wp.length(slip_t),
@@ -2603,7 +2606,15 @@ def eval_tri_sdf_contact_kernel(
                 # the spring holds exactly mu*N next step (return mapping).
                 if m > 1.0e-12:
                     f_t = f_t * (cone / m)
-                if kt > 1.0e-12 and anchor_update != 0:
+                # T13 fix3: RETURN MAPPING ONLY ON THE CONVERGED STATE.  Doing it on
+                # iteration 0 mapped the TRIAL slip, which already contains the
+                # blade's full substep displacement delta (body_q is the new pose,
+                # pos is still x_prev).  Whenever delta > slip_max the anchor was
+                # dragged back by (delta - slip_max) every substep regardless of
+                # load: a velocity-driven ratchet.  Measured: at 130 mm/s lift the
+                # fold slid out at ~80 mm/s under a 0.3 N load against a 3 N cone;
+                # at v = 0 (static hold) it held.  Threshold v* = slip_max/dt.
+                if kt > 1.0e-12 and anchor_map != 0:
                     ln = wp.length(slip_t)
                     if ln > 1.0e-12:
                         keep = wp.transform_vector(X_sw, slip_t * (cone / (kt * ln)))
@@ -2636,7 +2647,7 @@ def eval_tri_sdf_contact_kernel(
                 nn_t_a = (wp.identity(n=3, dtype=float) - wp.outer(n_world, n_world)) * kt
             # T13 逐对向量诊断（纯输出）。f_t_a 已是钳制后的最终切向力，
             # best_seed 用与内核同一个后端查询函数对播种材料点 q_loc 再查一次。
-            if anchor_update != 0 and anchor_dbg2.shape[0] > 1:
+            if anchor_seed != 0 and anchor_dbg2.shape[0] > 1:
                 q_search_w = wp.transform_point(X_ws, a * w[0] + b * w[1] + c * w[2])
                 q_seed_w = wp.transform_point(X_ws, q_loc)
                 best_seed = float(bg)
