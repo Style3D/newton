@@ -2407,6 +2407,12 @@ def eval_tri_sdf_contact_kernel(
     # T12 验法：每对写出 (|slip_t|, 是否在锥上, |搜索点-播种材料点|, f_n)。
     # 纯诊断，力律不读它；关闭时传长度 1 的哑数组。
     anchor_dbg: wp.array(dtype=wp.vec4),
+    # T13 验法：逐对向量诊断，形状 [n_pairs, 20]，关闭时传 (1, 20) 哑数组。
+    # 与 anchor_dbg 同条件写（anchor_update != 0 且锚开启），力律不读它。
+    # 0-2 n_world | 3 f_n | 4-6 f_t(钳制后, 世界) | 7-9 slip_t(世界, m)
+    # 10-12 搜索点世界坐标 | 13-15 播种材料点世界坐标 | 16 播种点自身有符号距离
+    # 17 newly_seeded | 18 slot | 19 cone(=mu*f_n)
+    anchor_dbg2: wp.array2d(dtype=float),
     # outputs
     forces: wp.array(dtype=wp.vec3),
     hessians: wp.array(dtype=wp.mat33),
@@ -2628,6 +2634,41 @@ def eval_tri_sdf_contact_kernel(
                 f_t_a = f_t
                 # sticking: the full tangential spring, projected off the normal.
                 nn_t_a = (wp.identity(n=3, dtype=float) - wp.outer(n_world, n_world)) * kt
+            # T13 逐对向量诊断（纯输出）。f_t_a 已是钳制后的最终切向力，
+            # best_seed 用与内核同一个后端查询函数对播种材料点 q_loc 再查一次。
+            if anchor_update != 0 and anchor_dbg2.shape[0] > 1:
+                q_search_w = wp.transform_point(X_ws, a * w[0] + b * w[1] + c * w[2])
+                q_seed_w = wp.transform_point(X_ws, q_loc)
+                best_seed = float(bg)
+                if _R16_SDF_EXACT != 0:
+                    d_seed, n_seed = sdf_mesh_query(
+                        sdf_mesh[slot], half_thickness + 0.01, bg, q_loc
+                    )
+                    best_seed = d_seed
+                else:
+                    best_seed = sdf_grid_sample(
+                        sdf, base, nx, ny, nz, org, inv_voxel, bg, q_loc
+                    )
+                anchor_dbg2[tid, 0] = n_world[0]
+                anchor_dbg2[tid, 1] = n_world[1]
+                anchor_dbg2[tid, 2] = n_world[2]
+                anchor_dbg2[tid, 3] = f_n
+                anchor_dbg2[tid, 4] = f_t_a[0]
+                anchor_dbg2[tid, 5] = f_t_a[1]
+                anchor_dbg2[tid, 6] = f_t_a[2]
+                anchor_dbg2[tid, 7] = slip_t[0]
+                anchor_dbg2[tid, 8] = slip_t[1]
+                anchor_dbg2[tid, 9] = slip_t[2]
+                anchor_dbg2[tid, 10] = q_search_w[0]
+                anchor_dbg2[tid, 11] = q_search_w[1]
+                anchor_dbg2[tid, 12] = q_search_w[2]
+                anchor_dbg2[tid, 13] = q_seed_w[0]
+                anchor_dbg2[tid, 14] = q_seed_w[1]
+                anchor_dbg2[tid, 15] = q_seed_w[2]
+                anchor_dbg2[tid, 16] = best_seed
+                anchor_dbg2[tid, 17] = wp.where(seeded == 0, 1.0, 0.0)
+                anchor_dbg2[tid, 18] = float(slot)
+                anchor_dbg2[tid, 19] = cone
             aw_out = aw
     elif _R13F_SDF_FRICTION != 0:
         mu = wp.sqrt(friction_mu * shape_material_mu[shape])

@@ -961,6 +961,7 @@ class Collision:
                     self.tri_sdf_anchor_kt_ratio,
                     1 if _iter == 0 else 0,
                     self.tri_sdf_anchor_dbg,
+                    self.tri_sdf_anchor_dbg2,
                 ],
                 outputs=[particle_forces, self.contact_hessian_diags],
                 device=self.model.device,
@@ -1468,6 +1469,8 @@ class Collision:
             if _os_t12.environ.get("T12_ANCHOR_DBG") else 1
         )
         self.tri_sdf_anchor_dbg = wp.zeros(_dbg_n, dtype=wp.vec4, device=device)
+        # T13 逐对向量诊断：同一开关，形状 [n_pairs, 20]（关闭时 (1, 20) 哑数组）。
+        self.tri_sdf_anchor_dbg2 = wp.zeros((_dbg_n, 20), dtype=float, device=device)
         if self.tri_sdf_anchor_kt_ratio > 0.0:
             print(
                 "[collision] tri-SDF TRUE STATIC friction (T8 anchor): "
