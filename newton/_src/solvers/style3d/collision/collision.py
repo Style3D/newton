@@ -13,6 +13,7 @@ from newton._src.solvers.style3d.collision.kernels import (
     accumulate_projection_impulse_kernel,
     apply_contact_projection_kernel,
     bake_shape_sdf_kernel,
+    bake_shape_face_kernel,
     count_particle_contacts_kernel,
     clamp_body_wrench_kernel,
     eval_rigid_edge_cloth_edge_contacts_kernel,
@@ -37,6 +38,7 @@ from newton._src.solvers.style3d.collision.kernels import (
     add_tri_sdf_cache_kernel,
     tri_sdf_par_cull_kernel,
     tri_sdf_par_seed_kernel,
+    SdfGridExact,
 )
 from newton._src.solvers.style3d.collision import _t14_prof
 
@@ -81,6 +83,99 @@ def _t14_bake_load(key):
         return np.load(fp)
     except Exception:  # noqa: BLE001  (a corrupt cache must never break a run)
         return None
+
+
+# --- T15-A: nearest-triangle grid + pseudo-normal bake --------------------
+# Same cache mechanism as the T14 SDF bake: the key covers everything the table
+# depends on, so a hit is bitwise the table the bake would have produced.
+
+
+def _t15_gx_dir():
+    import os
+
+    return os.environ.get(
+        "T15_SDF_GX_CACHE",
+        "/home/hwk/program/synreal-world/data/eval_out/gripper_penetration/T15/gx_cache",
+    )
+
+
+def _t15_gx_key(vertices, indices, voxel, pad, max_dist, lo, n):
+    import hashlib
+
+    h = hashlib.sha256()
+    h.update(np.ascontiguousarray(vertices, dtype=np.float32).tobytes())
+    h.update(np.ascontiguousarray(indices, dtype=np.int32).tobytes())
+    h.update(np.asarray([voxel, pad, max_dist], dtype=np.float64).tobytes())
+    h.update(np.ascontiguousarray(lo, dtype=np.float32).tobytes())
+    h.update(np.ascontiguousarray(n, dtype=np.int32).tobytes())
+    h.update(b"bake_shape_face_kernel+pseudo_normals/v1")
+    return h.hexdigest()
+
+
+def _t15_gx_load(key):
+    import os
+
+    fp = os.path.join(_t15_gx_dir(), key + ".npz")
+    if not os.path.exists(fp):
+        return None, None, None
+    try:
+        z = np.load(fp)
+        return z["face"], z["vn"], z["en"]
+    except Exception:  # noqa: BLE001  (a corrupt cache must never break a run)
+        return None, None, None
+
+
+def _t15_gx_store(key, face, vn, en):
+    import os
+
+    d = _t15_gx_dir()
+    try:
+        os.makedirs(d, exist_ok=True)
+        tmp = os.path.join(d, key + ".tmp.npz")
+        np.savez(tmp, face=face, vn=vn, en=en)
+        os.replace(tmp, os.path.join(d, key + ".npz"))
+    except Exception as e:  # noqa: BLE001
+        print(f"[collision] T15 gx cache store failed ({e}); continuing", flush=True)
+
+
+def _t15_pseudo_normals(vertices, indices):
+    """Angle-weighted vertex normals and two-face edge normals.
+
+    Baerentzen & Aanaes 2005: with these the sign test ``dot(p - cp, N_feature)``
+    is exact for a closed mesh whatever feature (face / edge / vertex) carries
+    the closest point.  ``en`` is stored per (face, local edge) --
+    ``en[3*f + 0]`` = edge (v0,v1) = AB, ``+1`` = (v0,v2) = AC, ``+2`` = (v1,v2)
+    = BC -- so the query needs no edge table, just the winning face and feature
+    code that ``triangle_closest_point`` already returns.
+    """
+    v = np.asarray(vertices, dtype=np.float64)
+    tris = np.asarray(indices, dtype=np.int64).reshape(-1, 3)
+    p0, p1, p2 = v[tris[:, 0]], v[tris[:, 1]], v[tris[:, 2]]
+    fn = np.cross(p1 - p0, p2 - p0)
+    fn /= np.maximum(np.linalg.norm(fn, axis=1, keepdims=True), 1.0e-300)
+
+    def _angle(o, x, y):
+        e1 = x - o
+        e2 = y - o
+        e1 = e1 / np.maximum(np.linalg.norm(e1, axis=1, keepdims=True), 1.0e-300)
+        e2 = e2 / np.maximum(np.linalg.norm(e2, axis=1, keepdims=True), 1.0e-300)
+        return np.arccos(np.clip((e1 * e2).sum(axis=1), -1.0, 1.0))
+
+    vn = np.zeros_like(v)
+    for k, ang in enumerate((_angle(p0, p1, p2), _angle(p1, p2, p0), _angle(p2, p0, p1))):
+        np.add.at(vn, tris[:, k], fn * ang[:, None])
+    vn /= np.maximum(np.linalg.norm(vn, axis=1, keepdims=True), 1.0e-300)
+
+    # AB, AC, BC -- the order of TRI_CONTACT_FEATURE_EDGE_{AB,AC,BC}
+    pairs = np.stack([tris[:, [0, 1]], tris[:, [0, 2]], tris[:, [1, 2]]], axis=1).reshape(-1, 2)
+    keyed = np.sort(pairs, axis=1)
+    _uk, inv = np.unique(keyed, axis=0, return_inverse=True)
+    inv = inv.reshape(-1)
+    acc = np.zeros((len(_uk), 3))
+    np.add.at(acc, inv, np.repeat(fn, 3, axis=0))
+    en = acc[inv]
+    en /= np.maximum(np.linalg.norm(en, axis=1, keepdims=True), 1.0e-300)
+    return vn.astype(np.float32), en.astype(np.float32)
 
 
 def _t14_bake_store(key, arr):
@@ -799,6 +894,7 @@ class Collision:
                     self.tri_sdf_mesh_id,
                     self.tri_sdf_bg,
                     self.tri_sdf_h,
+                    self.tri_sdf_gx,
                 ],
                 outputs=[self.tri_sdf_par_g_best, self.tri_sdf_par_g_n],
                 device=self.model.device,
@@ -821,6 +917,7 @@ class Collision:
                     self.tri_sdf_refine,
                     self.tri_sdf_par_g_best,
                     self.tri_sdf_par_g_n,
+                    self.tri_sdf_gx,
                 ],
                 outputs=[self.tri_sdf_par_best, self.tri_sdf_par_w, self.tri_sdf_par_n],
                 device=self.model.device,
@@ -1217,6 +1314,8 @@ class Collision:
                                 self.tri_sdf_hold_n,
                                 _hold_mode,
                                 self.tri_sdf_hold_diag,
+                                # T15-A nearest-triangle table (inert unless T15_SDF_GRIDEXACT)
+                                self.tri_sdf_gx,
                             ],
                             outputs=[_out_f, _out_h],
                             device=self.model.device,
@@ -1240,6 +1339,131 @@ class Collision:
             self._r13f_body_q_prev = (
                 state_in.body_q if self.integrate_with_external_rigid_solver else state_out.body_q
             )
+
+
+    def _t15_build_gridexact(self, device, verts_list, inds_list, meshes, pad, bake_max_dist, voxel):
+        """T15-A: bake the nearest-triangle grid and the mesh pseudo-normals.
+
+        Grid geometry mirrors the SDF bake line for line (same ``lo``, same
+        ``n``, same padding), so the two tables index the same cells;
+        ``T15_SDF_GX_VOXEL`` overrides the spacing for the accuracy/memory
+        sweep and leaves the SDF bake alone.  Shapes whose (geometry, grid) key
+        matches -- the four identical blades -- share ONE stored table.
+
+        Returns a string for the backend self-certification print.
+        """
+        import os
+
+        gx = SdfGridExact()
+
+        def _dummy():
+            gx.face = wp.zeros(1, dtype=wp.int32, device=device)
+            gx.vnrm = wp.zeros(1, dtype=wp.vec3, device=device)
+            gx.enrm = wp.zeros(1, dtype=wp.vec3, device=device)
+            gx.fbase = wp.zeros(1, dtype=wp.int32, device=device)
+            gx.vbase = wp.zeros(1, dtype=wp.int32, device=device)
+            gx.ebase = wp.zeros(1, dtype=wp.int32, device=device)
+            gx.nx = wp.zeros(1, dtype=wp.int32, device=device)
+            gx.ny = wp.zeros(1, dtype=wp.int32, device=device)
+            gx.nz = wp.zeros(1, dtype=wp.int32, device=device)
+            gx.org = wp.zeros(1, dtype=wp.vec3, device=device)
+            gx.inv_voxel = 1.0
+
+        if os.environ.get("T15_SDF_GRIDEXACT", "0") in ("", "0"):
+            _dummy()
+            self.tri_sdf_gx = gx
+            return ""
+
+        gx_voxel = float(os.environ.get("T15_SDF_GX_VOXEL", "") or voxel)
+        face_blocks, vn_blocks, en_blocks = [], [], []
+        fbase, vbase, ebase = [], [], []
+        gnx, gny, gnz, gorg = [], [], [], []
+        seen = {}
+        ftot = vtot = etot = 0
+        for vertices, indices, mesh in zip(verts_list, inds_list, meshes):
+            lo = vertices.min(axis=0) - pad
+            hi = vertices.max(axis=0) + pad
+            n = np.maximum(np.ceil((hi - lo) / gx_voxel).astype(np.int32) + 1, 2)
+            key = _t15_gx_key(vertices, indices, gx_voxel, pad, bake_max_dist, lo, n)
+            if key not in seen:
+                face, vn, en = _t15_gx_load(key)
+                if face is None:
+                    count = int(n[0]) * int(n[1]) * int(n[2])
+                    _t0 = __import__("time").perf_counter()
+                    d_face = wp.zeros(count, dtype=wp.int32, device=device)
+                    wp.launch(
+                        bake_shape_face_kernel,
+                        dim=(int(n[0]), int(n[1]), int(n[2])),
+                        inputs=[
+                            mesh.id,
+                            wp.vec3(float(lo[0]), float(lo[1]), float(lo[2])),
+                            float(gx_voxel),
+                            int(n[0]),
+                            int(n[1]),
+                            int(n[2]),
+                            0,
+                            float(bake_max_dist),
+                        ],
+                        outputs=[d_face],
+                        device=device,
+                    )
+                    wp.synchronize_device()
+                    face = d_face.numpy()
+                    del d_face
+                    vn, en = _t15_pseudo_normals(vertices, indices)
+                    print(
+                        f"[collision] T15 gx bake: {count} cells "
+                        f"({count * 4 / 1.0e6:.1f} MB) + {len(vn)} vertex / {len(en)} edge "
+                        f"pseudo-normals in "
+                        f"{__import__('time').perf_counter() - _t0:.2f} s",
+                        flush=True,
+                    )
+                    _t15_gx_store(key, face, vn, en)
+                else:
+                    print(
+                        f"[collision] T15 gx CACHE HIT: {len(face)} cells from {key[:12]}",
+                        flush=True,
+                    )
+                seen[key] = (ftot, vtot, etot)
+                face_blocks.append(np.ascontiguousarray(face, dtype=np.int32))
+                vn_blocks.append(np.ascontiguousarray(vn, dtype=np.float32))
+                en_blocks.append(np.ascontiguousarray(en, dtype=np.float32))
+                ftot += len(face)
+                vtot += len(vn)
+                etot += len(en)
+            fb, vb, eb = seen[key]
+            fbase.append(fb)
+            vbase.append(vb)
+            ebase.append(eb)
+            gnx.append(int(n[0]))
+            gny.append(int(n[1]))
+            gnz.append(int(n[2]))
+            gorg.append(np.asarray(lo, dtype=np.float32))
+
+        if not face_blocks:
+            _dummy()
+            self.tri_sdf_gx = gx
+            return ""
+
+        gx.face = wp.array(np.concatenate(face_blocks), dtype=wp.int32, device=device)
+        gx.vnrm = wp.array(np.concatenate(vn_blocks), dtype=wp.vec3, device=device)
+        gx.enrm = wp.array(np.concatenate(en_blocks), dtype=wp.vec3, device=device)
+        gx.fbase = wp.array(np.asarray(fbase, dtype=np.int32), dtype=wp.int32, device=device)
+        gx.vbase = wp.array(np.asarray(vbase, dtype=np.int32), dtype=wp.int32, device=device)
+        gx.ebase = wp.array(np.asarray(ebase, dtype=np.int32), dtype=wp.int32, device=device)
+        gx.nx = wp.array(np.asarray(gnx, dtype=np.int32), dtype=wp.int32, device=device)
+        gx.ny = wp.array(np.asarray(gny, dtype=np.int32), dtype=wp.int32, device=device)
+        gx.nz = wp.array(np.asarray(gnz, dtype=np.int32), dtype=wp.int32, device=device)
+        gx.org = wp.array(np.asarray(gorg, dtype=np.float32), dtype=wp.vec3, device=device)
+        gx.inv_voxel = 1.0 / gx_voxel
+        self.tri_sdf_gx = gx
+        self.tri_sdf_gx_voxel = gx_voxel
+        _miss = int((np.concatenate(face_blocks) < 0).sum())
+        return (
+            f" + T15 GRIDEXACT (8-corner face table, gx_voxel={gx_voxel * 1000:g} mm, "
+            f"{len(face_blocks)} distinct table(s), {ftot} cells "
+            f"[{ftot * 4 / 1.0e6:.2f} MB], {_miss} empty)"
+        )
 
     def accumulate_tri_sdf_reaction(
         self,
@@ -1326,6 +1550,8 @@ class Collision:
                         self.tri_sdf_hold_p,
                         self.tri_sdf_hold_n,
                         2 if self.tri_sdf_hold else 0,
+                        # T15-A nearest-triangle table (inert unless T15_SDF_GRIDEXACT)
+                        self.tri_sdf_gx,
                     ],
                     outputs=[body_f],
                     device=self.model.device,
@@ -1632,6 +1858,8 @@ class Collision:
         shape_scale = self.model.shape_scale.numpy()
 
         blocks, bases, dims, origins, slots, meshes = [], [], [], [], [], []
+        # T15-A: the source geometry per slot, kept for the nearest-triangle bake
+        gx_verts, gx_inds = [], []
         # T14: the blade's own bounds in the SHAPE-LOCAL frame -- the very frame
         # the contact kernel transforms the cloth triangles into.  Rigid shape, so
         # these never change and are computed once here.
@@ -1714,6 +1942,8 @@ class Collision:
             origins.append(lo)
             slots.append(shape)
             meshes.append(mesh)
+            gx_verts.append(vertices)
+            gx_inds.append(indices)
             total += count
 
         if not blocks:
@@ -1748,6 +1978,9 @@ class Collision:
         self.tri_sdf_max_correction = float(max_correction)
         self.tri_sdf_slots = len(slots)
         self.tri_sdf_compliant = bool(compliant)
+        _gx_note = self._t15_build_gridexact(
+            device, gx_verts, gx_inds, meshes, float(pad), float(bake_max_dist), float(voxel)
+        )
         _exact = int(__import__("os").environ.get("R16_SDF_EXACT", "0"))
         print(
             "[collision] tri-SDF query backend = "
@@ -1761,6 +1994,7 @@ class Collision:
                 2: " + EDGE_EXACT=2 (exact depth+normal at edge-flagged pairs)",
                 3: " + EDGE_EXACT=3 (exact depth+normal at all near pairs)"}
                .get(int(__import__("os").environ.get("T14_SDF_EDGE_EXACT", "0") or 0), ""))
+            + _gx_note
             + f": {len(slots)} shape(s), voxel={voxel * 1000:g} mm, h={half_thickness * 1000:g} mm, "
             + f"grid={total} cells ({total * 4 / 1.0e6:.2f} MB)",
             flush=True,

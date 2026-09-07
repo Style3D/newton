@@ -4,7 +4,15 @@
 import warp as wp
 
 from newton._src.geometry import ParticleFlags
-from newton._src.geometry.kernels import triangle_closest_point
+from newton._src.geometry.kernels import (
+    TRI_CONTACT_FEATURE_EDGE_AB,
+    TRI_CONTACT_FEATURE_EDGE_AC,
+    TRI_CONTACT_FEATURE_EDGE_BC,
+    TRI_CONTACT_FEATURE_VERTEX_A,
+    TRI_CONTACT_FEATURE_VERTEX_B,
+    TRI_CONTACT_FEATURE_VERTEX_C,
+    triangle_closest_point,
+)
 from newton._src.solvers.vbd.rigid_vbd_kernels import (
     HARDENING_DEN_MIN,
     _eval_body_particle_contact_banded,
@@ -242,6 +250,95 @@ _T14_SDF_ALLSEED = wp.constant(int(__import__("os").environ.get("T14_SDF_ALLSEED
 #   grid's rounded tip also costs bite at the blade edge.
 # 0 = OFF: the single ``sdf_grid_gradient`` call below is all that is emitted.
 _T14_SDF_EDGE_EXACT = wp.constant(int(__import__("os").environ.get("T14_SDF_EDGE_EXACT", "0")))
+
+
+
+# T15-A: O(1) EXACT closest-point backend for the tri-SDF contact channel.
+#
+# The exact backend (R16_SDF_EXACT) answers every query with
+# ``wp.mesh_query_point_sign_normal`` -- a BVH descent over the 21302-face blade
+# mesh.  ``tri_sdf_closest_mesh`` issues 7 of them per near triangle and they
+# form a DEPENDENCY CHAIN (each refinement step needs the previous winner's
+# normal), so the force kernel is latency bound: 0.369 ms/launch against
+# 0.066 ms for the same kernel reading a trilinear voxel table.  T14 established
+# that the query COUNT is locked by the force law (the deepest point on the
+# triangle must be re-searched every Newton iteration) and that the blade cannot
+# be decimated (4000 faces -> Hausdorff p99 0.26 mm, the working penetration
+# depth).  So the only head left is the COST OF ONE QUERY.
+#
+# This backend replaces the tree walk with a table lookup that is still EXACT:
+#   bake  -- on the same dense grid the SDF is baked on, store the id of the
+#            NEAREST TRIANGLE at every grid point (int32), plus the mesh's
+#            angle-weighted vertex pseudo-normals and edge pseudo-normals
+#            (Baerentzen & Aanaes 2005, the same construction
+#            ``mesh_query_point_sign_normal`` signs with).
+#   query -- read the 8 corner face ids of the cell holding p, de-duplicate,
+#            run the analytic point-triangle closest point (Ericson 5.1.5) on
+#            each, keep the minimum, and sign it with the winning FEATURE's
+#            pseudo-normal (face / edge / vertex).  Distance and normal are then
+#            the same floating-point expressions the BVH path evaluates -- the
+#            grid only chooses WHICH triangles to test.
+#
+# Not an approximation of the field, but an approximation of the CANDIDATE SET:
+# the true nearest triangle of p is assumed to be the nearest triangle of one of
+# the 8 corners.  That holds wherever the surface is locally resolved by the
+# grid and can fail near the medial axis or on features thinner than a cell; the
+# T15 harness measures exactly that, and it is the only thing that can differ
+# from the BVH answer.
+# 0 = OFF: ``sdf_query`` calls ``sdf_mesh_query`` and nothing below is reached.
+_T15_SDF_GRIDEXACT = wp.constant(int(__import__("os").environ.get("T15_SDF_GRIDEXACT", "0")))
+
+
+@wp.struct
+class SdfGridExact:
+    """Per-shape nearest-triangle grid and mesh pseudo-normals for T15-A.
+
+    All arrays are concatenations over the DISTINCT shape meshes; the per-slot
+    ``*base`` arrays index into them, so four blades built from one source mesh
+    store one grid and one normal set.  ``face[i] < 0`` marks a grid point with
+    no triangle inside the bake radius.  With ``T15_SDF_GRIDEXACT`` unset none
+    of this is read (length-1 dummies are still allocated so the struct is a
+    valid kernel argument).
+    """
+
+    face: wp.array(dtype=wp.int32)
+    vnrm: wp.array(dtype=wp.vec3)
+    enrm: wp.array(dtype=wp.vec3)
+    fbase: wp.array(dtype=wp.int32)
+    vbase: wp.array(dtype=wp.int32)
+    ebase: wp.array(dtype=wp.int32)
+    nx: wp.array(dtype=wp.int32)
+    ny: wp.array(dtype=wp.int32)
+    nz: wp.array(dtype=wp.int32)
+    org: wp.array(dtype=wp.vec3)
+    inv_voxel: float
+
+
+@wp.kernel
+def bake_shape_face_kernel(
+    mesh: wp.uint64,
+    origin: wp.vec3,
+    voxel: float,
+    nx: int,
+    ny: int,
+    nz: int,
+    base: int,
+    max_dist: float,
+    # outputs
+    face: wp.array(dtype=wp.int32),
+):
+    """One-time nearest-triangle bake of a rigid shape onto a dense grid.
+
+    Sign is not needed here (the query re-derives it from the pseudo-normals),
+    so this uses the cheapest of the three point queries.
+    """
+    i, j, k = wp.tid()
+    p = origin + wp.vec3(float(i) * voxel, float(j) * voxel, float(k) * voxel)
+    f = int(-1)
+    q = wp.mesh_query_point_no_sign(mesh, p, max_dist)
+    if q.result:
+        f = q.face
+    face[base + (i * ny + j) * nz + k] = f
 
 
 @wp.func
@@ -2501,11 +2598,146 @@ def sdf_mesh_query(mesh: wp.uint64, max_dist: float, bg: float, p: wp.vec3):
 
 
 @wp.func
+def sdf_mesh_query_grid(
+    mesh: wp.uint64,
+    gx: SdfGridExact,
+    slot: int,
+    max_dist: float,
+    bg: float,
+    p: wp.vec3,
+):
+    """``sdf_mesh_query``'s answer, found by table lookup instead of BVH descent.
+
+    Same contract, same units, same sentinel: returns ``(d, n)`` with ``d``
+    negative inside the solid and ``n`` the unit outward gradient, and ``d = bg``
+    when nothing is within ``max_dist``.  The closest point is computed
+    analytically on the candidate triangles (so the distance is a length, exact
+    to machine precision, exactly as the BVH path's is); only the CANDIDATE SET
+    comes from the grid -- the union of the nearest triangles of the 8 corners of
+    the cell holding ``p``.
+    """
+    d = bg
+    n = wp.vec3(0.0, 0.0, 1.0)
+    nx = gx.nx[slot]
+    ny = gx.ny[slot]
+    nz = gx.nz[slot]
+    q = (p - gx.org[slot]) * gx.inv_voxel
+    if q[0] < 0.0:
+        return d, n
+    if q[1] < 0.0:
+        return d, n
+    if q[2] < 0.0:
+        return d, n
+    ix = int(q[0])
+    iy = int(q[1])
+    iz = int(q[2])
+    if ix >= nx - 1:
+        return d, n
+    if iy >= ny - 1:
+        return d, n
+    if iz >= nz - 1:
+        return d, n
+
+    c000 = gx.fbase[slot] + (ix * ny + iy) * nz + iz
+    best = float(3.0e38)
+    cpb = wp.vec3(0.0)
+    fb = int(-1)
+    featb = int(0)
+    for m in range(8):
+        di = m / 4
+        dj = (m - di * 4) / 2
+        dk = m - di * 4 - dj * 2
+        f = gx.face[c000 + (di * ny + dj) * nz + dk]
+        if f >= 0:
+            # de-duplicate against the corners already tested (the 8 corners of
+            # a cell in contact usually share one or two faces)
+            dup = int(0)
+            for m2 in range(m):
+                di2 = m2 / 4
+                dj2 = (m2 - di2 * 4) / 2
+                dk2 = m2 - di2 * 4 - dj2 * 2
+                if gx.face[c000 + (di2 * ny + dj2) * nz + dk2] == f:
+                    dup = 1
+            if dup == 0:
+                # NB: ``mesh_get_point`` takes a FACE-VERTEX index and does the
+                # ``indices[]`` dereference itself; ``mesh_get_index`` is only
+                # needed where the POINT id itself is wanted (the vertex
+                # pseudo-normal lookup below).
+                v0 = wp.mesh_get_point(mesh, f * 3 + 0)
+                v1 = wp.mesh_get_point(mesh, f * 3 + 1)
+                v2 = wp.mesh_get_point(mesh, f * 3 + 2)
+                cp, bary, feat = triangle_closest_point(v0, v1, v2, p)
+                dd = wp.length(p - cp)
+                if dd < best:
+                    best = dd
+                    cpb = cp
+                    fb = f
+                    featb = feat
+    if fb < 0:
+        return d, n
+    if best > max_dist:
+        return d, n
+
+    # Sign from the CLOSEST FEATURE's pseudo-normal.  On a closed mesh the
+    # angle-weighted vertex normal and the two-face edge normal make the
+    # in/out test exact for a point whose closest feature is that vertex/edge
+    # (Baerentzen & Aanaes 2005); the face-interior case is the face normal.
+    pn = wp.mesh_eval_face_normal(mesh, fb)
+    if featb == TRI_CONTACT_FEATURE_VERTEX_A:
+        pn = gx.vnrm[gx.vbase[slot] + wp.mesh_get_index(mesh, fb * 3 + 0)]
+    elif featb == TRI_CONTACT_FEATURE_VERTEX_B:
+        pn = gx.vnrm[gx.vbase[slot] + wp.mesh_get_index(mesh, fb * 3 + 1)]
+    elif featb == TRI_CONTACT_FEATURE_VERTEX_C:
+        pn = gx.vnrm[gx.vbase[slot] + wp.mesh_get_index(mesh, fb * 3 + 2)]
+    elif featb == TRI_CONTACT_FEATURE_EDGE_AB:
+        pn = gx.enrm[gx.ebase[slot] + fb * 3 + 0]
+    elif featb == TRI_CONTACT_FEATURE_EDGE_AC:
+        pn = gx.enrm[gx.ebase[slot] + fb * 3 + 1]
+    elif featb == TRI_CONTACT_FEATURE_EDGE_BC:
+        pn = gx.enrm[gx.ebase[slot] + fb * 3 + 2]
+
+    delta = p - cpb
+    sgn = 1.0
+    if wp.dot(delta, pn) < 0.0:
+        sgn = -1.0
+    if best < 1.0e-9:
+        # exactly on the surface: same convention as ``sdf_mesh_query``
+        d = 0.0
+        n = wp.mesh_eval_face_normal(mesh, fb)
+    else:
+        d = best * sgn
+        n = delta * (sgn / best)
+    return d, n
+
+
+@wp.func
+def sdf_query(
+    mesh: wp.uint64,
+    gx: SdfGridExact,
+    slot: int,
+    max_dist: float,
+    bg: float,
+    p: wp.vec3,
+):
+    """Backend switch for the exact field evaluation.  OFF = ``sdf_mesh_query``
+    verbatim, so the default path emits the same statements it always did."""
+    d = bg
+    n = wp.vec3(0.0, 0.0, 1.0)
+    if _T15_SDF_GRIDEXACT != 0:
+        d, n = sdf_mesh_query_grid(mesh, gx, slot, max_dist, bg, p)
+    else:
+        d, n = sdf_mesh_query(mesh, max_dist, bg, p)
+    return d, n
+
+
+@wp.func
 def tri_sdf_refine_from(
     a: wp.vec3,
     b: wp.vec3,
     c: wp.vec3,
     mesh: wp.uint64,
+    gx: SdfGridExact,
+    slot: int,
     bg: float,
     rq: float,
     w: wp.vec3,
@@ -2547,7 +2779,7 @@ def tri_sdf_refine_from(
                             if pc[2] == p_best[2]:
                                 probe = 0
                 if probe != 0:
-                    dcand, ncand = sdf_mesh_query(mesh, rq, bg, pc)
+                    dcand, ncand = sdf_query(mesh, gx, slot, rq, bg, pc)
                     if dcand < best:
                         best = dcand
                         w = cand
@@ -2564,6 +2796,8 @@ def tri_sdf_closest_mesh(
     b: wp.vec3,
     c: wp.vec3,
     mesh: wp.uint64,
+    gx: SdfGridExact,
+    slot: int,
     bg: float,
     cull: float,
     refine_steps: int,
@@ -2591,35 +2825,35 @@ def tri_sdf_closest_mesh(
     # produced ``best``.  So carry its normal along instead of re-querying: the
     # evaluated points are exactly the same, 7 queries per triangle instead of
     # 11, and the caller gets the contact normal for free.
-    best, nbest = sdf_mesh_query(mesh, cull + reach, bg, g)
+    best, nbest = sdf_query(mesh, gx, slot, cull + reach, bg, g)
     if best >= bg:
         return w, bg, nbest
     if _T14_SDF_RQ != 0:
         rq = wp.abs(best) + reach + 1.0e-6
     # the point that actually produced ``best`` (see _T14_SDF_SKIPREF)
     p_best = g
-    da, na = sdf_mesh_query(mesh, rq, bg, a)
+    da, na = sdf_query(mesh, gx, slot, rq, bg, a)
     if da < best:
         best = da
         w = wp.vec3(1.0, 0.0, 0.0)
         nbest = na
         if _T14_SDF_SKIPREF != 0:
             p_best = a
-    db, nb = sdf_mesh_query(mesh, rq, bg, b)
+    db, nb = sdf_query(mesh, gx, slot, rq, bg, b)
     if db < best:
         best = db
         w = wp.vec3(0.0, 1.0, 0.0)
         nbest = nb
         if _T14_SDF_SKIPREF != 0:
             p_best = b
-    dc, nc = sdf_mesh_query(mesh, rq, bg, c)
+    dc, nc = sdf_query(mesh, gx, slot, rq, bg, c)
     if dc < best:
         best = dc
         w = wp.vec3(0.0, 0.0, 1.0)
         nbest = nc
         if _T14_SDF_SKIPREF != 0:
             p_best = c
-    return tri_sdf_refine_from(a, b, c, mesh, bg, rq, w, best, nbest, p_best, refine_steps)
+    return tri_sdf_refine_from(a, b, c, mesh, gx, slot, bg, rq, w, best, nbest, p_best, refine_steps)
 
 
 @wp.kernel
@@ -2708,6 +2942,9 @@ def eval_tri_sdf_contact_kernel(
     # [4] sum|db| in contact [5] n in contact [6] max|db| in contact
     # [7] signed sum (held - true) in contact [8] sum|dn| [9] sum|dw|
     hold_diag: wp.array(dtype=float),
+    # T15-A: nearest-triangle grid + pseudo-normals for the O(1) exact
+    # backend (inert unless _T15_SDF_GRIDEXACT).
+    gx: SdfGridExact,
     # outputs
     forces: wp.array(dtype=wp.vec3),
     hessians: wp.array(dtype=wp.mat33),
@@ -2791,14 +3028,14 @@ def eval_tri_sdf_contact_kernel(
             # seed+descent search.  Keeps the exact distance and the exact
             # normal, drops only the re-optimisation of WHERE on the triangle
             # the closest point sits.
-            best, n_exact = sdf_mesh_query(sdf_mesh[slot], mesh_max_dist, bg, q_hold)
+            best, n_exact = sdf_query(sdf_mesh[slot], gx, slot, mesh_max_dist, bg, q_hold)
         else:
             n_exact = hold_n[pair]
             best = wp.dot(n_exact, q_hold - hold_p[pair])
         if _T14_SDF_HOLD_DIAG != 0:
             # what the un-held code would have said at this same iterate
             w_t, best_t, n_t = tri_sdf_closest_mesh(
-                a, b, c, sdf_mesh[slot], bg, half_thickness, refine_steps
+                a, b, c, sdf_mesh[slot], gx, slot, bg, half_thickness, refine_steps
             )
             if best_t < bg:
                 d = wp.abs(best - best_t)
@@ -2844,7 +3081,7 @@ def eval_tri_sdf_contact_kernel(
     elif _R16_SDF_EXACT != 0:
         # R16-A2': same search, exact field.  The freeze switch is a grid-path
         # remedy for the winner-take-all redraw and is not combined with it.
-        w, best, n_exact = tri_sdf_closest_mesh(a, b, c, sdf_mesh[slot], bg, half_thickness, refine_steps)
+        w, best, n_exact = tri_sdf_closest_mesh(a, b, c, sdf_mesh[slot], gx, slot, bg, half_thickness, refine_steps)
     elif _R13G_SDF_FREEZE == 0:
         w, best = tri_sdf_closest(a, b, c, sdf, base, nx, ny, nz, org, inv_voxel, voxel, bg, refine_steps)
     else:
@@ -2893,7 +3130,7 @@ def eval_tri_sdf_contact_kernel(
             # query still leaves a usable normal, then overwrite with the exact
             # depth and normal at the winner point.
             n_local = sdf_grid_gradient(sdf, base, nx, ny, nz, org, inv_voxel, bg, voxel, p)
-            d_h, n_h = sdf_mesh_query(sdf_mesh[slot], mesh_max_dist, bg, p)
+            d_h, n_h = sdf_query(sdf_mesh[slot], gx, slot, mesh_max_dist, bg, p)
             if d_h < bg:
                 n_local = n_h
                 depth = wp.max(wp.min(half_thickness - d_h, max_depth), 0.0)
@@ -2905,7 +3142,7 @@ def eval_tri_sdf_contact_kernel(
             )
             n_local = ng_e
             if wp.abs(gmag_e - 1.0) > 0.1:
-                d_e, n_e = sdf_mesh_query(sdf_mesh[slot], mesh_max_dist, bg, p)
+                d_e, n_e = sdf_query(sdf_mesh[slot], gx, slot, mesh_max_dist, bg, p)
                 if d_e < bg:
                     n_local = n_e
                     if _T14_SDF_EDGE_EXACT == 2:
@@ -3119,8 +3356,8 @@ def eval_tri_sdf_contact_kernel(
                 q_seed_w = wp.transform_point(X_ws, q_loc)
                 best_seed = float(bg)
                 if _R16_SDF_EXACT != 0:
-                    d_seed, n_seed = sdf_mesh_query(
-                        sdf_mesh[slot], half_thickness + 0.01, bg, q_loc
+                    d_seed, n_seed = sdf_query(
+                        sdf_mesh[slot], gx, slot, half_thickness + 0.01, bg, q_loc
                     )
                     best_seed = d_seed
                 else:
@@ -3269,6 +3506,9 @@ def accumulate_tri_sdf_reaction_kernel(
     hold_p: wp.array(dtype=wp.vec3),
     hold_n: wp.array(dtype=wp.vec3),
     hold_mode: int,
+    # T15-A: nearest-triangle grid + pseudo-normals for the O(1) exact
+    # backend (inert unless _T15_SDF_GRIDEXACT).
+    gx: SdfGridExact,
     # outputs
     body_f: wp.array(dtype=wp.spatial_vector),
 ):
@@ -3336,7 +3576,7 @@ def accumulate_tri_sdf_reaction_kernel(
         w = hold_w[pair]
         q_hold = a * w[0] + b * w[1] + c * w[2]
         if _T14_SDF_HOLD == 2:
-            best, n_exact = sdf_mesh_query(sdf_mesh[slot], mesh_max_dist, bg, q_hold)
+            best, n_exact = sdf_query(sdf_mesh[slot], gx, slot, mesh_max_dist, bg, q_hold)
         else:
             n_exact = hold_n[pair]
             best = wp.dot(n_exact, q_hold - hold_p[pair])
@@ -3366,7 +3606,7 @@ def accumulate_tri_sdf_reaction_kernel(
     elif _R16_SDF_EXACT != 0:
         # R16-A2': identical query to the force pass, so the two halves of the
         # contact cannot disagree about where or how deep it is.
-        w, best, n_exact = tri_sdf_closest_mesh(a, b, c, sdf_mesh[slot], bg, half_thickness, refine_steps)
+        w, best, n_exact = tri_sdf_closest_mesh(a, b, c, sdf_mesh[slot], gx, slot, bg, half_thickness, refine_steps)
     elif _R13G_SDF_FREEZE == 0:
         w, best = tri_sdf_closest(a, b, c, sdf, base, nx, ny, nz, org, inv_voxel, voxel, bg, refine_steps)
     else:
@@ -3394,7 +3634,7 @@ def accumulate_tri_sdf_reaction_kernel(
             # query still leaves a usable normal, then overwrite with the exact
             # depth and normal at the winner point.
             n_local = sdf_grid_gradient(sdf, base, nx, ny, nz, org, inv_voxel, bg, voxel, p_local)
-            d_h, n_h = sdf_mesh_query(sdf_mesh[slot], mesh_max_dist, bg, p_local)
+            d_h, n_h = sdf_query(sdf_mesh[slot], gx, slot, mesh_max_dist, bg, p_local)
             if d_h < bg:
                 n_local = n_h
                 depth = wp.max(wp.min(half_thickness - d_h, max_depth), 0.0)
@@ -3406,7 +3646,7 @@ def accumulate_tri_sdf_reaction_kernel(
             )
             n_local = ng_e
             if wp.abs(gmag_e - 1.0) > 0.1:
-                d_e, n_e = sdf_mesh_query(sdf_mesh[slot], mesh_max_dist, bg, p_local)
+                d_e, n_e = sdf_query(sdf_mesh[slot], gx, slot, mesh_max_dist, bg, p_local)
                 if d_e < bg:
                     n_local = n_e
                     if _T14_SDF_EDGE_EXACT == 2:
@@ -3638,6 +3878,9 @@ def tri_sdf_par_cull_kernel(
     sdf_mesh: wp.array(dtype=wp.uint64),
     bg: float,
     half_thickness: float,
+    # T15-A: nearest-triangle grid + pseudo-normals for the O(1) exact
+    # backend (inert unless _T15_SDF_GRIDEXACT).
+    gx: SdfGridExact,
     # outputs
     g_best: wp.array(dtype=float),
     g_n: wp.array(dtype=wp.vec3),
@@ -3663,7 +3906,7 @@ def tri_sdf_par_cull_kernel(
     third = 1.0 / 3.0
     g = (a + b + c) * third
     reach = wp.max(wp.length(a - g), wp.max(wp.length(b - g), wp.length(c - g)))
-    d, n = sdf_mesh_query(sdf_mesh[slot], half_thickness + reach, bg, g)
+    d, n = sdf_query(sdf_mesh[slot], gx, slot, half_thickness + reach, bg, g)
     g_best[pair] = d
     g_n[pair] = n
 
@@ -3683,6 +3926,9 @@ def tri_sdf_par_seed_kernel(
     refine_steps: int,
     g_best: wp.array(dtype=float),
     g_n: wp.array(dtype=wp.vec3),
+    # T15-A: nearest-triangle grid + pseudo-normals for the O(1) exact
+    # backend (inert unless _T15_SDF_GRIDEXACT).
+    gx: SdfGridExact,
     # outputs, 4 per pair
     par_best: wp.array(dtype=float),
     par_w: wp.array(dtype=wp.vec3),
@@ -3728,20 +3974,22 @@ def tri_sdf_par_seed_kernel(
     if seed == 1:
         w = wp.vec3(1.0, 0.0, 0.0)
         p0 = a
-        best, nb = sdf_mesh_query(sdf_mesh[slot], rq, bg, a)
+        best, nb = sdf_query(sdf_mesh[slot], gx, slot, rq, bg, a)
     if seed == 2:
         w = wp.vec3(0.0, 1.0, 0.0)
         p0 = b
-        best, nb = sdf_mesh_query(sdf_mesh[slot], rq, bg, b)
+        best, nb = sdf_query(sdf_mesh[slot], gx, slot, rq, bg, b)
     if seed == 3:
         w = wp.vec3(0.0, 0.0, 1.0)
         p0 = c
-        best, nb = sdf_mesh_query(sdf_mesh[slot], rq, bg, c)
+        best, nb = sdf_query(sdf_mesh[slot], gx, slot, rq, bg, c)
     if best >= bg:
         par_best[tid] = bg
         return
 
-    w, best, nb = tri_sdf_refine_from(a, b, c, sdf_mesh[slot], bg, rq, w, best, nb, p0, refine_steps)
+    w, best, nb = tri_sdf_refine_from(
+        a, b, c, sdf_mesh[slot], gx, slot, bg, rq, w, best, nb, p0, refine_steps
+    )
     par_best[tid] = best
     par_w[tid] = w
     par_n[tid] = nb
