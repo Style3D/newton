@@ -231,6 +231,10 @@ _T14_SDF_ALLSEED = wp.constant(int(__import__("os").environ.get("T14_SDF_ALLSEED
 # direction is replaced, because depth already converges with the grid (p99
 # 0.053 mm at 0.25 mm) while the edge normal does not (p99 44 deg at 0.25 mm,
 # 43 deg at 0.125 mm).
+# Modes: 1 = take only the NORMAL from the fallback query (depth stays the
+#   grid's, which is what the accuracy harness says already converges);
+#   2 = take BOTH the normal and the DEPTH from it, for the case where the
+#   grid's rounded tip also costs bite at the blade edge.
 # 0 = OFF: the single ``sdf_grid_gradient`` call below is all that is emitted.
 _T14_SDF_EDGE_EXACT = wp.constant(int(__import__("os").environ.get("T14_SDF_EDGE_EXACT", "0")))
 
@@ -2890,6 +2894,12 @@ def eval_tri_sdf_contact_kernel(
                 d_e, n_e = sdf_mesh_query(sdf_mesh[slot], mesh_max_dist, bg, p)
                 if d_e < bg:
                     n_local = n_e
+                    if _T14_SDF_EDGE_EXACT == 2:
+                        # mode 2: the depth comes from the exact field too.
+                        # Clamped at 0 because the exact field can put this
+                        # point outside the shell that the grid put inside;
+                        # a negative depth would flip the force outward.
+                        depth = wp.max(wp.min(half_thickness - d_e, max_depth), 0.0)
         else:
             n_local = sdf_grid_gradient(sdf, base, nx, ny, nz, org, inv_voxel, bg, voxel, p)
     n_world = wp.transform_vector(X_ws, n_local)
@@ -3376,6 +3386,12 @@ def accumulate_tri_sdf_reaction_kernel(
                 d_e, n_e = sdf_mesh_query(sdf_mesh[slot], mesh_max_dist, bg, p_local)
                 if d_e < bg:
                     n_local = n_e
+                    if _T14_SDF_EDGE_EXACT == 2:
+                        # mode 2: the depth comes from the exact field too.
+                        # Clamped at 0 because the exact field can put this
+                        # point outside the shell that the grid put inside;
+                        # a negative depth would flip the force outward.
+                        depth = wp.max(wp.min(half_thickness - d_e, max_depth), 0.0)
         else:
             n_local = sdf_grid_gradient(sdf, base, nx, ny, nz, org, inv_voxel, bg, voxel, p_local)
     n_world = wp.transform_vector(X_ws, n_local)
