@@ -32,7 +32,10 @@ from newton._src.solvers.style3d.collision.kernels import (
     solve_rigid_untangling_kernel,
     summarize_feature_query_kernel,
     transform_rigid_feature_vertices_kernel,
+    tri_sdf_broadphase_kernel,
+    tri_sdf_bp_selfcheck_kernel,
 )
+from newton._src.solvers.style3d.collision import _t14_prof
 
 ########################################################################################################################
 ###################################################    Collision    ####################################################
@@ -695,6 +698,90 @@ class Collision:
                 False,
             )
 
+    # ------------------------------------------------------------------ T14
+    def _t14_launch_plan(self, n_pairs: int):
+        """(dim, bp_mode) pairs the tri-SDF kernels are launched over.
+
+        OFF: exactly one full launch, ``bp_mode`` unread (dead code in the
+        kernel), i.e. the launch this stack always issued.
+
+        ON: two launches with FIXED dims -- the candidate pass over the list's
+        capacity, and a full-scan pass that every thread exits on its first
+        statement unless the gather overflowed.  Two fixed launches rather than
+        one sized launch is what keeps this CUDA-graph capturable: the
+        alternative needs the candidate count on the host.
+        """
+        if not self.tri_sdf_bp_enabled:
+            return ((n_pairs, 0),)
+        if not self.tri_sdf_bp_fallback:
+            # measurement knob only -- drops the overflow safety net
+            return ((self.tri_sdf_bp_capacity, 1),)
+        return ((self.tri_sdf_bp_capacity, 1), (n_pairs, 0))
+
+    def _t14_broadphase(self, particle_q, body_q, n_pairs: int):
+        """Rebuild the tri-SDF candidate list for this substep."""
+        self.tri_sdf_cand_count.zero_()
+        self.tri_sdf_bp_overflow.zero_()
+        with _t14_prof.section("tri_sdf_broadphase"):
+            wp.launch(
+                tri_sdf_broadphase_kernel,
+                dim=n_pairs,
+                inputs=[
+                    particle_q,
+                    self.model.tri_indices,
+                    int(self.model.tri_count),
+                    self.tri_sdf_slot_shape,
+                    self.model.shape_body,
+                    self.model.shape_transform,
+                    body_q,
+                    self.tri_sdf_bp_aabb_lo,
+                    self.tri_sdf_bp_aabb_hi,
+                    self.tri_sdf_h,
+                    self.tri_sdf_bp_slack,
+                    self.tri_sdf_bp_capacity,
+                    self.tri_sdf_anchor_valid,
+                    self.tri_sdf_anchor_kt_ratio,
+                ],
+                outputs=[
+                    self.tri_sdf_cand_idx,
+                    self.tri_sdf_cand_count,
+                    self.tri_sdf_bp_overflow,
+                ],
+                device=self.model.device,
+            )
+        if self.tri_sdf_bp_selfcheck:
+            # Verification only: re-runs the REAL centroid cull on all pairs and
+            # counts the ones the gather dropped.  Host readback -- never on a
+            # timing run, never inside a graph.
+            self.tri_sdf_bp_stats.zero_()
+            wp.launch(
+                tri_sdf_bp_selfcheck_kernel,
+                dim=n_pairs,
+                inputs=[
+                    particle_q,
+                    self.model.tri_indices,
+                    int(self.model.tri_count),
+                    self.tri_sdf_slot_shape,
+                    self.model.shape_body,
+                    self.model.shape_transform,
+                    body_q,
+                    self.tri_sdf_bp_aabb_lo,
+                    self.tri_sdf_bp_aabb_hi,
+                    self.tri_sdf_h,
+                    self.tri_sdf_bp_slack,
+                    self.tri_sdf_mesh_id,
+                    self.tri_sdf_bg,
+                ],
+                outputs=[self.tri_sdf_bp_stats],
+                device=self.model.device,
+            )
+            st = self.tri_sdf_bp_stats.numpy()
+            ov = int(self.tri_sdf_bp_overflow.numpy()[0])
+            cnt = int(self.tri_sdf_cand_count.numpy()[0])
+            self.tri_sdf_bp_stats_hist.append(
+                (cnt, int(st[0]), int(st[1]), int(st[2]), int(st[3]), ov)
+            )
+
     def accumulate_contact_force(
         self,
         dt: float,
@@ -914,60 +1001,78 @@ class Collision:
             )
 
         if self.tri_sdf_slot_shape is not None and self.tri_sdf_compliant:
-            wp.launch(
-                eval_tri_sdf_contact_kernel,
-                dim=self.tri_sdf_slots * self.model.tri_count,
-                inputs=[
-                    state_out.particle_q,
-                    self.model.tri_indices,
-                    int(self.model.tri_count),
-                    self.tri_sdf_stiffness,
-                    self.tri_sdf_data,
-                    self.tri_sdf_base,
-                    self.tri_sdf_nx,
-                    self.tri_sdf_ny,
-                    self.tri_sdf_nz,
-                    self.tri_sdf_origin,
-                    self.tri_sdf_voxel,
-                    self.tri_sdf_bg,
-                    self.tri_sdf_slot_shape,
-                    self.model.shape_body,
-                    self.model.shape_transform,
-                    state_out.body_q if self.integrate_with_external_rigid_solver else state_in.body_q,
-                    self.tri_sdf_h,
-                    self.tri_sdf_max_correction,
-                    self.tri_sdf_refine,
-                    self.shape_hardening_eps,
-                    self.model.particle_radius,
-                    # R13f friction inputs (inert unless R13F_SDF_FRICTION)
-                    particle_q_prev,
-                    state_in.body_q if self.integrate_with_external_rigid_solver else state_out.body_q,
-                    self.model.shape_material_mu,
-                    self.model.soft_contact_mu,
-                    self.friction_epsilon,
-                    dt,
-                    # R13g frozen contact point (inert unless R13G_SDF_FREEZE)
-                    self.tri_sdf_w,
-                    (1 if _iter == 0 else 0)
-                    if self.tri_sdf_resolve_every <= 0
-                    else (1 if (_iter % self.tri_sdf_resolve_every) == 0 else 0),
-                    # R16-A2' exact backend (inert unless R16_SDF_EXACT)
-                    self.tri_sdf_mesh_id,
-                    self.tri_sdf_mesh_max_dist,
-                    # T8 anchor (inert unless tri_sdf_anchor_kt_ratio > 0)
-                    self.tri_sdf_anchor_p,
-                    self.tri_sdf_anchor_valid,
-                    self.tri_sdf_anchor_w,
-                    self.tri_sdf_anchor_kt_ratio,
-                    # T13: seeding + return mapping on iteration 0, evaluated in
-                    # the previous pose (= previous substep's converged state).
-                    1 if _iter == 0 else 0,
-                    self.tri_sdf_anchor_dbg,
-                    self.tri_sdf_anchor_dbg2,
-                ],
-                outputs=[particle_forces, self.contact_hessian_diags],
-                device=self.model.device,
+            _tri_sdf_body_q = (
+                state_out.body_q if self.integrate_with_external_rigid_solver else state_in.body_q
             )
+            _n_pairs = self.tri_sdf_slots * int(self.model.tri_count)
+            if self.tri_sdf_bp_enabled and _iter == 0:
+                # T14: rebuild the candidate list once per substep.  The blade
+                # pose is fixed inside a substep and the cloth's motion over the
+                # 20 iterations is covered by ``tri_sdf_bp_slack``, so the list
+                # built here is valid for every consumer of this substep --
+                # including the reaction pass, which runs after the solve.
+                self._t14_broadphase(state_out.particle_q, _tri_sdf_body_q, _n_pairs)
+            for _bp_dim, _bp_mode in self._t14_launch_plan(_n_pairs):
+                with _t14_prof.section("tri_sdf_force"):
+                    wp.launch(
+                        eval_tri_sdf_contact_kernel,
+                        dim=_bp_dim,
+                        inputs=[
+                            state_out.particle_q,
+                            self.model.tri_indices,
+                            int(self.model.tri_count),
+                            self.tri_sdf_stiffness,
+                            self.tri_sdf_data,
+                            self.tri_sdf_base,
+                            self.tri_sdf_nx,
+                            self.tri_sdf_ny,
+                            self.tri_sdf_nz,
+                            self.tri_sdf_origin,
+                            self.tri_sdf_voxel,
+                            self.tri_sdf_bg,
+                            self.tri_sdf_slot_shape,
+                            self.model.shape_body,
+                            self.model.shape_transform,
+                            state_out.body_q if self.integrate_with_external_rigid_solver else state_in.body_q,
+                            self.tri_sdf_h,
+                            self.tri_sdf_max_correction,
+                            self.tri_sdf_refine,
+                            self.shape_hardening_eps,
+                            self.model.particle_radius,
+                            # R13f friction inputs (inert unless R13F_SDF_FRICTION)
+                            particle_q_prev,
+                            state_in.body_q if self.integrate_with_external_rigid_solver else state_out.body_q,
+                            self.model.shape_material_mu,
+                            self.model.soft_contact_mu,
+                            self.friction_epsilon,
+                            dt,
+                            # R13g frozen contact point (inert unless R13G_SDF_FREEZE)
+                            self.tri_sdf_w,
+                            (1 if _iter == 0 else 0)
+                            if self.tri_sdf_resolve_every <= 0
+                            else (1 if (_iter % self.tri_sdf_resolve_every) == 0 else 0),
+                            # R16-A2' exact backend (inert unless R16_SDF_EXACT)
+                            self.tri_sdf_mesh_id,
+                            self.tri_sdf_mesh_max_dist,
+                            # T8 anchor (inert unless tri_sdf_anchor_kt_ratio > 0)
+                            self.tri_sdf_anchor_p,
+                            self.tri_sdf_anchor_valid,
+                            self.tri_sdf_anchor_w,
+                            self.tri_sdf_anchor_kt_ratio,
+                            # T13: seeding + return mapping on iteration 0, evaluated in
+                            # the previous pose (= previous substep's converged state).
+                            1 if _iter == 0 else 0,
+                            self.tri_sdf_anchor_dbg,
+                            self.tri_sdf_anchor_dbg2,
+                            # T14 broad phase (inert unless T14_SDF_BROADPHASE)
+                            self.tri_sdf_cand_idx,
+                            self.tri_sdf_cand_count,
+                            self.tri_sdf_bp_overflow,
+                            _bp_mode,
+                        ],
+                        outputs=[particle_forces, self.contact_hessian_diags],
+                        device=self.model.device,
+                    )
             self.tri_sdf_w_valid = True
             # R13f: the reaction pass runs outside the solver loop and gets no
             # dt / previous state of its own.  Stash exactly what this pass used
@@ -994,58 +1099,65 @@ class Collision:
         """
         if self.tri_sdf_slot_shape is None or not self.tri_sdf_compliant:
             return
-        wp.launch(
-            accumulate_tri_sdf_reaction_kernel,
-            dim=self.tri_sdf_slots * self.model.tri_count,
-            inputs=[
-                particle_q,
-                self.model.tri_indices,
-                int(self.model.tri_count),
-                self.tri_sdf_stiffness,
-                self.tri_sdf_data,
-                self.tri_sdf_base,
-                self.tri_sdf_nx,
-                self.tri_sdf_ny,
-                self.tri_sdf_nz,
-                self.tri_sdf_origin,
-                self.tri_sdf_voxel,
-                self.tri_sdf_bg,
-                self.tri_sdf_slot_shape,
-                self.model.shape_body,
-                self.model.shape_transform,
-                body_q,
-                body_com,
-                body_enabled,
-                self.tri_sdf_h,
-                self.tri_sdf_max_correction,
-                self.tri_sdf_refine,
-                self.shape_hardening_eps,
-                self.model.particle_radius,
-                # R13f friction inputs (inert unless R13F_SDF_FRICTION)
-                self._r13f_particle_q_prev if self._r13f_particle_q_prev is not None else particle_q,
-                self._r13f_body_q_prev if self._r13f_body_q_prev is not None else body_q,
-                self.model.shape_material_mu,
-                self.model.soft_contact_mu,
-                self.friction_epsilon,
-                float(self._r13f_dt),
-                # R13g: the point the force pass used (inert unless flag).
-                # Before the first force pass there is no such point yet, so the
-                # reaction resolves it itself (frame 0 would otherwise read the
-                # zero vector as a barycentric point and land inside the shape).
-                self.tri_sdf_w,
-                0 if self.tri_sdf_w_valid else 1,
-                # R16-A2' exact backend (inert unless R16_SDF_EXACT)
-                self.tri_sdf_mesh_id,
-                self.tri_sdf_mesh_max_dist,
-                # T8 anchor, read only (inert unless tri_sdf_anchor_kt_ratio > 0)
-                self.tri_sdf_anchor_p,
-                self.tri_sdf_anchor_valid,
-                self.tri_sdf_anchor_w,
-                self.tri_sdf_anchor_kt_ratio,
-            ],
-            outputs=[body_f],
-            device=self.model.device,
-        )
+        for _bp_dim, _bp_mode in self._t14_launch_plan(self.tri_sdf_slots * int(self.model.tri_count)):
+            with _t14_prof.section("tri_sdf_reaction"):
+                wp.launch(
+                    accumulate_tri_sdf_reaction_kernel,
+                    dim=_bp_dim,
+                    inputs=[
+                        particle_q,
+                        self.model.tri_indices,
+                        int(self.model.tri_count),
+                        self.tri_sdf_stiffness,
+                        self.tri_sdf_data,
+                        self.tri_sdf_base,
+                        self.tri_sdf_nx,
+                        self.tri_sdf_ny,
+                        self.tri_sdf_nz,
+                        self.tri_sdf_origin,
+                        self.tri_sdf_voxel,
+                        self.tri_sdf_bg,
+                        self.tri_sdf_slot_shape,
+                        self.model.shape_body,
+                        self.model.shape_transform,
+                        body_q,
+                        body_com,
+                        body_enabled,
+                        self.tri_sdf_h,
+                        self.tri_sdf_max_correction,
+                        self.tri_sdf_refine,
+                        self.shape_hardening_eps,
+                        self.model.particle_radius,
+                        # R13f friction inputs (inert unless R13F_SDF_FRICTION)
+                        self._r13f_particle_q_prev if self._r13f_particle_q_prev is not None else particle_q,
+                        self._r13f_body_q_prev if self._r13f_body_q_prev is not None else body_q,
+                        self.model.shape_material_mu,
+                        self.model.soft_contact_mu,
+                        self.friction_epsilon,
+                        float(self._r13f_dt),
+                        # R13g: the point the force pass used (inert unless flag).
+                        # Before the first force pass there is no such point yet, so the
+                        # reaction resolves it itself (frame 0 would otherwise read the
+                        # zero vector as a barycentric point and land inside the shape).
+                        self.tri_sdf_w,
+                        0 if self.tri_sdf_w_valid else 1,
+                        # R16-A2' exact backend (inert unless R16_SDF_EXACT)
+                        self.tri_sdf_mesh_id,
+                        self.tri_sdf_mesh_max_dist,
+                        # T8 anchor, read only (inert unless tri_sdf_anchor_kt_ratio > 0)
+                        self.tri_sdf_anchor_p,
+                        self.tri_sdf_anchor_valid,
+                        self.tri_sdf_anchor_w,
+                        self.tri_sdf_anchor_kt_ratio,
+                        # T14 broad phase (inert unless T14_SDF_BROADPHASE)
+                        self.tri_sdf_cand_idx,
+                        self.tri_sdf_cand_count,
+                        self.tri_sdf_bp_overflow,
+                        _bp_mode,
+                    ],
+                    outputs=[body_f],
+                    device=self.model.device,
+                )
 
     def accumulate_body_reaction(
         self,
@@ -1348,6 +1460,10 @@ class Collision:
         shape_scale = self.model.shape_scale.numpy()
 
         blocks, bases, dims, origins, slots, meshes = [], [], [], [], [], []
+        # T14: the blade's own bounds in the SHAPE-LOCAL frame -- the very frame
+        # the contact kernel transforms the cloth triangles into.  Rigid shape, so
+        # these never change and are computed once here.
+        aabb_lo, aabb_hi = [], []
         total = 0
         # ``bg`` is the out-of-grid sentinel only. The bake itself queries out to
         # ``bake_max_dist`` so the SOLID INTERIOR carries a true negative
@@ -1367,6 +1483,8 @@ class Collision:
                 points=wp.array(vertices, dtype=wp.vec3, device=device),
                 indices=wp.array(indices, dtype=wp.int32, device=device),
             )
+            aabb_lo.append(vertices.min(axis=0))
+            aabb_hi.append(vertices.max(axis=0))
             lo = vertices.min(axis=0) - pad
             hi = vertices.max(axis=0) + pad
             n = np.maximum(np.ceil((hi - lo) / voxel).astype(np.int32) + 1, 2)
@@ -1418,6 +1536,12 @@ class Collision:
         self.tri_sdf_voxel = float(voxel)
         self.tri_sdf_bg = bg
         self.tri_sdf_h = float(half_thickness)
+        # T14 measurement knob: the refinement-step ladder is timed against the
+        # SAME task yaml, so the count is overridable from the environment rather
+        # than by editing a config.  Unset = whatever the caller passed.
+        _t14_refine = __import__("os").environ.get("T14_SDF_REFINE")
+        if _t14_refine is not None:
+            refine_steps = int(_t14_refine)
         self.tri_sdf_refine = max(int(refine_steps), 0)
         self.tri_sdf_max_correction = float(max_correction)
         self.tri_sdf_slots = len(slots)
@@ -1470,6 +1594,46 @@ class Collision:
             self.tri_sdf_slots * int(self.model.tri_count)
             if _os_t12.environ.get("T12_ANCHOR_DBG") else 1
         )
+        # --- T14 broad phase -------------------------------------------------
+        # Allocated unconditionally (the kernels take the arguments either way);
+        # with T14_SDF_BROADPHASE unset nothing reads or writes them and the
+        # launches keep their full slots*tri_count dim, so the OFF path is the
+        # code it was plus one array allocation.
+        _n_pairs = self.tri_sdf_slots * int(self.model.tri_count)
+        self.tri_sdf_bp_enabled = _os_t12.environ.get("T14_SDF_BROADPHASE", "0") not in ("", "0")
+        _cap = int(_os_t12.environ.get("T14_SDF_BP_CAPACITY", "16384"))
+        self.tri_sdf_bp_capacity = max(1, min(_cap, _n_pairs))
+        # Motion budget the list is held over: the gather runs once per substep
+        # and the list is reused by the substep's 20 Newton iterations and the
+        # reaction pass, over which the cloth keeps moving.  8 mm at 60 Hz /
+        # 10 substeps is 4.8 m/s of cloth travel inside one substep.
+        self.tri_sdf_bp_slack = float(_os_t12.environ.get("T14_SDF_BP_SLACK", "0.008"))
+        # Measurement knob ONLY: 0 drops the overflow safety net so the candidate
+        # pass can be timed on its own.  Never set it in a run whose physics you
+        # intend to trust -- an overflowing list would then silently lose pairs.
+        self.tri_sdf_bp_fallback = _os_t12.environ.get("T14_SDF_BP_FALLBACK", "1") not in ("", "0")
+        self.tri_sdf_bp_aabb_lo = wp.array(
+            np.asarray(aabb_lo, dtype=np.float32), dtype=wp.vec3, device=device
+        )
+        self.tri_sdf_bp_aabb_hi = wp.array(
+            np.asarray(aabb_hi, dtype=np.float32), dtype=wp.vec3, device=device
+        )
+        self.tri_sdf_cand_idx = wp.zeros(self.tri_sdf_bp_capacity, dtype=wp.int32, device=device)
+        self.tri_sdf_cand_count = wp.zeros(1, dtype=wp.int32, device=device)
+        self.tri_sdf_bp_overflow = wp.zeros(1, dtype=wp.int32, device=device)
+        # T14 verification counters, host-read at the end of a run only:
+        # [0] gathered  [1] cull-pass  [2] cull-pass AND NOT gathered  [3] in contact
+        self.tri_sdf_bp_selfcheck = _os_t12.environ.get("T14_SDF_BP_SELFCHECK", "0") not in ("", "0")
+        self.tri_sdf_bp_stats = wp.zeros(4, dtype=wp.int32, device=device)
+        self.tri_sdf_bp_stats_hist = []
+        if self.tri_sdf_bp_enabled:
+            print(
+                "[collision] tri-SDF BROAD PHASE on: "
+                f"{_n_pairs} pairs -> candidate list capacity {self.tri_sdf_bp_capacity}, "
+                f"slack={self.tri_sdf_bp_slack * 1000:g} mm, "
+                f"selfcheck={'on' if self.tri_sdf_bp_selfcheck else 'off'}",
+                flush=True,
+            )
         self.tri_sdf_anchor_dbg = wp.zeros(_dbg_n, dtype=wp.vec4, device=device)
         # T13 逐对向量诊断：同一开关，形状 [n_pairs, 20]（关闭时 (1, 20) 哑数组）。
         self.tri_sdf_anchor_dbg2 = wp.zeros((_dbg_n, 20), dtype=float, device=device)

@@ -85,6 +85,52 @@ _R16_SDF_EXACT = wp.constant(int(__import__("os").environ.get("R16_SDF_EXACT", "
 # （每次牛顿迭代重搜的最近点）。留 0 这条只为做同二进制 A/B 与留档，不要在生产里设。
 _T12_ANCHOR_SEEDW = wp.constant(int(__import__("os").environ.get("T12_ANCHOR_SEEDW", "1")))
 
+# T14: per-substep broad phase for the tri-SDF contact channel.
+# The contact kernel is launched over slots x tri_count (4 blades x 18564
+# triangles = 74k) on EVERY Newton iteration (20 per substep), and a triangle
+# nowhere near a blade still pays one BVH root test in
+# ``tri_sdf_closest_mesh``'s centroid cull -- 20 times per substep, plus once
+# more in the reaction pass.  With the flag ON the pairs that can possibly
+# contact are gathered ONCE per substep into ``cand_idx`` and the 21 launches
+# only spawn threads for those.
+#
+# The gather test is a PROVABLE SUPERSET of that centroid cull, not a heuristic:
+# ``tri_sdf_closest_mesh`` rejects a triangle iff its centroid has no mesh point
+# within ``h + reach`` (reach = the centroid's distance to the furthest of the
+# three vertices).  The blade mesh is contained in its own AABB, so
+#     dist(centroid, AABB) > h + reach  =>  dist(centroid, mesh) > h + reach
+# and the pair provably early-exits.  The gather therefore keeps every pair with
+# ``dist(centroid, AABB) <= h + reach + slack``; ``slack`` covers the cloth
+# motion across the substep's 20 iterations, over which the list is held fixed.
+# 0 = OFF: every statement below is dead code and the kernels are byte-for-byte
+# the launches they were.
+#
+# MEASURED (4070 Ti Super, t12_flatten_a_mu050_s42, 666 frames, R16 exact +
+# R13f friction + T8 anchor), and the reason this ships OFF:
+#
+#   gather is correct   0 pairs dropped in 6660 substeps (selfcheck kernel);
+#                       candidates med 0 / max 1197 / mean 385 of 74256 pairs,
+#                       of which med 0 / max 351 pass the real centroid cull.
+#   but it is SLOWER    wall 160.7 s OFF -> 183.1 s ON (cap 16384 + fallback),
+#                       170.0 s ON with the list sized to all pairs (no
+#                       fallback launch).  Per force launch: 0.350 ms OFF,
+#                       0.508 ms ON at the SAME dim, 0.477 ms ON at dim 2048.
+#
+# The cost the gather removes is not the cost that matters.  A launch in which
+# EVERY pair fails the cull measures 0.057 ms (settle phase, no gripper near the
+# cloth), i.e. the far-triangle cull is ~16% of the 46.6 s the force kernel
+# spends over an episode; the other ~84% is the 7 exact mesh queries the NEAR
+# triangles run, which the gather keeps by construction.  And packing those
+# queries into the first ~12 warps costs MORE than leaving them scattered over
+# ~2300: the per-launch time is the same (0.48 / 0.51 ms) whether the launch is
+# 2048 threads or 74256, so the regression is where the work sits, not how many
+# threads are spawned -- the mesh-BVH traversal is latency bound and the full
+# scan was hiding that latency across the whole grid for free.
+#
+# Keep the flag for the ledger; the head to attack is the near-triangle query
+# count (refine steps / query backend), not the pair count.
+_T14_SDF_BROADPHASE = wp.constant(int(__import__("os").environ.get("T14_SDF_BROADPHASE", "0")))
+
 
 @wp.func
 def triangle_normal(A: wp.vec3, B: wp.vec3, C: wp.vec3):
@@ -2413,6 +2459,12 @@ def eval_tri_sdf_contact_kernel(
     # 10-12 搜索点世界坐标 | 13-15 播种材料点世界坐标 | 16 播种点自身有符号距离
     # 17 newly_seeded | 18 slot | 19 cone(=mu*f_n)
     anchor_dbg2: wp.array2d(dtype=float),
+    # T14 broad phase (inert unless _T14_SDF_BROADPHASE): the pair index is
+    # read out of the candidate list instead of being the thread id.
+    cand_idx: wp.array(dtype=wp.int32),
+    cand_count: wp.array(dtype=wp.int32),
+    bp_overflow: wp.array(dtype=wp.int32),
+    bp_mode: int,
     # outputs
     forces: wp.array(dtype=wp.vec3),
     hessians: wp.array(dtype=wp.mat33),
@@ -2434,8 +2486,23 @@ def eval_tri_sdf_contact_kernel(
     cloth's area whatever the tessellation, so the load is mesh independent.
     """
     tid = wp.tid()
-    slot = tid / tri_count
-    t = tid - slot * tri_count
+    pair = tid
+    if _T14_SDF_BROADPHASE != 0:
+        # T14: ON path only.  ``bp_mode`` 1 = consume the candidate list built
+        # this substep; 0 = the full-scan fallback launch, which no-ops unless
+        # the list overflowed.  Both launches keep a FIXED dim and read the
+        # overflow flag on the device, so the pair stays CUDA-graph capturable.
+        if bp_mode != 0:
+            if bp_overflow[0] != 0:
+                return
+            if tid >= cand_count[0]:
+                return
+            pair = cand_idx[tid]
+        else:
+            if bp_overflow[0] == 0:
+                return
+    slot = pair / tri_count
+    t = pair - slot * tri_count
 
     shape = slot_shape[slot]
     body = shape_body[shape]
@@ -2471,9 +2538,9 @@ def eval_tri_sdf_contact_kernel(
         # Resolve the barycentric contact point once per substep, then hold it.
         if resolve_w != 0:
             w, best = tri_sdf_closest(a, b, c, sdf, base, nx, ny, nz, org, inv_voxel, voxel, bg, refine_steps)
-            tri_sdf_w[tid] = w
+            tri_sdf_w[pair] = w
         else:
-            w = tri_sdf_w[tid]
+            w = tri_sdf_w[pair]
             best = sdf_grid_sample(
                 sdf, base, nx, ny, nz, org, inv_voxel, bg, a * w[0] + b * w[1] + c * w[2]
             )
@@ -2482,7 +2549,7 @@ def eval_tri_sdf_contact_kernel(
         # GEOMETRIC contact (best <= h), not on the force band, so a pair that
         # leaves the shell starts clean the next time it comes back.
         if anchor_kt_ratio > 0.0 and anchor_seed != 0:
-            anchor_valid[tid] = 0
+            anchor_valid[pair] = 0
         return
 
     depth = wp.min(half_thickness - best, max_depth)
@@ -2568,8 +2635,8 @@ def eval_tri_sdf_contact_kernel(
             # The IPC branch below never had this problem because it evaluates
             # ``pos`` and ``pos_prev`` at the SAME ``w``, so the jump cancels;
             # this is the accumulating form of that same rule.
-            seeded = anchor_valid[tid]
-            aw = anchor_w[tid]
+            seeded = anchor_valid[pair]
+            aw = anchor_w[pair]
             if seeded == 0:
                 aw = w
             if _T12_ANCHOR_SEEDW == 0:
@@ -2604,12 +2671,12 @@ def eval_tri_sdf_contact_kernel(
                     + wp.transform_point(X_sw_p, pos[i2]) * aw[2]
                 )
                 if seeded == 0:
-                    anchor_w[tid] = w
-                    anchor_p[tid] = q_prev_loc
-                    anchor_valid[tid] = 1
+                    anchor_w[pair] = w
+                    anchor_p[pair] = q_prev_loc
+                    anchor_valid[pair] = 1
                     seeded = 1
                 else:
-                    sp_loc = q_prev_loc - anchor_p[tid]
+                    sp_loc = q_prev_loc - anchor_p[pair]
                     sp_w = wp.transform_vector(X_ws_p, sp_loc)
                     sp_t = sp_w - n_world * wp.dot(sp_w, n_world)
                     lp = wp.length(sp_t)
@@ -2617,17 +2684,17 @@ def eval_tri_sdf_contact_kernel(
                         # sliding at the end of the previous substep: park the
                         # anchor slip_max behind the material point.
                         keep = wp.transform_vector(X_sw_p, sp_t * (cone / (kt * lp)))
-                        anchor_p[tid] = q_prev_loc - keep
+                        anchor_p[pair] = q_prev_loc - keep
             slip_loc = wp.vec3(0.0, 0.0, 0.0)
             if seeded != 0:
-                slip_loc = q_loc - anchor_p[tid]
+                slip_loc = q_loc - anchor_p[pair]
             slip_w = wp.transform_vector(X_ws, slip_loc)
             slip_t = slip_w - n_world * wp.dot(slip_w, n_world)
             f_t = slip_t * (-kt)
             m = wp.length(f_t)
             if anchor_seed != 0 and anchor_dbg.shape[0] > 1:
                 q_search = a * w[0] + b * w[1] + c * w[2]
-                anchor_dbg[tid] = wp.vec4(
+                anchor_dbg[pair] = wp.vec4(
                     wp.length(slip_t),
                     wp.where(m > cone, 1.0, 0.0),
                     wp.length(q_search - q_loc),
@@ -2704,26 +2771,26 @@ def eval_tri_sdf_contact_kernel(
                     best_seed = sdf_grid_sample(
                         sdf, base, nx, ny, nz, org, inv_voxel, bg, q_loc
                     )
-                anchor_dbg2[tid, 0] = n_world[0]
-                anchor_dbg2[tid, 1] = n_world[1]
-                anchor_dbg2[tid, 2] = n_world[2]
-                anchor_dbg2[tid, 3] = f_n
-                anchor_dbg2[tid, 4] = f_t_a[0]
-                anchor_dbg2[tid, 5] = f_t_a[1]
-                anchor_dbg2[tid, 6] = f_t_a[2]
-                anchor_dbg2[tid, 7] = slip_t[0]
-                anchor_dbg2[tid, 8] = slip_t[1]
-                anchor_dbg2[tid, 9] = slip_t[2]
-                anchor_dbg2[tid, 10] = q_search_w[0]
-                anchor_dbg2[tid, 11] = q_search_w[1]
-                anchor_dbg2[tid, 12] = q_search_w[2]
-                anchor_dbg2[tid, 13] = q_seed_w[0]
-                anchor_dbg2[tid, 14] = q_seed_w[1]
-                anchor_dbg2[tid, 15] = q_seed_w[2]
-                anchor_dbg2[tid, 16] = best_seed
-                anchor_dbg2[tid, 17] = wp.where(seeded == 0, 1.0, 0.0)
-                anchor_dbg2[tid, 18] = float(slot)
-                anchor_dbg2[tid, 19] = cone
+                anchor_dbg2[pair, 0] = n_world[0]
+                anchor_dbg2[pair, 1] = n_world[1]
+                anchor_dbg2[pair, 2] = n_world[2]
+                anchor_dbg2[pair, 3] = f_n
+                anchor_dbg2[pair, 4] = f_t_a[0]
+                anchor_dbg2[pair, 5] = f_t_a[1]
+                anchor_dbg2[pair, 6] = f_t_a[2]
+                anchor_dbg2[pair, 7] = slip_t[0]
+                anchor_dbg2[pair, 8] = slip_t[1]
+                anchor_dbg2[pair, 9] = slip_t[2]
+                anchor_dbg2[pair, 10] = q_search_w[0]
+                anchor_dbg2[pair, 11] = q_search_w[1]
+                anchor_dbg2[pair, 12] = q_search_w[2]
+                anchor_dbg2[pair, 13] = q_seed_w[0]
+                anchor_dbg2[pair, 14] = q_seed_w[1]
+                anchor_dbg2[pair, 15] = q_seed_w[2]
+                anchor_dbg2[pair, 16] = best_seed
+                anchor_dbg2[pair, 17] = wp.where(seeded == 0, 1.0, 0.0)
+                anchor_dbg2[pair, 18] = float(slot)
+                anchor_dbg2[pair, 19] = cone
             aw_out = aw
     elif _R13F_SDF_FRICTION != 0:
         mu = wp.sqrt(friction_mu * shape_material_mu[shape])
@@ -2827,6 +2894,12 @@ def accumulate_tri_sdf_reaction_kernel(
     anchor_valid: wp.array(dtype=wp.int32),
     anchor_w: wp.array(dtype=wp.vec3),
     anchor_kt_ratio: float,
+    # T14 broad phase (inert unless _T14_SDF_BROADPHASE): the pair index is
+    # read out of the candidate list instead of being the thread id.
+    cand_idx: wp.array(dtype=wp.int32),
+    cand_count: wp.array(dtype=wp.int32),
+    bp_overflow: wp.array(dtype=wp.int32),
+    bp_mode: int,
     # outputs
     body_f: wp.array(dtype=wp.spatial_vector),
 ):
@@ -2838,8 +2911,23 @@ def accumulate_tri_sdf_reaction_kernel(
     channel the position-projection form could not provide.
     """
     tid = wp.tid()
-    slot = tid / tri_count
-    t = tid - slot * tri_count
+    pair = tid
+    if _T14_SDF_BROADPHASE != 0:
+        # T14: ON path only.  ``bp_mode`` 1 = consume the candidate list built
+        # this substep; 0 = the full-scan fallback launch, which no-ops unless
+        # the list overflowed.  Both launches keep a FIXED dim and read the
+        # overflow flag on the device, so the pair stays CUDA-graph capturable.
+        if bp_mode != 0:
+            if bp_overflow[0] != 0:
+                return
+            if tid >= cand_count[0]:
+                return
+            pair = cand_idx[tid]
+        else:
+            if bp_overflow[0] == 0:
+                return
+    slot = pair / tri_count
+    t = pair - slot * tri_count
 
     shape = slot_shape[slot]
     body = shape_body[shape]
@@ -2880,7 +2968,7 @@ def accumulate_tri_sdf_reaction_kernel(
         if resolve_w != 0:
             w, best = tri_sdf_closest(a, b, c, sdf, base, nx, ny, nz, org, inv_voxel, voxel, bg, refine_steps)
         else:
-            w = tri_sdf_w[tid]
+            w = tri_sdf_w[pair]
             best = sdf_grid_sample(
                 sdf, base, nx, ny, nz, org, inv_voxel, bg, a * w[0] + b * w[1] + c * w[2]
             )
@@ -2909,12 +2997,12 @@ def accumulate_tri_sdf_reaction_kernel(
     if anchor_kt_ratio > 0.0:
         # T8 mirror of the force kernel's anchor branch, minus every write.
         mu = wp.sqrt(friction_mu * shape_material_mu[shape])
-        if mu > 0.0 and anchor_valid[tid] != 0:
+        if mu > 0.0 and anchor_valid[pair] != 0:
             # T12: same seeded material point as the force kernel (p_local uses
             # THIS iteration's winner and would reintroduce the jump).
-            aw = anchor_w[tid]
+            aw = anchor_w[pair]
             slip_w = wp.transform_vector(
-                X_ws, (a * aw[0] + b * aw[1] + c * aw[2]) - anchor_p[tid]
+                X_ws, (a * aw[0] + b * aw[1] + c * aw[2]) - anchor_p[pair]
             )
             slip_t = slip_w - n_world * wp.dot(slip_w, n_world)
             f_t = slip_t * (-tri_stiffness[t] * anchor_kt_ratio)
@@ -2941,3 +3029,137 @@ def accumulate_tri_sdf_reaction_kernel(
             reaction = reaction - f_t
     com = wp.transform_point(body_q[body], body_com[body])
     wp.atomic_add(body_f, body, wp.spatial_vector(reaction, wp.cross(p_world - com, reaction)))
+
+
+@wp.func
+def _point_aabb_dist2(p: wp.vec3, lo: wp.vec3, hi: wp.vec3):
+    """Squared distance from ``p`` to the axis-aligned box; 0 when inside."""
+    dx = wp.max(wp.max(lo[0] - p[0], p[0] - hi[0]), 0.0)
+    dy = wp.max(wp.max(lo[1] - p[1], p[1] - hi[1]), 0.0)
+    dz = wp.max(wp.max(lo[2] - p[2], p[2] - hi[2]), 0.0)
+    return dx * dx + dy * dy + dz * dz
+
+
+@wp.kernel
+def tri_sdf_broadphase_kernel(
+    pos: wp.array(dtype=wp.vec3),
+    tri_indices: wp.array2d(dtype=wp.int32),
+    tri_count: int,
+    slot_shape: wp.array(dtype=int),
+    shape_body: wp.array(dtype=int),
+    shape_transform: wp.array(dtype=wp.transform),
+    body_q: wp.array(dtype=wp.transform),
+    aabb_lo: wp.array(dtype=wp.vec3),
+    aabb_hi: wp.array(dtype=wp.vec3),
+    half_thickness: float,
+    slack: float,
+    capacity: int,
+    anchor_valid: wp.array(dtype=wp.int32),
+    anchor_kt_ratio: float,
+    # outputs
+    cand_idx: wp.array(dtype=wp.int32),
+    cand_count: wp.array(dtype=wp.int32),
+    bp_overflow: wp.array(dtype=wp.int32),
+):
+    """Gather the (slot, triangle) pairs that can possibly contact this substep.
+
+    One thread per pair, once per substep.  ``cand_count``/``bp_overflow`` are
+    zeroed by the caller; on overflow the flag is raised and the consumers fall
+    back to a full scan, so the capacity is a performance knob only.
+
+    A pair that is NOT gathered also has its tangential anchor dropped here:
+    the contact kernel is what normally clears it (``best >= h`` -> invalidate),
+    and a pair off the list never reaches that statement, so an anchor would
+    otherwise survive with a stale reference frame.
+    """
+    tid = wp.tid()
+    slot = tid / tri_count
+    t = tid - slot * tri_count
+
+    shape = slot_shape[slot]
+    body = shape_body[shape]
+    X_ws = shape_transform[shape]
+    if body >= 0:
+        X_ws = body_q[body] * shape_transform[shape]
+    X_sw = wp.transform_inverse(X_ws)
+
+    a = wp.transform_point(X_sw, pos[tri_indices[t, 0]])
+    b = wp.transform_point(X_sw, pos[tri_indices[t, 1]])
+    c = wp.transform_point(X_sw, pos[tri_indices[t, 2]])
+
+    third = 1.0 / 3.0
+    g = (a + b + c) * third
+    reach = wp.max(wp.length(a - g), wp.max(wp.length(b - g), wp.length(c - g)))
+    r = half_thickness + reach + slack
+
+    if _point_aabb_dist2(g, aabb_lo[slot], aabb_hi[slot]) <= r * r:
+        k = wp.atomic_add(cand_count, 0, 1)
+        if k < capacity:
+            cand_idx[k] = tid
+        else:
+            bp_overflow[0] = 1
+    else:
+        if anchor_kt_ratio > 0.0 and anchor_valid[tid] != 0:
+            anchor_valid[tid] = 0
+
+
+@wp.kernel
+def tri_sdf_bp_selfcheck_kernel(
+    pos: wp.array(dtype=wp.vec3),
+    tri_indices: wp.array2d(dtype=wp.int32),
+    tri_count: int,
+    slot_shape: wp.array(dtype=int),
+    shape_body: wp.array(dtype=int),
+    shape_transform: wp.array(dtype=wp.transform),
+    body_q: wp.array(dtype=wp.transform),
+    aabb_lo: wp.array(dtype=wp.vec3),
+    aabb_hi: wp.array(dtype=wp.vec3),
+    half_thickness: float,
+    slack: float,
+    sdf_mesh: wp.array(dtype=wp.uint64),
+    bg: float,
+    # outputs: [0] gathered, [1] cull-pass, [2] cull-pass AND NOT gathered,
+    #          [3] in geometric contact (best < h at the centroid seed)
+    stats: wp.array(dtype=wp.int32),
+):
+    """Diagnostic: does the AABB gather ever drop a pair the cull would keep?
+
+    Runs the gather test and the REAL centroid cull side by side on every pair.
+    ``stats[2]`` is the falsification counter -- it must be 0, by the containment
+    argument above; anything else means the gather is not a superset and the ON
+    path is not equivalent.  Off the verification path this kernel is not
+    launched at all.
+    """
+    tid = wp.tid()
+    slot = tid / tri_count
+    t = tid - slot * tri_count
+
+    shape = slot_shape[slot]
+    body = shape_body[shape]
+    X_ws = shape_transform[shape]
+    if body >= 0:
+        X_ws = body_q[body] * shape_transform[shape]
+    X_sw = wp.transform_inverse(X_ws)
+
+    a = wp.transform_point(X_sw, pos[tri_indices[t, 0]])
+    b = wp.transform_point(X_sw, pos[tri_indices[t, 1]])
+    c = wp.transform_point(X_sw, pos[tri_indices[t, 2]])
+
+    third = 1.0 / 3.0
+    g = (a + b + c) * third
+    reach = wp.max(wp.length(a - g), wp.max(wp.length(b - g), wp.length(c - g)))
+    r = half_thickness + reach + slack
+    gathered = _point_aabb_dist2(g, aabb_lo[slot], aabb_hi[slot]) <= r * r
+
+    # the cull exactly as tri_sdf_closest_mesh runs it
+    best, _n = sdf_mesh_query(sdf_mesh[slot], half_thickness + reach, bg, g)
+    culled_in = best < bg
+
+    if gathered:
+        wp.atomic_add(stats, 0, 1)
+    if culled_in:
+        wp.atomic_add(stats, 1, 1)
+        if not gathered:
+            wp.atomic_add(stats, 2, 1)
+        if best < half_thickness:
+            wp.atomic_add(stats, 3, 1)
