@@ -203,6 +203,19 @@ _T14_SDF_RQ = wp.constant(int(__import__("os").environ.get("T14_SDF_RQ", "0")))
 # which is the safe direction for a penetration constraint.
 _T14_SDF_PAR = wp.constant(int(__import__("os").environ.get("T14_SDF_PAR", "0")))
 
+# T14 round 5: refine from EVERY seed, not just the best one.
+# This is round 4's (iii) finding carried over to the voxel path.  The serial
+# search picks the best of {centroid, a, b, c} and then descends only from that
+# one; on compliant cloth that under-resolves the minimum (measured on the T13-C
+# bench: refining all four and taking the min raised the pull-out force 1.20 ->
+# 3.30 N and cut the creep 0.696 -> 0.088 mm/s).  On the EXACT backend that cost
+# 36% because each extra descent is three more mesh-BVH queries; on the voxel
+# backend a sample is a trilinear grid read, so the same improvement is close to
+# free and does not even need the four threads -- one thread runs the four
+# descents in sequence.
+# 0 = OFF: the descent loop below is the single-seed one it always was.
+_T14_SDF_ALLSEED = wp.constant(int(__import__("os").environ.get("T14_SDF_ALLSEED", "0")))
+
 
 @wp.func
 def triangle_normal(A: wp.vec3, B: wp.vec3, C: wp.vec3):
@@ -2246,7 +2259,8 @@ def project_tri_sdf_kernel(
     third = 1.0 / 3.0
     w = wp.vec3(third, third, third)
     p = a * third + b * third + c * third
-    best = sdf_grid_sample(sdf, base, nx, ny, nz, org, inv_voxel, bg, p)
+    dg = sdf_grid_sample(sdf, base, nx, ny, nz, org, inv_voxel, bg, p)
+    best = dg
     da = sdf_grid_sample(sdf, base, nx, ny, nz, org, inv_voxel, bg, a)
     if da < best:
         best = da
@@ -2327,7 +2341,8 @@ def tri_sdf_closest(
     third = 1.0 / 3.0
     w = wp.vec3(third, third, third)
     p = a * third + b * third + c * third
-    best = sdf_grid_sample(sdf, base, nx, ny, nz, org, inv_voxel, bg, p)
+    dg = sdf_grid_sample(sdf, base, nx, ny, nz, org, inv_voxel, bg, p)
+    best = dg
     da = sdf_grid_sample(sdf, base, nx, ny, nz, org, inv_voxel, bg, a)
     if da < best:
         best = da
@@ -2340,28 +2355,56 @@ def tri_sdf_closest(
     if dc < best:
         best = dc
         w = wp.vec3(0.0, 0.0, 1.0)
-    step = float(0.5)
-    for _s in range(refine_steps):
-        p = a * w[0] + b * w[1] + c * w[2]
-        g = sdf_grid_gradient(sdf, base, nx, ny, nz, org, inv_voxel, bg, voxel, p)
-        ga = wp.dot(g, a)
-        gb = wp.dot(g, b)
-        gc = wp.dot(g, c)
-        m = (ga + gb + gc) * third
-        gw = wp.vec3(ga - m, gb - m, gc - m)
-        gn = wp.length(gw)
-        if gn > 1.0e-12:
-            cand = w - gw * (step / gn)
-            cand = wp.vec3(wp.max(cand[0], 0.0), wp.max(cand[1], 0.0), wp.max(cand[2], 0.0))
-            s = cand[0] + cand[1] + cand[2]
-            if s > 1.0e-9:
-                cand = cand / s
-                pc = a * cand[0] + b * cand[1] + c * cand[2]
-                dcand = sdf_grid_sample(sdf, base, nx, ny, nz, org, inv_voxel, bg, pc)
-                if dcand < best:
-                    best = dcand
-                    w = cand
-        step = step * 0.5
+    n_start = int(1)
+    if _T14_SDF_ALLSEED != 0:
+        n_start = 4
+    for _k in range(n_start):
+        # OFF: exactly one pass starting from the winning seed -- the loop body
+        # below is then the statements this function always ran.
+        # ON: four passes, one per seed, keeping the running best across them.
+        wk = w
+        bk = best
+        if _T14_SDF_ALLSEED != 0:
+            if _k == 0:
+                wk = wp.vec3(third, third, third)
+                bk = dg
+            if _k == 1:
+                wk = wp.vec3(1.0, 0.0, 0.0)
+                bk = da
+            if _k == 2:
+                wk = wp.vec3(0.0, 1.0, 0.0)
+                bk = db
+            if _k == 3:
+                wk = wp.vec3(0.0, 0.0, 1.0)
+                bk = dc
+        step = float(0.5)
+        for _s in range(refine_steps):
+            p = a * wk[0] + b * wk[1] + c * wk[2]
+            g = sdf_grid_gradient(sdf, base, nx, ny, nz, org, inv_voxel, bg, voxel, p)
+            ga = wp.dot(g, a)
+            gb = wp.dot(g, b)
+            gc = wp.dot(g, c)
+            m = (ga + gb + gc) * third
+            gw = wp.vec3(ga - m, gb - m, gc - m)
+            gn = wp.length(gw)
+            if gn > 1.0e-12:
+                cand = wk - gw * (step / gn)
+                cand = wp.vec3(wp.max(cand[0], 0.0), wp.max(cand[1], 0.0), wp.max(cand[2], 0.0))
+                sm = cand[0] + cand[1] + cand[2]
+                if sm > 1.0e-9:
+                    cand = cand / sm
+                    pc = a * cand[0] + b * cand[1] + c * cand[2]
+                    dcand = sdf_grid_sample(sdf, base, nx, ny, nz, org, inv_voxel, bg, pc)
+                    if dcand < bk:
+                        bk = dcand
+                        wk = cand
+            step = step * 0.5
+        if bk < best:
+            best = bk
+            w = wk
+        if _T14_SDF_ALLSEED == 0:
+            best = bk
+            w = wk
     return w, best
 
 
