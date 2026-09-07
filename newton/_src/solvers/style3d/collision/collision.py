@@ -1445,8 +1445,10 @@ class Collision:
             # SOFT and TOL are mutually exclusive; SOFT wins.
             _tolnote = (
                 f" + T16 ARGMIN_SOFT tau={_soft0:g} "
-                f"(= {_soft0 * float(self.tri_sdf_h) * 1.0e6:g} um; softmin over 4 seeds + "
-                f"refined, re-evaluated at the blend)"
+                f"(= {_soft0 * float(self.tri_sdf_h) * 1.0e6:g} um; softmin over the 4 seeds, "
+                f"then refine FROM the blend)"
+                + (" + SOFT_GATE (descent guard gn > tau*h)"
+                   if os.environ.get("T16_SDF_SOFT_GATE", "0") not in ("", "0") else "")
                 + (f" [TOL r={_tol0:g} IGNORED]" if _tol0 != 0.0 else "")
             )
         elif _tol0 != 0.0:
@@ -1572,6 +1574,29 @@ class Collision:
                f"{ritot} entries [{ritot * 4 / 1.0e6:.2f} MB])" if _ring else "")
             + _tolnote
         )
+
+    def read_w_diag(self, reset: bool = True):
+        """T16 diagnostic accumulator as a dict; optionally zero it.
+
+        Call it per frame (``reset=True``) to correlate the contact-point
+        statistics with a per-frame quantity such as ``sign_ok``.  Layout is
+        documented on ``_T16_W_DIAG`` in kernels.py.
+        """
+        d = self.tri_sdf_w_diag.numpy()
+        n = max(float(d[0]), 1.0)
+        out = {
+            "pairs": float(d[0]),
+            "centroid": float(d[1]), "vertex_w": float(d[2]), "other_w": float(d[3]),
+            "mean_maxw": float(d[4]) / n, "mean_wdot": float(d[5]) / n,
+            "sum_fn": float(d[6]), "max_fn": float(d[9]),
+            "mean_depth_mm": float(d[10]) / n * 1000.0,
+            "hist_maxw": [float(x) for x in d[12:22]],
+            "feat_vertex": float(d[22]), "feat_edge": float(d[23]),
+            "feat_face": float(d[24]), "feat_miss": float(d[25]),
+        }
+        if reset:
+            self.tri_sdf_w_diag.zero_()
+        return out
 
     def accumulate_tri_sdf_reaction(
         self,
@@ -2218,8 +2243,18 @@ class Collision:
                     + " ".join("%d" % x for x in d[12:22]),
                     flush=True,
                 )
+                nf = d[22] + d[23] + d[24] + d[25]
+                if nf > 0:
+                    print(
+                        "[T16 w-diag] 接触点最近特征: 顶点=%d (%.2f%%)  棱=%d (%.2f%%)  "
+                        "面内=%d (%.2f%%)  未命中=%d"
+                        % (d[22], 100 * d[22] / nf, d[23], 100 * d[23] / nf,
+                           d[24], 100 * d[24] / nf, d[25]),
+                        flush=True,
+                    )
 
             _atexit.register(_dump_w_diag)
+
         if self.tri_sdf_hold and not _exact:
             print(
                 "[collision] WARNING: T14_SDF_HOLD needs the EXACT backend "

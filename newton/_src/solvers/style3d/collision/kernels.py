@@ -371,6 +371,10 @@ _T16_SDF_ARGMIN_SOFT = wp.constant(float(__import__("os").environ.get("T16_SDF_A
 #   4 sum max(w) | 5 sum (w.w) | 6 sum f_n | 7 sum f_n*max(w) | 8 sum f_n*(w.w)
 #   9 max f_n | 10 sum depth | 11 max max(w)
 #   12..21 histogram of max(w) over [1/3, 1] in 10 equal bins
+# ``T16_W_DIAG=2`` adds the CLOSEST FEATURE of the contact point (22 vertex,
+# 23 edge, 24 face interior, 25 no-hit).  It is classified from an EXTRA BVH
+# query at the contact point -- backend independent, so the BVH and GRIDEXACT
+# arms are read on the same ruler, and it never touches the force path.
 _T16_W_DIAG = wp.constant(int(__import__("os").environ.get("T16_W_DIAG", "0")))
 
 # T16 SOFT gate: the DESCENT is a second noise amplifier, independent of the seed
@@ -3410,6 +3414,26 @@ def eval_tri_sdf_contact_kernel(
         if bin_i > 9:
             bin_i = 9
         wp.atomic_add(w_diag, 12 + bin_i, 1.0)
+        if _T16_W_DIAG >= 2:
+            # closest FEATURE of the contact point, from one extra BVH query.
+            # Diagnostic only; the force above is already computed.
+            q_f = wp.mesh_query_point_sign_normal(
+                sdf_mesh[slot], a * w[0] + b * w[1] + c * w[2], mesh_max_dist
+            )
+            if q_f.result:
+                bu = q_f.u
+                bv = q_f.v
+                bw = 1.0 - bu - bv
+                bmin = wp.min(bw, wp.min(bu, bv))
+                bmax = wp.max(bw, wp.max(bu, bv))
+                if bmax > 1.0 - 1.0e-4:
+                    wp.atomic_add(w_diag, 22, 1.0)      # vertex
+                elif bmin < 1.0e-4:
+                    wp.atomic_add(w_diag, 23, 1.0)      # edge
+                else:
+                    wp.atomic_add(w_diag, 24, 1.0)      # face interior
+            else:
+                wp.atomic_add(w_diag, 25, 1.0)
     # R13c: hardening compression law INSIDE the SDF force core.  R9 hung the
     # law on the vertex penalty kernel only; the compliant SDF stack zeroes that
     # channel (shape_contact_ke -> 0), so the law never ran.  Same closed form as
