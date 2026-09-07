@@ -164,6 +164,45 @@ _T14_SDF_HOLD = wp.constant(int(__import__("os").environ.get("T14_SDF_HOLD", "0"
 # from "the approximation is not second order in this regime".
 _T14_SDF_HOLD_DIAG = wp.constant(int(__import__("os").environ.get("T14_SDF_HOLD_DIAG", "0")))
 
+# T14 round 4 (i): skip a refinement query that provably cannot improve.
+# The projected descent clamps the candidate to the simplex and renormalises;
+# on a FLAT contact the winner is a vertex and the projected gradient points at
+# that vertex, so ``cand`` lands exactly back on it -- (1+d,-x,-y) -> clamp ->
+# (1+d,0,0) -> normalise -> (1,0,0), exactly.  The query point is then bitwise
+# the point that already produced ``best``, so ``dcand < best`` is false and the
+# query is dead weight.  Guard is on the QUERY POINT, not on ``cand``: the
+# centroid seed's stored point is ``(a+b+c)/3`` while the barycentric rebuild is
+# ``a/3+b/3+c/3``, which are not bitwise equal, so comparing ``cand`` to ``w``
+# would be wrong there.  Bit-identical: the skipped query's result was discarded.
+_T14_SDF_SKIPREF = wp.constant(int(__import__("os").environ.get("T14_SDF_SKIPREF", "0")))
+
+# T14 round 4 (ii): tighter query radius for the vertex and refinement queries.
+# A signed distance field is 1-Lipschitz, so every point p of the triangle obeys
+#     |SDF(p)| <= |SDF(g)| + |p - g| <= |SDF(g)| + reach
+# and a search radius of |SDF(g)| + reach therefore still contains the true
+# closest point of EVERY triangle point -- the queries return the same closest
+# point, just after pruning more of the BVH.  The old radius ``cull + 2*reach``
+# is a worst case over ``SDF(g) <= cull``; in contact ``|SDF(g)| ~ h`` and the
+# new radius is about half the old.  Bit-identical.
+_T14_SDF_RQ = wp.constant(int(__import__("os").environ.get("T14_SDF_RQ", "0")))
+
+# T14 round 4 (iii): give each of the four seeds its own thread.
+# The serial search is a DEPENDENCY CHAIN of up to 7 mesh-BVH queries: centroid,
+# three vertices, then three refinement steps that each need the previous
+# winner's normal.  Rounds 1-3 established this kernel is latency bound, so the
+# chain length -- not the query count -- is what costs.  Splitting the seeds
+# across four threads makes each thread's chain 1 (its own seed) + refine_steps,
+# and the force kernel takes the minimum of the four.
+#
+# NOT bit-identical, and deliberately so: the serial version refines only from
+# the BEST seed, the parallel one refines from all four and takes the min.  The
+# thread that owns the serial winner runs the identical statements from the
+# identical start (``tri_sdf_refine_from`` is shared), so its result IS the
+# serial result -- and the min over four can only be <= that.  The reported
+# distance is therefore never SHALLOWER than today's, only equal or deeper,
+# which is the safe direction for a penetration constraint.
+_T14_SDF_PAR = wp.constant(int(__import__("os").environ.get("T14_SDF_PAR", "0")))
+
 
 @wp.func
 def triangle_normal(A: wp.vec3, B: wp.vec3, C: wp.vec3):
@@ -2355,6 +2394,64 @@ def sdf_mesh_query(mesh: wp.uint64, max_dist: float, bg: float, p: wp.vec3):
 
 
 @wp.func
+def tri_sdf_refine_from(
+    a: wp.vec3,
+    b: wp.vec3,
+    c: wp.vec3,
+    mesh: wp.uint64,
+    bg: float,
+    rq: float,
+    w: wp.vec3,
+    best: float,
+    nbest: wp.vec3,
+    p_best: wp.vec3,
+    refine_steps: int,
+):
+    """The projected steepest descent, lifted out of ``tri_sdf_closest_mesh``.
+
+    Extracted verbatim so the serial search and the T14 (iii) per-seed parallel
+    search run the SAME statements from their respective starting points -- the
+    only way to make "seed s*'s parallel thread reproduces the serial result"
+    an identity rather than a hope.  ``@wp.func`` is inlined, and the bitwise
+    probe (scratchpad/t14_search_equiv.py) confirms the extraction changed
+    nothing.
+    """
+    third = 1.0 / 3.0
+    step = float(0.5)
+    for _s in range(refine_steps):
+        gvec = nbest
+        ga = wp.dot(gvec, a)
+        gb = wp.dot(gvec, b)
+        gc = wp.dot(gvec, c)
+        m = (ga + gb + gc) * third
+        gw = wp.vec3(ga - m, gb - m, gc - m)
+        gn = wp.length(gw)
+        if gn > 1.0e-12:
+            cand = w - gw * (step / gn)
+            cand = wp.vec3(wp.max(cand[0], 0.0), wp.max(cand[1], 0.0), wp.max(cand[2], 0.0))
+            sm = cand[0] + cand[1] + cand[2]
+            if sm > 1.0e-9:
+                cand = cand / sm
+                pc = a * cand[0] + b * cand[1] + c * cand[2]
+                probe = int(1)
+                if _T14_SDF_SKIPREF != 0:
+                    if pc[0] == p_best[0]:
+                        if pc[1] == p_best[1]:
+                            if pc[2] == p_best[2]:
+                                probe = 0
+                if probe != 0:
+                    dcand, ncand = sdf_mesh_query(mesh, rq, bg, pc)
+                    if dcand < best:
+                        best = dcand
+                        w = cand
+                        nbest = ncand
+                        if _T14_SDF_SKIPREF != 0:
+                            p_best = pc
+        step = step * 0.5
+    return w, best, nbest
+
+
+@wp.func
 def tri_sdf_closest_mesh(
     a: wp.vec3,
     b: wp.vec3,
@@ -2390,44 +2487,32 @@ def tri_sdf_closest_mesh(
     best, nbest = sdf_mesh_query(mesh, cull + reach, bg, g)
     if best >= bg:
         return w, bg, nbest
+    if _T14_SDF_RQ != 0:
+        rq = wp.abs(best) + reach + 1.0e-6
+    # the point that actually produced ``best`` (see _T14_SDF_SKIPREF)
+    p_best = g
     da, na = sdf_mesh_query(mesh, rq, bg, a)
     if da < best:
         best = da
         w = wp.vec3(1.0, 0.0, 0.0)
         nbest = na
+        if _T14_SDF_SKIPREF != 0:
+            p_best = a
     db, nb = sdf_mesh_query(mesh, rq, bg, b)
     if db < best:
         best = db
         w = wp.vec3(0.0, 1.0, 0.0)
         nbest = nb
+        if _T14_SDF_SKIPREF != 0:
+            p_best = b
     dc, nc = sdf_mesh_query(mesh, rq, bg, c)
     if dc < best:
         best = dc
         w = wp.vec3(0.0, 0.0, 1.0)
         nbest = nc
-    step = float(0.5)
-    for _s in range(refine_steps):
-        gvec = nbest
-        ga = wp.dot(gvec, a)
-        gb = wp.dot(gvec, b)
-        gc = wp.dot(gvec, c)
-        m = (ga + gb + gc) * third
-        gw = wp.vec3(ga - m, gb - m, gc - m)
-        gn = wp.length(gw)
-        if gn > 1.0e-12:
-            cand = w - gw * (step / gn)
-            cand = wp.vec3(wp.max(cand[0], 0.0), wp.max(cand[1], 0.0), wp.max(cand[2], 0.0))
-            sm = cand[0] + cand[1] + cand[2]
-            if sm > 1.0e-9:
-                cand = cand / sm
-                pc = a * cand[0] + b * cand[1] + c * cand[2]
-                dcand, ncand = sdf_mesh_query(mesh, rq, bg, pc)
-                if dcand < best:
-                    best = dcand
-                    w = cand
-                    nbest = ncand
-        step = step * 0.5
-    return w, best, nbest
+        if _T14_SDF_SKIPREF != 0:
+            p_best = c
+    return tri_sdf_refine_from(a, b, c, mesh, bg, rq, w, best, nbest, p_best, refine_steps)
 
 
 @wp.kernel
@@ -2498,6 +2583,11 @@ def eval_tri_sdf_contact_kernel(
     cand_count: wp.array(dtype=wp.int32),
     bp_overflow: wp.array(dtype=wp.int32),
     bp_mode: int,
+    # T14 round 4 (iii): per-seed scratch, 4 entries per pair (inert unless
+    # _T14_SDF_PAR).  The force kernel then only picks the minimum.
+    par_best: wp.array(dtype=float),
+    par_w: wp.array(dtype=wp.vec3),
+    par_n: wp.array(dtype=wp.vec3),
     # T14 round 3: per-substep held contact geometry (inert unless
     # _T14_SDF_HOLD).  ``hold_mode`` 1 = search and record (iteration 0),
     # 2 = evaluate the held plane (iterations >= 1 and the reaction pass).
@@ -2621,6 +2711,29 @@ def eval_tri_sdf_contact_kernel(
                     wp.atomic_add(hold_diag, 7, best - best_t)
                     wp.atomic_add(hold_diag, 8, wp.length(n_exact - n_t))
                     wp.atomic_add(hold_diag, 9, wp.length(w_t - w))
+    elif _T14_SDF_PAR != 0:
+        # T14 (iii): the four seeds were refined in their own threads; take the
+        # minimum.  Strict '<' so ties keep the lowest seed index and the pick
+        # stays deterministic.
+        base_i = pair * 4
+        best = par_best[base_i]
+        w = par_w[base_i]
+        n_exact = par_n[base_i]
+        d1 = par_best[base_i + 1]
+        if d1 < best:
+            best = d1
+            w = par_w[base_i + 1]
+            n_exact = par_n[base_i + 1]
+        d2 = par_best[base_i + 2]
+        if d2 < best:
+            best = d2
+            w = par_w[base_i + 2]
+            n_exact = par_n[base_i + 2]
+        d3 = par_best[base_i + 3]
+        if d3 < best:
+            best = d3
+            w = par_w[base_i + 3]
+            n_exact = par_n[base_i + 3]
     elif _R16_SDF_EXACT != 0:
         # R16-A2': same search, exact field.  The freeze switch is a grid-path
         # remedy for the winner-take-all redraw and is not combined with it.
@@ -3009,6 +3122,11 @@ def accumulate_tri_sdf_reaction_kernel(
     cand_count: wp.array(dtype=wp.int32),
     bp_overflow: wp.array(dtype=wp.int32),
     bp_mode: int,
+    # T14 round 4 (iii): per-seed scratch, 4 entries per pair (inert unless
+    # _T14_SDF_PAR).  The force kernel then only picks the minimum.
+    par_best: wp.array(dtype=float),
+    par_w: wp.array(dtype=wp.vec3),
+    par_n: wp.array(dtype=wp.vec3),
     # T14 round 3: per-substep held contact geometry (inert unless
     # _T14_SDF_HOLD).  ``hold_mode`` 1 = search and record (iteration 0),
     # 2 = evaluate the held plane (iterations >= 1 and the reaction pass).
@@ -3088,6 +3206,29 @@ def accumulate_tri_sdf_reaction_kernel(
         else:
             n_exact = hold_n[pair]
             best = wp.dot(n_exact, q_hold - hold_p[pair])
+    elif _T14_SDF_PAR != 0:
+        # T14 (iii): the four seeds were refined in their own threads; take the
+        # minimum.  Strict '<' so ties keep the lowest seed index and the pick
+        # stays deterministic.
+        base_i = pair * 4
+        best = par_best[base_i]
+        w = par_w[base_i]
+        n_exact = par_n[base_i]
+        d1 = par_best[base_i + 1]
+        if d1 < best:
+            best = d1
+            w = par_w[base_i + 1]
+            n_exact = par_n[base_i + 1]
+        d2 = par_best[base_i + 2]
+        if d2 < best:
+            best = d2
+            w = par_w[base_i + 2]
+            n_exact = par_n[base_i + 2]
+        d3 = par_best[base_i + 3]
+        if d3 < best:
+            best = d3
+            w = par_w[base_i + 3]
+            n_exact = par_n[base_i + 3]
     elif _R16_SDF_EXACT != 0:
         # R16-A2': identical query to the force pass, so the two halves of the
         # contact cannot disagree about where or how deep it is.
@@ -3322,3 +3463,124 @@ def tri_sdf_bp_selfcheck_kernel(
             wp.atomic_add(stats, 2, 1)
         if best < half_thickness:
             wp.atomic_add(stats, 3, 1)
+
+
+@wp.kernel
+def tri_sdf_par_cull_kernel(
+    pos: wp.array(dtype=wp.vec3),
+    tri_indices: wp.array2d(dtype=wp.int32),
+    tri_count: int,
+    slot_shape: wp.array(dtype=int),
+    shape_body: wp.array(dtype=int),
+    shape_transform: wp.array(dtype=wp.transform),
+    body_q: wp.array(dtype=wp.transform),
+    sdf_mesh: wp.array(dtype=wp.uint64),
+    bg: float,
+    half_thickness: float,
+    # outputs
+    g_best: wp.array(dtype=float),
+    g_n: wp.array(dtype=wp.vec3),
+):
+    """T14 (iii) pass 1: the centroid cull, once per pair.
+
+    Kept in its own launch so a triangle nowhere near the blade still costs
+    exactly ONE query -- the same as today.  Splitting the seeds without this
+    would make the far case cost four.
+    """
+    pair = wp.tid()
+    slot = pair / tri_count
+    t = pair - slot * tri_count
+    shape = slot_shape[slot]
+    body = shape_body[shape]
+    X_ws = shape_transform[shape]
+    if body >= 0:
+        X_ws = body_q[body] * shape_transform[shape]
+    X_sw = wp.transform_inverse(X_ws)
+    a = wp.transform_point(X_sw, pos[tri_indices[t, 0]])
+    b = wp.transform_point(X_sw, pos[tri_indices[t, 1]])
+    c = wp.transform_point(X_sw, pos[tri_indices[t, 2]])
+    third = 1.0 / 3.0
+    g = (a + b + c) * third
+    reach = wp.max(wp.length(a - g), wp.max(wp.length(b - g), wp.length(c - g)))
+    d, n = sdf_mesh_query(sdf_mesh[slot], half_thickness + reach, bg, g)
+    g_best[pair] = d
+    g_n[pair] = n
+
+
+@wp.kernel
+def tri_sdf_par_seed_kernel(
+    pos: wp.array(dtype=wp.vec3),
+    tri_indices: wp.array2d(dtype=wp.int32),
+    tri_count: int,
+    slot_shape: wp.array(dtype=int),
+    shape_body: wp.array(dtype=int),
+    shape_transform: wp.array(dtype=wp.transform),
+    body_q: wp.array(dtype=wp.transform),
+    sdf_mesh: wp.array(dtype=wp.uint64),
+    bg: float,
+    half_thickness: float,
+    refine_steps: int,
+    g_best: wp.array(dtype=float),
+    g_n: wp.array(dtype=wp.vec3),
+    # outputs, 4 per pair
+    par_best: wp.array(dtype=float),
+    par_w: wp.array(dtype=wp.vec3),
+    par_n: wp.array(dtype=wp.vec3),
+):
+    """T14 (iii) pass 2: one thread per (pair, seed), each refining from its own.
+
+    Seed 0 is the centroid and reuses pass 1's query, so it spends none; seeds
+    1-3 spend one each.  Then ``refine_steps`` from there, through the SAME
+    ``tri_sdf_refine_from`` the serial search uses.
+    """
+    tid = wp.tid()
+    pair = tid / 4
+    seed = tid - pair * 4
+    slot = pair / tri_count
+    t = pair - slot * tri_count
+
+    bg_g = g_best[pair]
+    if bg_g >= bg:
+        par_best[tid] = bg
+        return
+
+    shape = slot_shape[slot]
+    body = shape_body[shape]
+    X_ws = shape_transform[shape]
+    if body >= 0:
+        X_ws = body_q[body] * shape_transform[shape]
+    X_sw = wp.transform_inverse(X_ws)
+    a = wp.transform_point(X_sw, pos[tri_indices[t, 0]])
+    b = wp.transform_point(X_sw, pos[tri_indices[t, 1]])
+    c = wp.transform_point(X_sw, pos[tri_indices[t, 2]])
+    third = 1.0 / 3.0
+    g = (a + b + c) * third
+    reach = wp.max(wp.length(a - g), wp.max(wp.length(b - g), wp.length(c - g)))
+    rq = half_thickness + 2.0 * reach
+    if _T14_SDF_RQ != 0:
+        rq = wp.abs(bg_g) + reach + 1.0e-6
+
+    w = wp.vec3(third, third, third)
+    p0 = g
+    best = bg_g
+    nb = g_n[pair]
+    if seed == 1:
+        w = wp.vec3(1.0, 0.0, 0.0)
+        p0 = a
+        best, nb = sdf_mesh_query(sdf_mesh[slot], rq, bg, a)
+    if seed == 2:
+        w = wp.vec3(0.0, 1.0, 0.0)
+        p0 = b
+        best, nb = sdf_mesh_query(sdf_mesh[slot], rq, bg, b)
+    if seed == 3:
+        w = wp.vec3(0.0, 0.0, 1.0)
+        p0 = c
+        best, nb = sdf_mesh_query(sdf_mesh[slot], rq, bg, c)
+    if best >= bg:
+        par_best[tid] = bg
+        return
+
+    w, best, nb = tri_sdf_refine_from(a, b, c, sdf_mesh[slot], bg, rq, w, best, nb, p0, refine_steps)
+    par_best[tid] = best
+    par_w[tid] = w
+    par_n[tid] = nb

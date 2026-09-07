@@ -35,6 +35,8 @@ from newton._src.solvers.style3d.collision.kernels import (
     tri_sdf_broadphase_kernel,
     tri_sdf_bp_selfcheck_kernel,
     add_tri_sdf_cache_kernel,
+    tri_sdf_par_cull_kernel,
+    tri_sdf_par_seed_kernel,
 )
 from newton._src.solvers.style3d.collision import _t14_prof
 
@@ -721,6 +723,50 @@ class Collision:
             return ((self.tri_sdf_bp_capacity, 1),)
         return ((self.tri_sdf_bp_capacity, 1), (n_pairs, 0))
 
+    def _t14_par_search(self, particle_q, body_q, n_pairs: int):
+        """T14 (iii): run the two search passes that feed the per-seed scratch."""
+        with _t14_prof.section("tri_sdf_par_cull"):
+            wp.launch(
+                tri_sdf_par_cull_kernel,
+                dim=n_pairs,
+                inputs=[
+                    particle_q,
+                    self.model.tri_indices,
+                    int(self.model.tri_count),
+                    self.tri_sdf_slot_shape,
+                    self.model.shape_body,
+                    self.model.shape_transform,
+                    body_q,
+                    self.tri_sdf_mesh_id,
+                    self.tri_sdf_bg,
+                    self.tri_sdf_h,
+                ],
+                outputs=[self.tri_sdf_par_g_best, self.tri_sdf_par_g_n],
+                device=self.model.device,
+            )
+        with _t14_prof.section("tri_sdf_par_seed"):
+            wp.launch(
+                tri_sdf_par_seed_kernel,
+                dim=4 * n_pairs,
+                inputs=[
+                    particle_q,
+                    self.model.tri_indices,
+                    int(self.model.tri_count),
+                    self.tri_sdf_slot_shape,
+                    self.model.shape_body,
+                    self.model.shape_transform,
+                    body_q,
+                    self.tri_sdf_mesh_id,
+                    self.tri_sdf_bg,
+                    self.tri_sdf_h,
+                    self.tri_sdf_refine,
+                    self.tri_sdf_par_g_best,
+                    self.tri_sdf_par_g_n,
+                ],
+                outputs=[self.tri_sdf_par_best, self.tri_sdf_par_w, self.tri_sdf_par_n],
+                device=self.model.device,
+            )
+
     def _t14_broadphase(self, particle_q, body_q, n_pairs: int):
         """Rebuild the tri-SDF candidate list for this substep."""
         self.tri_sdf_cand_count.zero_()
@@ -1033,6 +1079,8 @@ class Collision:
                     self.tri_sdf_cache_f.zero_()
                     self.tri_sdf_cache_h.zero_()
             if _do_eval:
+                if self.tri_sdf_par and _hold_mode != 2:
+                    self._t14_par_search(state_out.particle_q, _tri_sdf_body_q, _n_pairs)
                 if self.tri_sdf_bp_enabled and _iter == 0:
                     # T14: rebuild the candidate list once per substep.  The blade
                     # pose is fixed inside a substep and the cloth's motion over the
@@ -1099,6 +1147,10 @@ class Collision:
                                 self.tri_sdf_cand_count,
                                 self.tri_sdf_bp_overflow,
                                 _bp_mode,
+                                # T14 round 4 (iii) per-seed scratch (inert unless T14_SDF_PAR)
+                                self.tri_sdf_par_best,
+                                self.tri_sdf_par_w,
+                                self.tri_sdf_par_n,
                                 # T14 round 3 hold (inert unless T14_SDF_HOLD)
                                 self.tri_sdf_hold_valid,
                                 self.tri_sdf_hold_w,
@@ -1145,6 +1197,10 @@ class Collision:
         """
         if self.tri_sdf_slot_shape is None or not self.tri_sdf_compliant:
             return
+        if self.tri_sdf_par and not self.tri_sdf_hold:
+            self._t14_par_search(
+                particle_q, body_q, self.tri_sdf_slots * int(self.model.tri_count)
+            )
         for _bp_dim, _bp_mode in self._t14_launch_plan(self.tri_sdf_slots * int(self.model.tri_count)):
             with _t14_prof.section("tri_sdf_reaction"):
                 wp.launch(
@@ -1200,7 +1256,11 @@ class Collision:
                         self.tri_sdf_cand_count,
                         self.tri_sdf_bp_overflow,
                         _bp_mode,
-                        # T14 round 3 hold (inert unless T14_SDF_HOLD): the reaction rides
+                        # T14 round 4 (iii) per-seed scratch (inert unless T14_SDF_PAR)
+                    self.tri_sdf_par_best,
+                    self.tri_sdf_par_w,
+                    self.tri_sdf_par_n,
+                    # T14 round 3 hold (inert unless T14_SDF_HOLD): the reaction rides
                         # the SAME plane the substep's last force launch used.
                         self.tri_sdf_hold_valid,
                         self.tri_sdf_hold_w,
@@ -1603,6 +1663,8 @@ class Collision:
         print(
             "[collision] tri-SDF query backend = "
             + ("EXACT mesh (analytic closest point, no grid)" if _exact else "VOXEL grid (trilinear)")
+            + (" + PAR (4 seeds on 4 threads, chain 7 -> 1+refine)"
+               if __import__("os").environ.get("T14_SDF_PAR", "0") not in ("", "0") else "")
             + ({1: " + HOLD=1 (plane held for the substep, no query in iters>=1)",
                 2: " + HOLD=2 (bary point held, 1 query/iter instead of 7)"}
                .get(int(__import__("os").environ.get("T14_SDF_HOLD", "0") or 0), ""))
@@ -1650,6 +1712,19 @@ class Collision:
             self.tri_sdf_slots * int(self.model.tri_count)
             if _os_t12.environ.get("T12_ANCHOR_DBG") else 1
         )
+        # --- T14 round 4 (iii): per-seed parallel search -----------------------
+        # Scratch for 4 seeds per pair plus the shared centroid cull.  Allocated
+        # unconditionally (the kernels take the arguments either way); with
+        # T14_SDF_PAR unset nothing reads or writes them.
+        self.tri_sdf_par = _os_t12.environ.get("T14_SDF_PAR", "0") not in ("", "0")
+        _pn = self.tri_sdf_slots * int(self.model.tri_count)
+        _pa = 4 * _pn if self.tri_sdf_par else 1
+        self.tri_sdf_par_best = wp.zeros(_pa, dtype=float, device=device)
+        self.tri_sdf_par_w = wp.zeros(_pa, dtype=wp.vec3, device=device)
+        self.tri_sdf_par_n = wp.zeros(_pa, dtype=wp.vec3, device=device)
+        self.tri_sdf_par_g_best = wp.zeros(_pn if self.tri_sdf_par else 1, dtype=float, device=device)
+        self.tri_sdf_par_g_n = wp.zeros(_pn if self.tri_sdf_par else 1, dtype=wp.vec3, device=device)
+
         # --- T14 round 3: per-substep held contact geometry -------------------
         # ``T14_SDF_HOLD=1`` resolves the closest point + normal ONCE per substep
         # (iteration 0's existing search) and holds them in the blade's local
