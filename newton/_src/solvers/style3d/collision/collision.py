@@ -1758,7 +1758,8 @@ class Collision:
                 2: " + HOLD=2 (bary point held, 1 query/iter instead of 7)"}
                .get(int(__import__("os").environ.get("T14_SDF_HOLD", "0") or 0), ""))
             + ({1: " + EDGE_EXACT=1 (exact normal at edge-flagged pairs)",
-                2: " + EDGE_EXACT=2 (exact depth+normal at edge-flagged pairs)"}
+                2: " + EDGE_EXACT=2 (exact depth+normal at edge-flagged pairs)",
+                3: " + EDGE_EXACT=3 (exact depth+normal at all near pairs)"}
                .get(int(__import__("os").environ.get("T14_SDF_EDGE_EXACT", "0") or 0), ""))
             + f": {len(slots)} shape(s), voxel={voxel * 1000:g} mm, h={half_thickness * 1000:g} mm, "
             + f"grid={total} cells ({total * 4 / 1.0e6:.2f} MB)",

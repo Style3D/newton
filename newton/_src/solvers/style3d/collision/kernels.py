@@ -231,7 +231,12 @@ _T14_SDF_ALLSEED = wp.constant(int(__import__("os").environ.get("T14_SDF_ALLSEED
 # direction is replaced, because depth already converges with the grid (p99
 # 0.053 mm at 0.25 mm) while the edge normal does not (p99 44 deg at 0.25 mm,
 # 43 deg at 0.125 mm).
-# Modes: 1 = take only the NORMAL from the fallback query (depth stays the
+# Modes: 3 = HYBRID -- no detector at all: every pair that reaches the force
+#   law pays one exact query at its winner point and takes BOTH depth and
+#   normal from it, so the quantities the force law consumes are the exact
+#   ones and only the SEARCH stays on the grid.  Motivated by the voxel
+#   tier's (2) regression on the mu=0.35 edge seeds (7/15 vs exact 12/12).
+# 1 = take only the NORMAL from the fallback query (depth stays the
 #   grid's, which is what the accuracy harness says already converges);
 #   2 = take BOTH the normal and the DEPTH from it, for the case where the
 #   grid's rounded tip also costs bite at the blade edge.
@@ -2883,7 +2888,16 @@ def eval_tri_sdf_contact_kernel(
         # the gradient at the winning point, carried out of the search
         n_local = n_exact
     else:
-        if _T14_SDF_EDGE_EXACT != 0:
+        if _T14_SDF_EDGE_EXACT == 3:
+            # HYBRID: unconditional.  Start from the grid gradient so a missed
+            # query still leaves a usable normal, then overwrite with the exact
+            # depth and normal at the winner point.
+            n_local = sdf_grid_gradient(sdf, base, nx, ny, nz, org, inv_voxel, bg, voxel, p)
+            d_h, n_h = sdf_mesh_query(sdf_mesh[slot], mesh_max_dist, bg, p)
+            if d_h < bg:
+                n_local = n_h
+                depth = wp.max(wp.min(half_thickness - d_h, max_depth), 0.0)
+        elif _T14_SDF_EDGE_EXACT != 0:
             # depth stays the grid's; only the DIRECTION falls back, and only
             # where the grid says its own gradient is not unit length.
             ng_e, gmag_e = sdf_grid_gradient_mag(
@@ -3375,7 +3389,16 @@ def accumulate_tri_sdf_reaction_kernel(
     if _R16_SDF_EXACT != 0:
         n_local = n_exact
     else:
-        if _T14_SDF_EDGE_EXACT != 0:
+        if _T14_SDF_EDGE_EXACT == 3:
+            # HYBRID: unconditional.  Start from the grid gradient so a missed
+            # query still leaves a usable normal, then overwrite with the exact
+            # depth and normal at the winner point.
+            n_local = sdf_grid_gradient(sdf, base, nx, ny, nz, org, inv_voxel, bg, voxel, p_local)
+            d_h, n_h = sdf_mesh_query(sdf_mesh[slot], mesh_max_dist, bg, p_local)
+            if d_h < bg:
+                n_local = n_h
+                depth = wp.max(wp.min(half_thickness - d_h, max_depth), 0.0)
+        elif _T14_SDF_EDGE_EXACT != 0:
             # depth stays the grid's; only the DIRECTION falls back, and only
             # where the grid says its own gradient is not unit length.
             ng_e, gmag_e = sdf_grid_gradient_mag(
