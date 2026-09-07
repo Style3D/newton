@@ -3031,6 +3031,32 @@ def accumulate_tri_sdf_reaction_kernel(
     wp.atomic_add(body_f, body, wp.spatial_vector(reaction, wp.cross(p_world - com, reaction)))
 
 
+@wp.kernel
+def add_tri_sdf_cache_kernel(
+    cache_f: wp.array(dtype=wp.vec3),
+    cache_h: wp.array(dtype=wp.mat33),
+    # outputs
+    forces: wp.array(dtype=wp.vec3),
+    hessians: wp.array(dtype=wp.mat33),
+):
+    """T14: fold the cached tri-SDF contact force/Hessian into this iteration.
+
+    Used only when ``T14_SDF_EVERY > 1``.  The expensive kernel then runs on
+    every k-th Newton iteration and writes its result into a per-particle cache
+    instead of accumulating straight into the solver's RHS; this kernel adds the
+    cache in on EVERY iteration, including the skipped ones, so the contact term
+    is present in every solve -- it is held at the value the last evaluated
+    iterate produced rather than dropped.
+
+    One thread per particle and the launches are serialised on the stream, so
+    the read-modify-write needs no atomic (unlike the contact kernel, which has
+    many triangles landing on the same particle).
+    """
+    tid = wp.tid()
+    forces[tid] = forces[tid] + cache_f[tid]
+    hessians[tid] = hessians[tid] + cache_h[tid]
+
+
 @wp.func
 def _point_aabb_dist2(p: wp.vec3, lo: wp.vec3, hi: wp.vec3):
     """Squared distance from ``p`` to the axis-aligned box; 0 when inside."""

@@ -34,6 +34,7 @@ from newton._src.solvers.style3d.collision.kernels import (
     transform_rigid_feature_vertices_kernel,
     tri_sdf_broadphase_kernel,
     tri_sdf_bp_selfcheck_kernel,
+    add_tri_sdf_cache_kernel,
 )
 from newton._src.solvers.style3d.collision import _t14_prof
 
@@ -70,6 +71,8 @@ class Collision:
 
         self.Hx = wp.zeros(model.particle_count, dtype=wp.vec3, device=self.model.device)
         self.contact_hessian_diags = wp.zeros(model.particle_count, dtype=wp.mat33, device=self.model.device)
+        # T14: set by SolverStyle3D; how many Newton iterations a substep runs.
+        self.nonlinear_iterations = 0
 
         # S1 static-friction anchors. Allocated always (fixed size, CUDA-graph
         # safe); ``anchor_kt_ratio <= 0`` keeps the stock viscous friction law.
@@ -1005,74 +1008,104 @@ class Collision:
                 state_out.body_q if self.integrate_with_external_rigid_solver else state_in.body_q
             )
             _n_pairs = self.tri_sdf_slots * int(self.model.tri_count)
-            if self.tri_sdf_bp_enabled and _iter == 0:
-                # T14: rebuild the candidate list once per substep.  The blade
-                # pose is fixed inside a substep and the cloth's motion over the
-                # 20 iterations is covered by ``tri_sdf_bp_slack``, so the list
-                # built here is valid for every consumer of this substep --
-                # including the reaction pass, which runs after the solve.
-                self._t14_broadphase(state_out.particle_q, _tri_sdf_body_q, _n_pairs)
-            for _bp_dim, _bp_mode in self._t14_launch_plan(_n_pairs):
-                with _t14_prof.section("tri_sdf_force"):
-                    wp.launch(
-                        eval_tri_sdf_contact_kernel,
-                        dim=_bp_dim,
-                        inputs=[
-                            state_out.particle_q,
-                            self.model.tri_indices,
-                            int(self.model.tri_count),
-                            self.tri_sdf_stiffness,
-                            self.tri_sdf_data,
-                            self.tri_sdf_base,
-                            self.tri_sdf_nx,
-                            self.tri_sdf_ny,
-                            self.tri_sdf_nz,
-                            self.tri_sdf_origin,
-                            self.tri_sdf_voxel,
-                            self.tri_sdf_bg,
-                            self.tri_sdf_slot_shape,
-                            self.model.shape_body,
-                            self.model.shape_transform,
-                            state_out.body_q if self.integrate_with_external_rigid_solver else state_in.body_q,
-                            self.tri_sdf_h,
-                            self.tri_sdf_max_correction,
-                            self.tri_sdf_refine,
-                            self.shape_hardening_eps,
-                            self.model.particle_radius,
-                            # R13f friction inputs (inert unless R13F_SDF_FRICTION)
-                            particle_q_prev,
-                            state_in.body_q if self.integrate_with_external_rigid_solver else state_out.body_q,
-                            self.model.shape_material_mu,
-                            self.model.soft_contact_mu,
-                            self.friction_epsilon,
-                            dt,
-                            # R13g frozen contact point (inert unless R13G_SDF_FREEZE)
-                            self.tri_sdf_w,
-                            (1 if _iter == 0 else 0)
-                            if self.tri_sdf_resolve_every <= 0
-                            else (1 if (_iter % self.tri_sdf_resolve_every) == 0 else 0),
-                            # R16-A2' exact backend (inert unless R16_SDF_EXACT)
-                            self.tri_sdf_mesh_id,
-                            self.tri_sdf_mesh_max_dist,
-                            # T8 anchor (inert unless tri_sdf_anchor_kt_ratio > 0)
-                            self.tri_sdf_anchor_p,
-                            self.tri_sdf_anchor_valid,
-                            self.tri_sdf_anchor_w,
-                            self.tri_sdf_anchor_kt_ratio,
-                            # T13: seeding + return mapping on iteration 0, evaluated in
-                            # the previous pose (= previous substep's converged state).
-                            1 if _iter == 0 else 0,
-                            self.tri_sdf_anchor_dbg,
-                            self.tri_sdf_anchor_dbg2,
-                            # T14 broad phase (inert unless T14_SDF_BROADPHASE)
-                            self.tri_sdf_cand_idx,
-                            self.tri_sdf_cand_count,
-                            self.tri_sdf_bp_overflow,
-                            _bp_mode,
-                        ],
-                        outputs=[particle_forces, self.contact_hessian_diags],
-                        device=self.model.device,
-                    )
+            # T14 iteration stride: k = 1 is the launch this stack always issued
+            # (straight into the RHS, no cache touched); k > 1 evaluates on every
+            # k-th iteration into the cache and folds the cache in below.
+            _k = self.tri_sdf_every
+            _out_f = particle_forces
+            _out_h = self.contact_hessian_diags
+            _do_eval = True
+            if _k > 1 or self.tri_sdf_cache_always:
+                _out_f = self.tri_sdf_cache_f
+                _out_h = self.tri_sdf_cache_h
+                if self.tri_sdf_every_tail == 2:
+                    _do_eval = (_iter == 0) or ((_iter % _k) == (_k - 1))
+                else:
+                    _do_eval = (_iter % _k) == 0
+                    if (self.tri_sdf_every_tail == 1
+                            and _iter == self.nonlinear_iterations - 1):
+                        _do_eval = True
+                if _do_eval:
+                    self.tri_sdf_cache_f.zero_()
+                    self.tri_sdf_cache_h.zero_()
+            if _do_eval:
+                if self.tri_sdf_bp_enabled and _iter == 0:
+                    # T14: rebuild the candidate list once per substep.  The blade
+                    # pose is fixed inside a substep and the cloth's motion over the
+                    # 20 iterations is covered by ``tri_sdf_bp_slack``, so the list
+                    # built here is valid for every consumer of this substep --
+                    # including the reaction pass, which runs after the solve.
+                    self._t14_broadphase(state_out.particle_q, _tri_sdf_body_q, _n_pairs)
+                for _bp_dim, _bp_mode in self._t14_launch_plan(_n_pairs):
+                    with _t14_prof.section("tri_sdf_force"):
+                        wp.launch(
+                            eval_tri_sdf_contact_kernel,
+                            dim=_bp_dim,
+                            inputs=[
+                                state_out.particle_q,
+                                self.model.tri_indices,
+                                int(self.model.tri_count),
+                                self.tri_sdf_stiffness,
+                                self.tri_sdf_data,
+                                self.tri_sdf_base,
+                                self.tri_sdf_nx,
+                                self.tri_sdf_ny,
+                                self.tri_sdf_nz,
+                                self.tri_sdf_origin,
+                                self.tri_sdf_voxel,
+                                self.tri_sdf_bg,
+                                self.tri_sdf_slot_shape,
+                                self.model.shape_body,
+                                self.model.shape_transform,
+                                state_out.body_q if self.integrate_with_external_rigid_solver else state_in.body_q,
+                                self.tri_sdf_h,
+                                self.tri_sdf_max_correction,
+                                self.tri_sdf_refine,
+                                self.shape_hardening_eps,
+                                self.model.particle_radius,
+                                # R13f friction inputs (inert unless R13F_SDF_FRICTION)
+                                particle_q_prev,
+                                state_in.body_q if self.integrate_with_external_rigid_solver else state_out.body_q,
+                                self.model.shape_material_mu,
+                                self.model.soft_contact_mu,
+                                self.friction_epsilon,
+                                dt,
+                                # R13g frozen contact point (inert unless R13G_SDF_FREEZE)
+                                self.tri_sdf_w,
+                                (1 if _iter == 0 else 0)
+                                if self.tri_sdf_resolve_every <= 0
+                                else (1 if (_iter % self.tri_sdf_resolve_every) == 0 else 0),
+                                # R16-A2' exact backend (inert unless R16_SDF_EXACT)
+                                self.tri_sdf_mesh_id,
+                                self.tri_sdf_mesh_max_dist,
+                                # T8 anchor (inert unless tri_sdf_anchor_kt_ratio > 0)
+                                self.tri_sdf_anchor_p,
+                                self.tri_sdf_anchor_valid,
+                                self.tri_sdf_anchor_w,
+                                self.tri_sdf_anchor_kt_ratio,
+                                # T13: seeding + return mapping on iteration 0, evaluated in
+                                # the previous pose (= previous substep's converged state).
+                                1 if _iter == 0 else 0,
+                                self.tri_sdf_anchor_dbg,
+                                self.tri_sdf_anchor_dbg2,
+                                # T14 broad phase (inert unless T14_SDF_BROADPHASE)
+                                self.tri_sdf_cand_idx,
+                                self.tri_sdf_cand_count,
+                                self.tri_sdf_bp_overflow,
+                                _bp_mode,
+                            ],
+                            outputs=[_out_f, _out_h],
+                            device=self.model.device,
+                        )
+            if _k > 1 or self.tri_sdf_cache_always:
+                # every iteration, including the ones that skipped the search
+                wp.launch(
+                    add_tri_sdf_cache_kernel,
+                    dim=int(self.model.particle_count),
+                    inputs=[self.tri_sdf_cache_f, self.tri_sdf_cache_h],
+                    outputs=[particle_forces, self.contact_hessian_diags],
+                    device=self.model.device,
+                )
             self.tri_sdf_w_valid = True
             # R13f: the reaction pass runs outside the solver loop and gets no
             # dt / previous state of its own.  Stash exactly what this pass used
@@ -1594,6 +1627,52 @@ class Collision:
             self.tri_sdf_slots * int(self.model.tri_count)
             if _os_t12.environ.get("T12_ANCHOR_DBG") else 1
         )
+        # --- T14 iteration stride --------------------------------------------
+        # The expensive part of this channel is not the pair count, it is that
+        # the closest-point search is redone on EVERY Newton iteration: 20 per
+        # substep plus the reaction pass.  ``T14_SDF_EVERY = k`` evaluates it on
+        # every k-th iteration into a per-particle cache and folds that cache
+        # into the RHS on all of them, so the contact term is held rather than
+        # dropped on the skipped iterations.  k = 1 (default) never touches the
+        # cache and issues exactly the launch this stack always issued.
+        #
+        # k divides 0, so iteration 0 always evaluates -- which is where the T8
+        # anchor is seeded and return-mapped, and where the broad phase (if on)
+        # rebuilds its list.  Those states are therefore untouched by the
+        # stride.  The reaction pass is outside the loop and still runs once per
+        # substep.
+        self.tri_sdf_every = max(1, int(_os_t12.environ.get("T14_SDF_EVERY", "1")))
+        # Control knob: route k = 1 through the cache too.  Mathematically the
+        # same as the direct path (evaluate every iteration, then add), so a run
+        # with it on separates "the cache plumbing is wrong" from "lagging the
+        # force by one iteration is what breaks the grasp".
+        if _os_t12.environ.get("T14_SDF_CACHE_ALWAYS", "0") not in ("", "0"):
+            self.tri_sdf_cache_always = True
+        else:
+            self.tri_sdf_cache_always = False
+        # Which iterations of the stride actually evaluate.
+        #   0 (default): _iter % k == 0  -> 0, k, 2k, ...  The LAST iteration of
+        #     a substep is then a held one, and that is the iterate whose solve
+        #     produces the positions the substep ends on.
+        #   2: {0} U {i : i % k == k-1}.  Same count as mode 1 at k=2 but a
+        #     different set (odd iterations); the only variant of the three that
+        #     survived the lift gate at k=2, and only barely (see the commit).
+        #   1: additionally force the LAST iteration of the substep, i.e. evaluate
+        #     on {0, k, 2k, ...} U {n_iter-1}.  Iteration 0 is where the T8 anchor
+        #     is seeded; iteration n_iter-1 is the solve that produces the
+        #     positions the substep ends on.  Measured: with mode 0 the grasp is
+        #     destroyed at k=2 (4 attempts, all FAIL, cloth never leaves the
+        #     table); with mode 1 it holds at k=2.
+        self.tri_sdf_every_tail = int(_os_t12.environ.get("T14_SDF_EVERY_TAIL", "0") or 0)
+        self.tri_sdf_cache_f = wp.zeros(int(self.model.particle_count), dtype=wp.vec3, device=device)
+        self.tri_sdf_cache_h = wp.zeros(int(self.model.particle_count), dtype=wp.mat33, device=device)
+        if self.tri_sdf_every > 1:
+            print(
+                f"[collision] tri-SDF ITERATION STRIDE k={self.tri_sdf_every}: "
+                f"force/Hessian re-evaluated on iterations 0, {self.tri_sdf_every}, "
+                f"{2 * self.tri_sdf_every}, ... and held (cached) in between",
+                flush=True,
+            )
         # --- T14 broad phase -------------------------------------------------
         # Allocated unconditionally (the kernels take the arguments either way);
         # with T14_SDF_BROADPHASE unset nothing reads or writes them and the

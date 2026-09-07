@@ -182,6 +182,12 @@ class SolverStyle3D(SolverBase):
             )
         self.style3d = model.style3d
         self.collision: Collision | None = Collision(model)  # set None to disable
+        # T14: the contact stack's iteration-stride knob needs to know which
+        # iteration is the LAST one of a substep -- that is the iterate whose
+        # solve produces the positions the substep ends on, and handing it a
+        # held contact force is what breaks the grasp (measured).
+        if self.collision is not None:
+            self.collision.nonlinear_iterations = int(iterations)
         self.linear_iterations = linear_iterations
         self.nonlinear_iterations = iterations
         self.drag_spring_stiff = drag_spring_stiff
