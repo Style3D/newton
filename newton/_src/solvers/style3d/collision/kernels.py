@@ -216,6 +216,24 @@ _T14_SDF_PAR = wp.constant(int(__import__("os").environ.get("T14_SDF_PAR", "0"))
 # 0 = OFF: the descent loop below is the single-seed one it always was.
 _T14_SDF_ALLSEED = wp.constant(int(__import__("os").environ.get("T14_SDF_ALLSEED", "0")))
 
+# T14 round 5 (3): fall back to the exact normal only where the grid's is wrong.
+# A true signed distance field has |grad| == 1 everywhere except on the medial
+# axis and where the surface is not smooth; the central difference collapses
+# toward 0 across a gradient discontinuity, so ``| ||g|| - 1 | > 0.1`` flags an
+# edge/corner for free -- the six samples were already taken for the gradient.
+# Measured on the real blade at 0.25 mm (300k triangles, in contact n=177829):
+#   detector fires on 15.54% of pairs
+#   fired    : normal angle error vs exact  p50 21.05  p99 44.69  max 88.56 deg
+#   not fired:                              p50  0.00  p99  8.69  max 25.63 deg
+#   overall p99 40.45 -> 8.69 deg if the fired set falls back
+# So this trades one on-surface exact query on ~1/6 of the contacting pairs for
+# a 4.6x better normal tail.  DEPTH still comes from the grid -- only the normal
+# direction is replaced, because depth already converges with the grid (p99
+# 0.053 mm at 0.25 mm) while the edge normal does not (p99 44 deg at 0.25 mm,
+# 43 deg at 0.125 mm).
+# 0 = OFF: the single ``sdf_grid_gradient`` call below is all that is emitted.
+_T14_SDF_EDGE_EXACT = wp.constant(int(__import__("os").environ.get("T14_SDF_EDGE_EXACT", "0")))
+
 
 @wp.func
 def triangle_normal(A: wp.vec3, B: wp.vec3, C: wp.vec3):
@@ -2173,6 +2191,43 @@ def sdf_grid_gradient(
     return g / ln
 
 
+@wp.func
+def sdf_grid_gradient_mag(
+    sdf: wp.array(dtype=float),
+    base: int,
+    nx: int,
+    ny: int,
+    nz: int,
+    origin: wp.vec3,
+    inv_voxel: float,
+    bg: float,
+    voxel: float,
+    p: wp.vec3,
+):
+    """``sdf_grid_gradient`` plus the UNNORMALISED magnitude.
+
+    Same six samples and the same unit vector, statement for statement; the only
+    addition is returning ``||g|| / (2*voxel)``, which is the field's local
+    |grad| and equals 1 wherever the true SDF is smooth.  Kept as a separate
+    function so the default path's ``sdf_grid_gradient`` is not touched at all.
+    """
+    e = voxel
+    gx = sdf_grid_sample(sdf, base, nx, ny, nz, origin, inv_voxel, bg, p + wp.vec3(e, 0.0, 0.0)) - sdf_grid_sample(
+        sdf, base, nx, ny, nz, origin, inv_voxel, bg, p - wp.vec3(e, 0.0, 0.0)
+    )
+    gy = sdf_grid_sample(sdf, base, nx, ny, nz, origin, inv_voxel, bg, p + wp.vec3(0.0, e, 0.0)) - sdf_grid_sample(
+        sdf, base, nx, ny, nz, origin, inv_voxel, bg, p - wp.vec3(0.0, e, 0.0)
+    )
+    gz = sdf_grid_sample(sdf, base, nx, ny, nz, origin, inv_voxel, bg, p + wp.vec3(0.0, 0.0, e)) - sdf_grid_sample(
+        sdf, base, nx, ny, nz, origin, inv_voxel, bg, p - wp.vec3(0.0, 0.0, e)
+    )
+    g = wp.vec3(gx, gy, gz)
+    ln = wp.length(g)
+    if ln < 1.0e-12:
+        return wp.vec3(0.0, 0.0, 1.0), 0.0
+    return g / ln, ln / (2.0 * e)
+
+
 @wp.kernel
 def bake_shape_sdf_kernel(
     mesh: wp.uint64,
@@ -2824,7 +2879,19 @@ def eval_tri_sdf_contact_kernel(
         # the gradient at the winning point, carried out of the search
         n_local = n_exact
     else:
-        n_local = sdf_grid_gradient(sdf, base, nx, ny, nz, org, inv_voxel, bg, voxel, p)
+        if _T14_SDF_EDGE_EXACT != 0:
+            # depth stays the grid's; only the DIRECTION falls back, and only
+            # where the grid says its own gradient is not unit length.
+            ng_e, gmag_e = sdf_grid_gradient_mag(
+                sdf, base, nx, ny, nz, org, inv_voxel, bg, voxel, p
+            )
+            n_local = ng_e
+            if wp.abs(gmag_e - 1.0) > 0.1:
+                d_e, n_e = sdf_mesh_query(sdf_mesh[slot], mesh_max_dist, bg, p)
+                if d_e < bg:
+                    n_local = n_e
+        else:
+            n_local = sdf_grid_gradient(sdf, base, nx, ny, nz, org, inv_voxel, bg, voxel, p)
     n_world = wp.transform_vector(X_ws, n_local)
     k = tri_stiffness[t]
     f = n_world * (k * depth)
@@ -3298,7 +3365,19 @@ def accumulate_tri_sdf_reaction_kernel(
     if _R16_SDF_EXACT != 0:
         n_local = n_exact
     else:
-        n_local = sdf_grid_gradient(sdf, base, nx, ny, nz, org, inv_voxel, bg, voxel, p_local)
+        if _T14_SDF_EDGE_EXACT != 0:
+            # depth stays the grid's; only the DIRECTION falls back, and only
+            # where the grid says its own gradient is not unit length.
+            ng_e, gmag_e = sdf_grid_gradient_mag(
+                sdf, base, nx, ny, nz, org, inv_voxel, bg, voxel, p_local
+            )
+            n_local = ng_e
+            if wp.abs(gmag_e - 1.0) > 0.1:
+                d_e, n_e = sdf_mesh_query(sdf_mesh[slot], mesh_max_dist, bg, p_local)
+                if d_e < bg:
+                    n_local = n_e
+        else:
+            n_local = sdf_grid_gradient(sdf, base, nx, ny, nz, org, inv_voxel, bg, voxel, p_local)
     n_world = wp.transform_vector(X_ws, n_local)
     f_n = tri_stiffness[t] * depth
     t0_h = (2.0 / 3.0) * (particle_radius[i0] + particle_radius[i1] + particle_radius[i2])
