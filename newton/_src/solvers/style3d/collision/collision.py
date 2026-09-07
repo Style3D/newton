@@ -40,6 +40,65 @@ from newton._src.solvers.style3d.collision.kernels import (
 )
 from newton._src.solvers.style3d.collision import _t14_prof
 
+
+def _t14_bake_dir():
+    import os
+
+    d = os.environ.get(
+        "T14_SDF_BAKE_CACHE",
+        "/home/hwk/program/synreal-world/data/eval_out/gripper_penetration/T14/sdf_cache",
+    )
+    return d
+
+
+def _t14_bake_verify():
+    import os
+
+    return os.environ.get("T14_SDF_BAKE_VERIFY", "0") not in ("", "0")
+
+
+def _t14_bake_key(vertices, indices, voxel, pad, max_dist, lo, n):
+    """Everything the baked field depends on, hashed."""
+    import hashlib
+
+    h = hashlib.sha256()
+    h.update(np.ascontiguousarray(vertices, dtype=np.float32).tobytes())
+    h.update(np.ascontiguousarray(indices, dtype=np.int32).tobytes())
+    h.update(np.asarray([voxel, pad, max_dist], dtype=np.float64).tobytes())
+    h.update(np.ascontiguousarray(lo, dtype=np.float32).tobytes())
+    h.update(np.ascontiguousarray(n, dtype=np.int32).tobytes())
+    h.update(b"bake_shape_sdf_kernel/v1")
+    return h.hexdigest()
+
+
+def _t14_bake_load(key):
+    import os
+
+    fp = os.path.join(_t14_bake_dir(), key + ".npy")
+    if not os.path.exists(fp):
+        return None
+    try:
+        return np.load(fp)
+    except Exception:  # noqa: BLE001  (a corrupt cache must never break a run)
+        return None
+
+
+def _t14_bake_store(key, arr):
+    import os
+
+    d = _t14_bake_dir()
+    try:
+        os.makedirs(d, exist_ok=True)
+        # np.save appends ".npy" unless the name already ends in it, so the
+        # staging name must too -- otherwise the rename below chases a file that
+        # was never written.
+        tmp = os.path.join(d, key + ".tmp.npy")
+        np.save(tmp, arr)
+        os.replace(tmp, os.path.join(d, key + ".npy"))
+    except Exception as e:  # noqa: BLE001
+        print(f"[collision] tri-SDF bake cache store failed ({e}); continuing", flush=True)
+
+
 ########################################################################################################################
 ###################################################    Collision    ####################################################
 ########################################################################################################################
@@ -1602,24 +1661,54 @@ class Collision:
             hi = vertices.max(axis=0) + pad
             n = np.maximum(np.ceil((hi - lo) / voxel).astype(np.int32) + 1, 2)
             count = int(n[0]) * int(n[1]) * int(n[2])
-            grid = wp.zeros(count, dtype=float, device=device)
-            wp.launch(
-                bake_shape_sdf_kernel,
-                dim=(int(n[0]), int(n[1]), int(n[2])),
-                inputs=[
-                    mesh.id,
-                    wp.vec3(float(lo[0]), float(lo[1]), float(lo[2])),
-                    float(voxel),
-                    int(n[0]),
-                    int(n[1]),
-                    int(n[2]),
-                    0,
-                    bake_max_dist,
-                ],
-                outputs=[grid],
-                device=device,
-            )
-            blocks.append(grid.numpy())
+            # T14 round 5: bake cache.  At 1 mm the bake is a rounding error, but
+            # 0.25 mm is 41.8 M cells per finger and 0.125 mm is 334 M -- baked
+            # from scratch on every process start that would dominate every
+            # measurement in the campaign.  The key covers everything the field
+            # depends on (geometry, scale, grid, query cutoff), so a hit is the
+            # same array the bake would have produced; ``T14_SDF_BAKE_VERIFY=1``
+            # re-bakes and asserts that bitwise.
+            _ck = _t14_bake_key(vertices, indices, voxel, pad, bake_max_dist, lo, n)
+            _cached = _t14_bake_load(_ck)
+            if _cached is not None and not _t14_bake_verify():
+                blocks.append(_cached)
+                print(f"[collision] tri-SDF bake CACHE HIT shape {shape}: "
+                      f"{count} cells ({count * 4 / 1.0e6:.1f} MB) from {_ck[:12]}",
+                      flush=True)
+            else:
+                grid = wp.zeros(count, dtype=float, device=device)
+                _t_bake = __import__("time").perf_counter()
+                wp.launch(
+                    bake_shape_sdf_kernel,
+                    dim=(int(n[0]), int(n[1]), int(n[2])),
+                    inputs=[
+                        mesh.id,
+                        wp.vec3(float(lo[0]), float(lo[1]), float(lo[2])),
+                        float(voxel),
+                        int(n[0]),
+                        int(n[1]),
+                        int(n[2]),
+                        0,
+                        bake_max_dist,
+                    ],
+                    outputs=[grid],
+                    device=device,
+                )
+                _b = grid.numpy()
+                wp.synchronize_device()
+                _dt_bake = __import__("time").perf_counter() - _t_bake
+                print(f"[collision] tri-SDF bake shape {shape}: {count} cells "
+                      f"({count * 4 / 1.0e6:.1f} MB) in {_dt_bake:.2f} s", flush=True)
+                if _cached is not None:
+                    same = bool(np.array_equal(_cached, _b))
+                    print(f"[collision] tri-SDF bake CACHE VERIFY shape {shape}: "
+                          f"bitwise identical = {same}", flush=True)
+                    if not same:
+                        raise RuntimeError("tri-SDF bake cache mismatch")
+                else:
+                    _t14_bake_store(_ck, _b)
+                blocks.append(_b)
+                del grid
             bases.append(total)
             dims.append(n)
             origins.append(lo)
