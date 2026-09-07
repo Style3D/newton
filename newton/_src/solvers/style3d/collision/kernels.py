@@ -331,13 +331,24 @@ _T16_SDF_ARGMIN_TOL = wp.constant(float(__import__("os").environ.get("T16_SDF_AR
 # shows up as same-arm repeat scatter going from bitwise-identical to 12%, the
 # low-load delivery ratio turning NEGATIVE and the first-frame slip changing sign.
 #
-# SOFT replaces the hard pick with a softmin over the candidates:
-#     alpha_i  ~  exp(-(d_i - d_min) / (tau * h))
-#     w_soft   =  sum_i alpha_i * w_i          (already barycentric: sum alpha = 1)
-# and then evaluates the depth AND the normal once more AT w_soft, so the force
-# law and the anchor read a single self-consistent point.  Candidates are the
-# four seeds plus the refinement's winner (the 5th), so nothing about the search
-# itself changes.
+# SOFT replaces the hard pick of a STARTING POINT with a softmin over the four
+# seeds, and then runs the SAME descent from there:
+#     alpha_i  ~  exp(-(d_i - d_min) / (tau * h))          i = centroid, a, b, c
+#     w_soft   =  sum_i alpha_i * w_i     (already barycentric: sum alpha = 1)
+#     w        =  refine(w_soft)          the same 3 projected-gradient steps
+# and the depth AND the normal are evaluated at that final point, so the force
+# law and the anchor read one self-consistent point.
+#
+# Only the four SEEDS enter the blend, deliberately.  They average EXACTLY to the
+# centroid ((wg + wa + wb + wc)/4 = (1/3,1/3,1/3)) and their depths are continuous
+# in the triangle's pose, so the blend is continuous everywhere and lands on the
+# centroid on a flat contact for both query backends.  Feeding the REFINED point
+# into the blend instead re-injects the very arbitrary pick this is removing --
+# measured: it leaves 50.941% of flat triangles disagreeing between backends,
+# against 0.173% for the seeds-only blend.  The refinement is not dropped, it is
+# moved: it now starts FROM w_soft, so the blade-tip regime keeps the interior
+# minimum it needs (on a flat contact the projected gradient is zero and the
+# descent does not move, so (1a) is unaffected).
 #   flat contact  (spreads << tau*h) -> all candidates equal weight -> w_soft is
 #     the centroid, and the two query backends agree bitwise;
 #   tilted contact (spreads >> tau*h) -> the deepest vertex takes essentially all
@@ -349,17 +360,6 @@ _T16_SDF_ARGMIN_TOL = wp.constant(float(__import__("os").environ.get("T16_SDF_AR
 # 0 = OFF: every statement below is dead code.
 _T16_SDF_ARGMIN_SOFT = wp.constant(float(__import__("os").environ.get("T16_SDF_ARGMIN_SOFT", "0")))
 
-# T16 SOFT variant: drop the REFINED candidate from the softmin and blend the
-# four SEEDS only.  Measured reason (t16_soft_continuity.py): the four seeds
-# average EXACTLY to the centroid ((wg + wa + wb + wc)/4 = (1/3,1/3,1/3)), and
-# their depths are continuous in the triangle's pose, so a seeds-only softmin is
-# continuous everywhere and lands on the centroid on a flat contact for BOTH
-# backends.  The refined 5th candidate is neither: on a flat contact its w is the
-# arbitrary pick this whole line of work is trying to remove, and at 1/5 of the
-# weight it drags w_soft off the centroid by up to (1/5)(2/3) = 0.133 -- exactly
-# the residual jump the 5-candidate blend still shows.  Default 0 = the
-# 5-candidate blend as originally specified.
-_T16_SDF_SOFT_SEEDS = wp.constant(int(__import__("os").environ.get("T16_SDF_SOFT_SEEDS", "0")))
 
 # T16 diagnostic: where does the contact point sit, and how is the load shared?
 # Pure accumulator, the force law never reads it.  Answers the question the
@@ -372,6 +372,20 @@ _T16_SDF_SOFT_SEEDS = wp.constant(int(__import__("os").environ.get("T16_SDF_SOFT
 #   9 max f_n | 10 sum depth | 11 max max(w)
 #   12..21 histogram of max(w) over [1/3, 1] in 10 equal bins
 _T16_W_DIAG = wp.constant(int(__import__("os").environ.get("T16_W_DIAG", "0")))
+
+# T16 SOFT gate: the DESCENT is a second noise amplifier, independent of the seed
+# pick.  Its guard is ``gn > 1e-12`` where ``gn = |projected barycentric
+# gradient|`` in METRES: on a flat contact ga = gb = gc exactly, so gn should be
+# 0, but in float32 it is ~1e-9 m of pure rounding -- a thousand times the guard.
+# The step is then ``cand = w - gw*(step/gn)``: the DIRECTION is noise but it is
+# renormalised to a FULL 0.5 step, and ``dcand < best`` accepts on any
+# improvement at all.  Measured: blending the seeds and then descending still
+# leaves 33-40 full-width jumps in the tilt sweep and only 61-63% of flat
+# triangles on the centroid, with the two backends disagreeing.
+# This gate compares gn against the SAME length scale the softmin uses (tau*h),
+# so a step is taken only when the barycentric gradient is real rather than
+# rounding.  0 = OFF: the guard is the ``1e-12`` it always was, bit-identical.
+_T16_SDF_SOFT_GATE = wp.constant(int(__import__("os").environ.get("T16_SDF_SOFT_GATE", "0")))
 
 
 @wp.struct
@@ -2611,8 +2625,24 @@ def tri_sdf_closest(
     if dc < best - tol:
         best = dc
         w = wp.vec3(0.0, 0.0, 1.0)
+    if _T16_SDF_ARGMIN_SOFT != 0.0:
+        # same construction as the exact path: blend the four seeds, then let the
+        # descent below start from the blend.
+        w = _t16_softmin_w(
+            wp.vec3(third, third, third), dg,
+            wp.vec3(1.0, 0.0, 0.0), da,
+            wp.vec3(0.0, 1.0, 0.0), db,
+            wp.vec3(0.0, 0.0, 1.0), dc,
+            tol_soft,
+        )
+        best = sdf_grid_sample(
+            sdf, base, nx, ny, nz, org, inv_voxel, bg,
+            a * w[0] + b * w[1] + c * w[2],
+        )
     n_start = int(1)
-    if _T14_SDF_ALLSEED != 0:
+    if _T14_SDF_ALLSEED != 0 and _T16_SDF_ARGMIN_SOFT == 0.0:
+        # ALLSEED re-seeds the loop per seed, which would discard the blend;
+        # SOFT takes precedence and runs the single descent from w_soft.
         n_start = 4
     for _k in range(n_start):
         # OFF: exactly one pass starting from the winning seed -- the loop body
@@ -2642,8 +2672,11 @@ def tri_sdf_closest(
             gc = wp.dot(g, c)
             m = (ga + gb + gc) * third
             gw = wp.vec3(ga - m, gb - m, gc - m)
+            gn_gate = float(1.0e-12)
+            if _T16_SDF_SOFT_GATE != 0:
+                gn_gate = wp.max(1.0e-12, tol_soft)
             gn = wp.length(gw)
-            if gn > 1.0e-12:
+            if gn > gn_gate:
                 cand = wk - gw * (step / gn)
                 cand = wp.vec3(wp.max(cand[0], 0.0), wp.max(cand[1], 0.0), wp.max(cand[2], 0.0))
                 sm = cand[0] + cand[1] + cand[2]
@@ -2661,22 +2694,6 @@ def tri_sdf_closest(
         if _T14_SDF_ALLSEED == 0:
             best = bk
             w = wk
-    if _T16_SDF_ARGMIN_SOFT != 0.0:
-        w5v = w
-        d5v = best
-        if _T16_SDF_SOFT_SEEDS != 0:
-            w5v = wp.vec3(third, third, third)
-            d5v = dg
-        w_s = _t16_softmin_w(
-            wp.vec3(third, third, third), dg,
-            wp.vec3(1.0, 0.0, 0.0), da,
-            wp.vec3(0.0, 1.0, 0.0), db,
-            wp.vec3(0.0, 0.0, 1.0), dc,
-            w5v, d5v,
-            tol_soft,
-        )
-        p_s = a * w_s[0] + b * w_s[1] + c * w_s[2]
-        return w_s, sdf_grid_sample(sdf, base, nx, ny, nz, org, inv_voxel, bg, p_s)
     return w, best
 
 
@@ -2724,25 +2741,23 @@ def _t16_softmin_w(
     w1: wp.vec3, d1: float,
     w2: wp.vec3, d2: float,
     w3: wp.vec3, d3: float,
-    w4: wp.vec3, d4: float,
     tau: float,
 ):
-    """Softmin over five barycentric candidates.  Returns the blended point.
+    """Softmin over the FOUR seeds.  Returns the blended barycentric point.
 
     ``sum_i alpha_i == 1`` and every ``w_i`` sums to 1, so the blend is already a
-    valid barycentric coordinate -- no renormalisation of the point is needed.
+    valid barycentric coordinate -- no renormalisation is needed.
     """
-    dmin = wp.min(d0, wp.min(d1, wp.min(d2, wp.min(d3, d4))))
+    dmin = wp.min(d0, wp.min(d1, wp.min(d2, d3)))
     e0 = _t16_soft_weight(d0, dmin, tau)
     e1 = _t16_soft_weight(d1, dmin, tau)
     e2 = _t16_soft_weight(d2, dmin, tau)
     e3 = _t16_soft_weight(d3, dmin, tau)
-    e4 = _t16_soft_weight(d4, dmin, tau)
-    ssum = e0 + e1 + e2 + e3 + e4
+    ssum = e0 + e1 + e2 + e3
     if ssum < 1.0e-30:
         return w0
     inv = 1.0 / ssum
-    return (w0 * e0 + w1 * e1 + w2 * e2 + w3 * e3 + w4 * e4) * inv
+    return (w0 * e0 + w1 * e1 + w2 * e2 + w3 * e3) * inv
 
 
 @wp.func
@@ -2911,6 +2926,7 @@ def tri_sdf_refine_from(
     slot: int,
     bg: float,
     tol: float,
+    gate: float,
     rq: float,
     w: wp.vec3,
     best: float,
@@ -2937,7 +2953,7 @@ def tri_sdf_refine_from(
         m = (ga + gb + gc) * third
         gw = wp.vec3(ga - m, gb - m, gc - m)
         gn = wp.length(gw)
-        if gn > 1.0e-12:
+        if gn > wp.max(1.0e-12, gate):
             cand = w - gw * (step / gn)
             cand = wp.vec3(wp.max(cand[0], 0.0), wp.max(cand[1], 0.0), wp.max(cand[2], 0.0))
             sm = cand[0] + cand[1] + cand[2]
@@ -3000,6 +3016,9 @@ def tri_sdf_closest_mesh(
     # T16-lite: a candidate must be deeper by more than this to unseat the
     # incumbent.  0 (default) reproduces the strict '<' exactly.
     tol = _T16_SDF_ARGMIN_TOL * cull
+    gate = float(0.0)
+    if _T16_SDF_SOFT_GATE != 0:
+        gate = _T16_SDF_ARGMIN_SOFT * cull
     if _T16_SDF_ARGMIN_SOFT != 0.0:
         # SOFT and TOL are mutually exclusive; SOFT wins and the seed/refine
         # comparisons go back to the strict '<' they always were.
@@ -3033,31 +3052,24 @@ def tri_sdf_closest_mesh(
         nbest = nc
         if _T14_SDF_SKIPREF != 0:
             p_best = c
-    w_r, best_r, n_r = tri_sdf_refine_from(
-        a, b, c, mesh, gx, slot, bg, tol, rq, w, best, nbest, p_best, refine_steps
-    )
     if _T16_SDF_ARGMIN_SOFT != 0.0:
-        # softmin over {centroid, a, b, c, refined}, then ONE more evaluation at
-        # the blended point so depth and normal are self-consistent with it.
-        w5 = w_r
-        d5 = best_r
-        if _T16_SDF_SOFT_SEEDS != 0:
-            # seeds only: give the 5th slot the centroid again (weight folded
-            # into the centroid seed) so the blend is over the four seeds alone.
-            w5 = wp.vec3(third, third, third)
-            d5 = dg
+        # softmin over the four seeds -> a CONTINUOUS starting point, then the
+        # same descent from there.  One extra field evaluation (at the blend).
         w_s = _t16_softmin_w(
             wp.vec3(third, third, third), dg,
             wp.vec3(1.0, 0.0, 0.0), da,
             wp.vec3(0.0, 1.0, 0.0), db,
             wp.vec3(0.0, 0.0, 1.0), dc,
-            w5, d5,
             _T16_SDF_ARGMIN_SOFT * cull,
         )
         p_s = a * w_s[0] + b * w_s[1] + c * w_s[2]
         d_s, n_s = sdf_query(mesh, gx, slot, rq, bg, p_s)
-        return w_s, d_s, n_s
-    return w_r, best_r, n_r
+        return tri_sdf_refine_from(
+            a, b, c, mesh, gx, slot, bg, tol, gate, rq, w_s, d_s, n_s, p_s, refine_steps
+        )
+    return tri_sdf_refine_from(
+        a, b, c, mesh, gx, slot, bg, tol, gate, rq, w, best, nbest, p_best, refine_steps
+    )
 
 
 @wp.kernel
@@ -4238,7 +4250,7 @@ def tri_sdf_par_seed_kernel(
 
     w, best, nb = tri_sdf_refine_from(
         a, b, c, sdf_mesh[slot], gx, slot, bg, _T16_SDF_ARGMIN_TOL * half_thickness,
-        rq, w, best, nb, p0, refine_steps
+        0.0, rq, w, best, nb, p0, refine_steps
     )
     par_best[tid] = best
     par_w[tid] = w
