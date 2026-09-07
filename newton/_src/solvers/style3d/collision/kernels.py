@@ -288,6 +288,40 @@ _T14_SDF_EDGE_EXACT = wp.constant(int(__import__("os").environ.get("T14_SDF_EDGE
 # 0 = OFF: ``sdf_query`` calls ``sdf_mesh_query`` and nothing below is reached.
 _T15_SDF_GRIDEXACT = wp.constant(int(__import__("os").environ.get("T15_SDF_GRIDEXACT", "0")))
 
+# T15-A (ii): two-stage candidate set.  Stage 1 is the 8 cell corners above;
+# stage 2 tests ONLY the winner face's VERTEX ONE-RING (the faces sharing at
+# least one vertex with it, precomputed as a CSR, ~12 per face on the blade).
+# Rationale: when the grid cell is finer than a mesh triangle, a point whose
+# true nearest face is missed by the corners still has a corner whose nearest
+# face is ADJACENT to the true one, so one ring closes the gap.  Cost is a
+# bounded number of extra point-triangle tests, no BVH, no branch divergence
+# beyond the ring length.  This is NOT the r=1 (4x4x4 = 64 grid point)
+# neighbourhood -- that reads 8x the table; this reads none of it.
+# 0 = OFF: stage 2 is dead code and the query is the 8-corner one.
+_T15_SDF_GX_RING = wp.constant(int(__import__("os").environ.get("T15_SDF_GX_RING", "0")))
+
+# T16-lite: TOLERANCE on the closest-point search's argmin.
+#
+# On a nominally FLAT contact ``min_{x in tri} SDF(x)`` is DEGENERATE: every
+# point of a cloth triangle parallel to the blade face is the same distance
+# away, so which point wins is decided by the last bit of the arithmetic.  The
+# T8 anchor seeds its material point from that winner, so the whole tangential
+# law is applied at an essentially arbitrary point -- this is the winner-take-all
+# pathology ``_R13G_SDF_FREEZE``'s comment block already describes, and it is
+# what made two backends that agree on the DEPTH to 6.7e-9 mm disagree on the
+# CONTACT POINT in 50.98% of flat triangles (26444/121968 of them with the depth
+# bitwise identical and the point moved across the whole triangle).
+#
+# The minimal cure is to stop treating a tie as a win: a candidate replaces the
+# incumbent only if it is deeper by more than ``r * h``.  With r = 1e-3 and
+# h = 0.5 mm that is 0.5 um -- far below any physical depth (median penetration
+# 0.193 mm) and far above the float32 noise that currently decides the tie.  On
+# a flat contact the four seeds are then all "equal" and the CENTROID (the first
+# seed) wins deterministically; on a tilted contact the genuinely deepest vertex
+# still wins by millimetres.
+# 0 = OFF: the strict ``<`` this file always used, bit-identical.
+_T16_SDF_ARGMIN_TOL = wp.constant(float(__import__("os").environ.get("T16_SDF_ARGMIN_TOL", "0")))
+
 
 @wp.struct
 class SdfGridExact:
@@ -312,6 +346,11 @@ class SdfGridExact:
     nz: wp.array(dtype=wp.int32)
     org: wp.array(dtype=wp.vec3)
     inv_voxel: float
+    # T15-A (ii) vertex one-ring of each face, CSR (inert unless _T15_SDF_GX_RING)
+    ring_off: wp.array(dtype=wp.int32)
+    ring_idx: wp.array(dtype=wp.int32)
+    robase: wp.array(dtype=wp.int32)
+    ribase: wp.array(dtype=wp.int32)
 
 
 @wp.kernel
@@ -2496,24 +2535,28 @@ def tri_sdf_closest(
     voxel: float,
     bg: float,
     refine_steps: int,
+    tol: float,
 ):
     """Triangle's minimum-SDF point: 3-vertex + centroid seeding, then projected
-    steepest descent in barycentric coordinates. Returns (w, best)."""
+    steepest descent in barycentric coordinates. Returns (w, best).
+
+    ``tol`` is T16-lite's argmin tolerance (``r * h``); 0 is the strict ``<``
+    this function always used and is bit-identical."""
     third = 1.0 / 3.0
     w = wp.vec3(third, third, third)
     p = a * third + b * third + c * third
     dg = sdf_grid_sample(sdf, base, nx, ny, nz, org, inv_voxel, bg, p)
     best = dg
     da = sdf_grid_sample(sdf, base, nx, ny, nz, org, inv_voxel, bg, a)
-    if da < best:
+    if da < best - tol:
         best = da
         w = wp.vec3(1.0, 0.0, 0.0)
     db = sdf_grid_sample(sdf, base, nx, ny, nz, org, inv_voxel, bg, b)
-    if db < best:
+    if db < best - tol:
         best = db
         w = wp.vec3(0.0, 1.0, 0.0)
     dc = sdf_grid_sample(sdf, base, nx, ny, nz, org, inv_voxel, bg, c)
-    if dc < best:
+    if dc < best - tol:
         best = dc
         w = wp.vec3(0.0, 0.0, 1.0)
     n_start = int(1)
@@ -2556,11 +2599,11 @@ def tri_sdf_closest(
                     cand = cand / sm
                     pc = a * cand[0] + b * cand[1] + c * cand[2]
                     dcand = sdf_grid_sample(sdf, base, nx, ny, nz, org, inv_voxel, bg, pc)
-                    if dcand < bk:
+                    if dcand < bk - tol:
                         bk = dcand
                         wk = cand
             step = step * 0.5
-        if bk < best:
+        if bk < best - tol:
             best = bk
             w = wk
         if _T14_SDF_ALLSEED == 0:
@@ -2675,6 +2718,29 @@ def sdf_mesh_query_grid(
                     featb = feat
     if fb < 0:
         return d, n
+
+    if _T15_SDF_GX_RING != 0:
+        # stage 2: the winner's VERTEX ONE-RING.  Can only lower ``best``, so it
+        # runs before the max_dist rejection.
+        ro = gx.robase[slot]
+        ri = gx.ribase[slot]
+        r0 = gx.ring_off[ro + fb]
+        r1 = gx.ring_off[ro + fb + 1]
+        fw = fb
+        for r in range(r0, r1):
+            f2 = gx.ring_idx[ri + r]
+            if f2 != fw:
+                u0 = wp.mesh_get_point(mesh, f2 * 3 + 0)
+                u1 = wp.mesh_get_point(mesh, f2 * 3 + 1)
+                u2 = wp.mesh_get_point(mesh, f2 * 3 + 2)
+                cp2, bary2, feat2 = triangle_closest_point(u0, u1, u2, p)
+                dd2 = wp.length(p - cp2)
+                if dd2 < best:
+                    best = dd2
+                    cpb = cp2
+                    fb = f2
+                    featb = feat2
+
     if best > max_dist:
         return d, n
 
@@ -2739,6 +2805,7 @@ def tri_sdf_refine_from(
     gx: SdfGridExact,
     slot: int,
     bg: float,
+    tol: float,
     rq: float,
     w: wp.vec3,
     best: float,
@@ -2780,7 +2847,7 @@ def tri_sdf_refine_from(
                                 probe = 0
                 if probe != 0:
                     dcand, ncand = sdf_query(mesh, gx, slot, rq, bg, pc)
-                    if dcand < best:
+                    if dcand < best - tol:
                         best = dcand
                         w = cand
                         nbest = ncand
@@ -2825,6 +2892,9 @@ def tri_sdf_closest_mesh(
     # produced ``best``.  So carry its normal along instead of re-querying: the
     # evaluated points are exactly the same, 7 queries per triangle instead of
     # 11, and the caller gets the contact normal for free.
+    # T16-lite: a candidate must be deeper by more than this to unseat the
+    # incumbent.  0 (default) reproduces the strict '<' exactly.
+    tol = _T16_SDF_ARGMIN_TOL * cull
     best, nbest = sdf_query(mesh, gx, slot, cull + reach, bg, g)
     if best >= bg:
         return w, bg, nbest
@@ -2833,27 +2903,29 @@ def tri_sdf_closest_mesh(
     # the point that actually produced ``best`` (see _T14_SDF_SKIPREF)
     p_best = g
     da, na = sdf_query(mesh, gx, slot, rq, bg, a)
-    if da < best:
+    if da < best - tol:
         best = da
         w = wp.vec3(1.0, 0.0, 0.0)
         nbest = na
         if _T14_SDF_SKIPREF != 0:
             p_best = a
     db, nb = sdf_query(mesh, gx, slot, rq, bg, b)
-    if db < best:
+    if db < best - tol:
         best = db
         w = wp.vec3(0.0, 1.0, 0.0)
         nbest = nb
         if _T14_SDF_SKIPREF != 0:
             p_best = b
     dc, nc = sdf_query(mesh, gx, slot, rq, bg, c)
-    if dc < best:
+    if dc < best - tol:
         best = dc
         w = wp.vec3(0.0, 0.0, 1.0)
         nbest = nc
         if _T14_SDF_SKIPREF != 0:
             p_best = c
-    return tri_sdf_refine_from(a, b, c, mesh, gx, slot, bg, rq, w, best, nbest, p_best, refine_steps)
+    return tri_sdf_refine_from(
+        a, b, c, mesh, gx, slot, bg, tol, rq, w, best, nbest, p_best, refine_steps
+    )
 
 
 @wp.kernel
@@ -3083,11 +3155,17 @@ def eval_tri_sdf_contact_kernel(
         # remedy for the winner-take-all redraw and is not combined with it.
         w, best, n_exact = tri_sdf_closest_mesh(a, b, c, sdf_mesh[slot], gx, slot, bg, half_thickness, refine_steps)
     elif _R13G_SDF_FREEZE == 0:
-        w, best = tri_sdf_closest(a, b, c, sdf, base, nx, ny, nz, org, inv_voxel, voxel, bg, refine_steps)
+        w, best = tri_sdf_closest(
+                a, b, c, sdf, base, nx, ny, nz, org, inv_voxel, voxel, bg, refine_steps,
+                _T16_SDF_ARGMIN_TOL * half_thickness,
+            )
     else:
         # Resolve the barycentric contact point once per substep, then hold it.
         if resolve_w != 0:
-            w, best = tri_sdf_closest(a, b, c, sdf, base, nx, ny, nz, org, inv_voxel, voxel, bg, refine_steps)
+            w, best = tri_sdf_closest(
+                a, b, c, sdf, base, nx, ny, nz, org, inv_voxel, voxel, bg, refine_steps,
+                _T16_SDF_ARGMIN_TOL * half_thickness,
+            )
             tri_sdf_w[pair] = w
         else:
             w = tri_sdf_w[pair]
@@ -3608,13 +3686,19 @@ def accumulate_tri_sdf_reaction_kernel(
         # contact cannot disagree about where or how deep it is.
         w, best, n_exact = tri_sdf_closest_mesh(a, b, c, sdf_mesh[slot], gx, slot, bg, half_thickness, refine_steps)
     elif _R13G_SDF_FREEZE == 0:
-        w, best = tri_sdf_closest(a, b, c, sdf, base, nx, ny, nz, org, inv_voxel, voxel, bg, refine_steps)
+        w, best = tri_sdf_closest(
+                a, b, c, sdf, base, nx, ny, nz, org, inv_voxel, voxel, bg, refine_steps,
+                _T16_SDF_ARGMIN_TOL * half_thickness,
+            )
     else:
         # the point the force kernel actually used this substep.  resolve_w != 0
         # means the force pass has not run yet (``tri_sdf_w`` is still the zero
         # vector, which is NOT a barycentric point), so resolve it here instead.
         if resolve_w != 0:
-            w, best = tri_sdf_closest(a, b, c, sdf, base, nx, ny, nz, org, inv_voxel, voxel, bg, refine_steps)
+            w, best = tri_sdf_closest(
+                a, b, c, sdf, base, nx, ny, nz, org, inv_voxel, voxel, bg, refine_steps,
+                _T16_SDF_ARGMIN_TOL * half_thickness,
+            )
         else:
             w = tri_sdf_w[pair]
             best = sdf_grid_sample(
@@ -3988,7 +4072,8 @@ def tri_sdf_par_seed_kernel(
         return
 
     w, best, nb = tri_sdf_refine_from(
-        a, b, c, sdf_mesh[slot], gx, slot, bg, rq, w, best, nb, p0, refine_steps
+        a, b, c, sdf_mesh[slot], gx, slot, bg, _T16_SDF_ARGMIN_TOL * half_thickness,
+        rq, w, best, nb, p0, refine_steps
     )
     par_best[tid] = best
     par_w[tid] = w

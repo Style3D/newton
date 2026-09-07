@@ -90,6 +90,11 @@ def _t14_bake_load(key):
 # depends on, so a hit is bitwise the table the bake would have produced.
 
 
+# T15-A: fixed default spacing of the nearest-triangle table [m] (see
+# ``_t15_build_gridexact``); overridable with T15_SDF_GX_VOXEL.
+_T15_GX_DEFAULT_VOXEL = 2.5e-4
+
+
 def _t15_gx_dir():
     import os
 
@@ -136,6 +141,65 @@ def _t15_gx_store(key, face, vn, en):
         os.replace(tmp, os.path.join(d, key + ".npz"))
     except Exception as e:  # noqa: BLE001
         print(f"[collision] T15 gx cache store failed ({e}); continuing", flush=True)
+
+
+def _t15_ring_key(vertices, indices):
+    """The vertex one-ring depends on the MESH only, not on the grid, so it gets
+    its own cache key and the (large) face-grid caches stay valid."""
+    import hashlib
+
+    h = hashlib.sha256()
+    h.update(np.ascontiguousarray(vertices, dtype=np.float32).tobytes())
+    h.update(np.ascontiguousarray(indices, dtype=np.int32).tobytes())
+    h.update(b"vertex_one_ring_csr/v1")
+    return h.hexdigest()
+
+
+def _t15_vertex_one_ring(vertices, indices):
+    """CSR of every face's VERTEX ONE-RING (faces sharing >=1 vertex, self excluded).
+
+    Cached on disk under the geometry key: on the 21302-face blade the build is a
+    few seconds of Python, and it is the same table for every grid spacing.
+    """
+    import os
+
+    key = _t15_ring_key(vertices, indices)
+    fp = os.path.join(_t15_gx_dir(), "ring_" + key + ".npz")
+    if os.path.exists(fp):
+        try:
+            z = np.load(fp)
+            return z["off"], z["idx"]
+        except Exception:  # noqa: BLE001
+            pass
+    tris = np.asarray(indices, dtype=np.int64).reshape(-1, 3)
+    nf = len(tris)
+    nv = int(tris.max()) + 1
+    vf_v = tris.reshape(-1)
+    vf_f = np.repeat(np.arange(nf, dtype=np.int64), 3)
+    order = np.argsort(vf_v, kind="stable")
+    vf_v = vf_v[order]
+    vf_f = vf_f[order]
+    vstart = np.searchsorted(vf_v, np.arange(nv))
+    vend = np.searchsorted(vf_v, np.arange(nv), side="right")
+    off = np.zeros(nf + 1, dtype=np.int32)
+    chunks = []
+    total = 0
+    for f in range(nf):
+        acc = np.concatenate([vf_f[vstart[v]:vend[v]] for v in tris[f]])
+        acc = np.unique(acc)
+        acc = acc[acc != f]
+        chunks.append(acc.astype(np.int32))
+        total += len(acc)
+        off[f + 1] = total
+    idx = np.concatenate(chunks).astype(np.int32) if chunks else np.zeros(0, dtype=np.int32)
+    try:
+        os.makedirs(_t15_gx_dir(), exist_ok=True)
+        tmp = fp + ".tmp.npz"
+        np.savez(tmp, off=off, idx=idx)
+        os.replace(tmp, fp)
+    except Exception as e:  # noqa: BLE001
+        print(f"[collision] T15 ring cache store failed ({e}); continuing", flush=True)
+    return off, idx
 
 
 def _t15_pseudo_normals(vertices, indices):
@@ -1368,18 +1432,36 @@ class Collision:
             gx.nz = wp.zeros(1, dtype=wp.int32, device=device)
             gx.org = wp.zeros(1, dtype=wp.vec3, device=device)
             gx.inv_voxel = 1.0
+            gx.ring_off = wp.zeros(2, dtype=wp.int32, device=device)
+            gx.ring_idx = wp.zeros(1, dtype=wp.int32, device=device)
+            gx.robase = wp.zeros(1, dtype=wp.int32, device=device)
+            gx.ribase = wp.zeros(1, dtype=wp.int32, device=device)
 
+        _tol0 = float(os.environ.get("T16_SDF_ARGMIN_TOL", "0") or 0.0)
+        _tolnote = (
+            f" + T16 ARGMIN_TOL r={_tol0:g} (= {_tol0 * float(self.tri_sdf_h) * 1000.0:g} mm)"
+            if _tol0 != 0.0
+            else ""
+        )
         if os.environ.get("T15_SDF_GRIDEXACT", "0") in ("", "0"):
             _dummy()
             self.tri_sdf_gx = gx
-            return ""
+            return _tolnote
 
-        gx_voxel = float(os.environ.get("T15_SDF_GX_VOXEL", "") or voxel)
+        # T15-A: the face table has its OWN spacing, fixed at 0.25 mm.  It is not
+        # tied to the SDF bake's ``voxel`` (nor to a task yaml's tri_sdf_voxel):
+        # the measured accuracy/speed optimum is 0.25 mm -- at 1 mm the 8-corner
+        # candidate set misses the true nearest face 55% of the time on this
+        # blade (p99 |dbest| 0.25 mm ~ the working penetration), and at 0.125 mm
+        # the 332 MB table stops fitting in cache and the query gets SLOWER.
+        # ``T15_SDF_GX_VOXEL`` still overrides, for the accuracy ladder.
+        gx_voxel = float(os.environ.get("T15_SDF_GX_VOXEL", "") or _T15_GX_DEFAULT_VOXEL)
         face_blocks, vn_blocks, en_blocks = [], [], []
-        fbase, vbase, ebase = [], [], []
+        ro_blocks, ri_blocks = [], []
+        fbase, vbase, ebase, robase, ribase = [], [], [], [], []
         gnx, gny, gnz, gorg = [], [], [], []
         seen = {}
-        ftot = vtot = etot = 0
+        ftot = vtot = etot = rotot = ritot = 0
         for vertices, indices, mesh in zip(verts_list, inds_list, meshes):
             lo = vertices.min(axis=0) - pad
             hi = vertices.max(axis=0) + pad
@@ -1424,17 +1506,24 @@ class Collision:
                         f"[collision] T15 gx CACHE HIT: {len(face)} cells from {key[:12]}",
                         flush=True,
                     )
-                seen[key] = (ftot, vtot, etot)
+                r_off, r_idx = _t15_vertex_one_ring(vertices, indices)
+                seen[key] = (ftot, vtot, etot, rotot, ritot)
                 face_blocks.append(np.ascontiguousarray(face, dtype=np.int32))
                 vn_blocks.append(np.ascontiguousarray(vn, dtype=np.float32))
                 en_blocks.append(np.ascontiguousarray(en, dtype=np.float32))
+                ro_blocks.append(np.ascontiguousarray(r_off, dtype=np.int32))
+                ri_blocks.append(np.ascontiguousarray(r_idx, dtype=np.int32))
                 ftot += len(face)
                 vtot += len(vn)
                 etot += len(en)
-            fb, vb, eb = seen[key]
+                rotot += len(r_off)
+                ritot += len(r_idx)
+            fb, vb, eb, rob, rib = seen[key]
             fbase.append(fb)
             vbase.append(vb)
             ebase.append(eb)
+            robase.append(rob)
+            ribase.append(rib)
             gnx.append(int(n[0]))
             gny.append(int(n[1]))
             gnz.append(int(n[2]))
@@ -1443,7 +1532,7 @@ class Collision:
         if not face_blocks:
             _dummy()
             self.tri_sdf_gx = gx
-            return ""
+            return _tolnote
 
         gx.face = wp.array(np.concatenate(face_blocks), dtype=wp.int32, device=device)
         gx.vnrm = wp.array(np.concatenate(vn_blocks), dtype=wp.vec3, device=device)
@@ -1456,13 +1545,22 @@ class Collision:
         gx.nz = wp.array(np.asarray(gnz, dtype=np.int32), dtype=wp.int32, device=device)
         gx.org = wp.array(np.asarray(gorg, dtype=np.float32), dtype=wp.vec3, device=device)
         gx.inv_voxel = 1.0 / gx_voxel
+        gx.ring_off = wp.array(np.concatenate(ro_blocks), dtype=wp.int32, device=device)
+        gx.ring_idx = wp.array(np.concatenate(ri_blocks), dtype=wp.int32, device=device)
+        gx.robase = wp.array(np.asarray(robase, dtype=np.int32), dtype=wp.int32, device=device)
+        gx.ribase = wp.array(np.asarray(ribase, dtype=np.int32), dtype=wp.int32, device=device)
         self.tri_sdf_gx = gx
         self.tri_sdf_gx_voxel = gx_voxel
         _miss = int((np.concatenate(face_blocks) < 0).sum())
+        _ring = os.environ.get("T15_SDF_GX_RING", "0") not in ("", "0")
+        _rmean = (ritot / max(rotot - len(ro_blocks), 1)) if ritot else 0.0
         return (
             f" + T15 GRIDEXACT (8-corner face table, gx_voxel={gx_voxel * 1000:g} mm, "
             f"{len(face_blocks)} distinct table(s), {ftot} cells "
             f"[{ftot * 4 / 1.0e6:.2f} MB], {_miss} empty)"
+            + (f" + RING (winner face's vertex one-ring, {_rmean:.1f} faces/face avg, "
+               f"{ritot} entries [{ritot * 4 / 1.0e6:.2f} MB])" if _ring else "")
+            + _tolnote
         )
 
     def accumulate_tri_sdf_reaction(
