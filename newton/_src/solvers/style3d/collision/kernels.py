@@ -131,6 +131,32 @@ _T12_ANCHOR_SEEDW = wp.constant(int(__import__("os").environ.get("T12_ANCHOR_SEE
 # count (refine steps / query backend), not the pair count.
 _T14_SDF_BROADPHASE = wp.constant(int(__import__("os").environ.get("T14_SDF_BROADPHASE", "0")))
 
+# T14 round 3: hold the CONTACT GEOMETRY for a whole substep.
+# The blade pose is constant inside a substep (co-sim writes body_q once per
+# substep, and the 20 Newton iterations never touch it) and the cloth moves at
+# most a millimetre or two over those iterations, so the closest point and the
+# surface normal can be resolved ONCE and held in the shape's local frame --
+# which is what this stack already does for the rigid-feature channel (contact
+# list built once per substep, normal frozen for the substep).
+#
+# Iteration 0 runs the full ``tri_sdf_closest_mesh`` search exactly as before
+# and records, per (slot, triangle): the barycentric point ``hold_w``, the blade
+# surface point ``hold_p`` and the outward normal ``hold_n``, both in shape
+# local.  Iterations 1..19 and the reaction pass then evaluate
+#     best = dot(hold_n, x(w) - hold_p)
+# -- a plane distance, no BVH query at all.  The force law, the hardening law,
+# the friction law and the T8 anchor read the same statements they always did;
+# only where ``best`` and the normal come from changes.
+#
+# This is the lever the first two rounds missed: the cost is 7 SERIAL mesh-BVH
+# queries per near triangle x 21 launches per substep, a latency chain, which is
+# why neither culling the far pairs (round 1) nor lagging the force (round 2)
+# touched it.  HOLD takes the chain from 21 per substep to 1.
+# 0 = OFF: every statement below is dead code.
+# Requires the exact backend (R16_SDF_EXACT); the voxel path has no cached
+# normal and is left alone.
+_T14_SDF_HOLD = wp.constant(int(__import__("os").environ.get("T14_SDF_HOLD", "0")))
+
 
 @wp.func
 def triangle_normal(A: wp.vec3, B: wp.vec3, C: wp.vec3):
@@ -2465,6 +2491,14 @@ def eval_tri_sdf_contact_kernel(
     cand_count: wp.array(dtype=wp.int32),
     bp_overflow: wp.array(dtype=wp.int32),
     bp_mode: int,
+    # T14 round 3: per-substep held contact geometry (inert unless
+    # _T14_SDF_HOLD).  ``hold_mode`` 1 = search and record (iteration 0),
+    # 2 = evaluate the held plane (iterations >= 1 and the reaction pass).
+    hold_valid: wp.array(dtype=wp.int32),
+    hold_w: wp.array(dtype=wp.vec3),
+    hold_p: wp.array(dtype=wp.vec3),
+    hold_n: wp.array(dtype=wp.vec3),
+    hold_mode: int,
     # outputs
     forces: wp.array(dtype=wp.vec3),
     hessians: wp.array(dtype=wp.mat33),
@@ -2528,7 +2562,31 @@ def eval_tri_sdf_contact_kernel(
     w = wp.vec3(0.0)
     best = float(0.0)
     n_exact = wp.vec3(0.0, 0.0, 1.0)
-    if _R16_SDF_EXACT != 0:
+    held = int(0)
+    if _T14_SDF_HOLD != 0:
+        if hold_mode == 2:
+            held = 1
+    if held != 0:
+        # T14 HOLD, iterations >= 1 (and the reaction pass): the closest point
+        # and the normal were resolved at iteration 0 of THIS substep, in the
+        # blade's own frame, and the blade has not moved since -- so the only
+        # thing left to evaluate is how far the (moved) cloth point now sits
+        # from that plane.  No mesh query.
+        if hold_valid[pair] == 0:
+            return
+        w = hold_w[pair]
+        q_hold = a * w[0] + b * w[1] + c * w[2]
+        if _T14_SDF_HOLD == 2:
+            # HOLD=2: hold only the barycentric point; still ask the mesh where
+            # the surface is, but ONCE at that point instead of the 7-query
+            # seed+descent search.  Keeps the exact distance and the exact
+            # normal, drops only the re-optimisation of WHERE on the triangle
+            # the closest point sits.
+            best, n_exact = sdf_mesh_query(sdf_mesh[slot], mesh_max_dist, bg, q_hold)
+        else:
+            n_exact = hold_n[pair]
+            best = wp.dot(n_exact, q_hold - hold_p[pair])
+    elif _R16_SDF_EXACT != 0:
         # R16-A2': same search, exact field.  The freeze switch is a grid-path
         # remedy for the winner-take-all redraw and is not combined with it.
         w, best, n_exact = tri_sdf_closest_mesh(a, b, c, sdf_mesh[slot], bg, half_thickness, refine_steps)
@@ -2544,6 +2602,22 @@ def eval_tri_sdf_contact_kernel(
             best = sdf_grid_sample(
                 sdf, base, nx, ny, nz, org, inv_voxel, bg, a * w[0] + b * w[1] + c * w[2]
             )
+    if _T14_SDF_HOLD != 0:
+        if hold_mode == 1:
+            # iteration 0: record the plane the rest of the substep rides on.
+            # The gate is "the query HIT" (best < mesh_max_dist), not "in
+            # contact" (best < h): a pair a few millimetres out at iteration 0
+            # can be driven into the shell by the solve, and it must be on the
+            # list to be seen.  A miss stores 0 and the pair is off for the
+            # substep -- the same per-substep contact-set rule the rigid feature
+            # channel already runs under.
+            if best < mesh_max_dist:
+                hold_valid[pair] = 1
+                hold_w[pair] = w
+                hold_n[pair] = n_exact
+                hold_p[pair] = (a * w[0] + b * w[1] + c * w[2]) - n_exact * best
+            else:
+                hold_valid[pair] = 0
     if best >= half_thickness:
         # T8: the pair separated -> drop the anchor.  Seeding/holding is keyed on
         # GEOMETRIC contact (best <= h), not on the force band, so a pair that
@@ -2900,6 +2974,14 @@ def accumulate_tri_sdf_reaction_kernel(
     cand_count: wp.array(dtype=wp.int32),
     bp_overflow: wp.array(dtype=wp.int32),
     bp_mode: int,
+    # T14 round 3: per-substep held contact geometry (inert unless
+    # _T14_SDF_HOLD).  ``hold_mode`` 1 = search and record (iteration 0),
+    # 2 = evaluate the held plane (iterations >= 1 and the reaction pass).
+    hold_valid: wp.array(dtype=wp.int32),
+    hold_w: wp.array(dtype=wp.vec3),
+    hold_p: wp.array(dtype=wp.vec3),
+    hold_n: wp.array(dtype=wp.vec3),
+    hold_mode: int,
     # outputs
     body_f: wp.array(dtype=wp.spatial_vector),
 ):
@@ -2955,7 +3037,23 @@ def accumulate_tri_sdf_reaction_kernel(
     w = wp.vec3(0.0)
     best = float(0.0)
     n_exact = wp.vec3(0.0, 0.0, 1.0)
-    if _R16_SDF_EXACT != 0:
+    held = int(0)
+    if _T14_SDF_HOLD != 0:
+        if hold_mode == 2:
+            held = 1
+    if held != 0:
+        # T14 HOLD: read the very plane the last force launch of this substep
+        # rode on, so the two halves of the contact still cannot disagree.
+        if hold_valid[pair] == 0:
+            return
+        w = hold_w[pair]
+        q_hold = a * w[0] + b * w[1] + c * w[2]
+        if _T14_SDF_HOLD == 2:
+            best, n_exact = sdf_mesh_query(sdf_mesh[slot], mesh_max_dist, bg, q_hold)
+        else:
+            n_exact = hold_n[pair]
+            best = wp.dot(n_exact, q_hold - hold_p[pair])
+    elif _R16_SDF_EXACT != 0:
         # R16-A2': identical query to the force pass, so the two halves of the
         # contact cannot disagree about where or how deep it is.
         w, best, n_exact = tri_sdf_closest_mesh(a, b, c, sdf_mesh[slot], bg, half_thickness, refine_steps)

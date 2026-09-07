@@ -1015,6 +1015,10 @@ class Collision:
             _out_f = particle_forces
             _out_h = self.contact_hessian_diags
             _do_eval = True
+            # T14 HOLD: iteration 0 searches and records the plane, the rest ride it.
+            _hold_mode = 0
+            if self.tri_sdf_hold:
+                _hold_mode = 1 if _iter == 0 else 2
             if _k > 1 or self.tri_sdf_cache_always:
                 _out_f = self.tri_sdf_cache_f
                 _out_h = self.tri_sdf_cache_h
@@ -1037,7 +1041,9 @@ class Collision:
                     # including the reaction pass, which runs after the solve.
                     self._t14_broadphase(state_out.particle_q, _tri_sdf_body_q, _n_pairs)
                 for _bp_dim, _bp_mode in self._t14_launch_plan(_n_pairs):
-                    with _t14_prof.section("tri_sdf_force"):
+                    with _t14_prof.section("tri_sdf_force"
+                                          if _hold_mode != 2
+                                          else "tri_sdf_force_held"):
                         wp.launch(
                             eval_tri_sdf_contact_kernel,
                             dim=_bp_dim,
@@ -1093,6 +1099,12 @@ class Collision:
                                 self.tri_sdf_cand_count,
                                 self.tri_sdf_bp_overflow,
                                 _bp_mode,
+                                # T14 round 3 hold (inert unless T14_SDF_HOLD)
+                                self.tri_sdf_hold_valid,
+                                self.tri_sdf_hold_w,
+                                self.tri_sdf_hold_p,
+                                self.tri_sdf_hold_n,
+                                _hold_mode,
                             ],
                             outputs=[_out_f, _out_h],
                             device=self.model.device,
@@ -1187,6 +1199,13 @@ class Collision:
                         self.tri_sdf_cand_count,
                         self.tri_sdf_bp_overflow,
                         _bp_mode,
+                        # T14 round 3 hold (inert unless T14_SDF_HOLD): the reaction rides
+                        # the SAME plane the substep's last force launch used.
+                        self.tri_sdf_hold_valid,
+                        self.tri_sdf_hold_w,
+                        self.tri_sdf_hold_p,
+                        self.tri_sdf_hold_n,
+                        2 if self.tri_sdf_hold else 0,
                     ],
                     outputs=[body_f],
                     device=self.model.device,
@@ -1583,6 +1602,9 @@ class Collision:
         print(
             "[collision] tri-SDF query backend = "
             + ("EXACT mesh (analytic closest point, no grid)" if _exact else "VOXEL grid (trilinear)")
+            + ({1: " + HOLD=1 (plane held for the substep, no query in iters>=1)",
+                2: " + HOLD=2 (bary point held, 1 query/iter instead of 7)"}
+               .get(int(__import__("os").environ.get("T14_SDF_HOLD", "0") or 0), ""))
             + f": {len(slots)} shape(s), voxel={voxel * 1000:g} mm, h={half_thickness * 1000:g} mm, "
             + f"grid={total} cells ({total * 4 / 1.0e6:.2f} MB)",
             flush=True,
@@ -1627,6 +1649,32 @@ class Collision:
             self.tri_sdf_slots * int(self.model.tri_count)
             if _os_t12.environ.get("T12_ANCHOR_DBG") else 1
         )
+        # --- T14 round 3: per-substep held contact geometry -------------------
+        # ``T14_SDF_HOLD=1`` resolves the closest point + normal ONCE per substep
+        # (iteration 0's existing search) and holds them in the blade's local
+        # frame for the rest of the substep, so iterations 1..n-1 and the
+        # reaction pass evaluate a plane distance instead of 7 serial mesh-BVH
+        # queries.  Legitimate because the blade pose is constant inside a
+        # substep and the cloth moves ~1 mm over it -- the same standing rule the
+        # rigid-feature channel runs under.
+        # 1 = plane hold (no mesh query at all in iterations >= 1)
+        # 2 = fallback: hold only the barycentric point, one mesh query per
+        #     iteration at that point instead of the 7-query search.
+        self.tri_sdf_hold = int(_os_t12.environ.get("T14_SDF_HOLD", "0") or 0) > 0
+        self.tri_sdf_hold_kind = int(_os_t12.environ.get("T14_SDF_HOLD", "0") or 0)
+        _hn = self.tri_sdf_slots * int(self.model.tri_count)
+        self.tri_sdf_hold_valid = wp.zeros(_hn, dtype=wp.int32, device=device)
+        self.tri_sdf_hold_w = wp.zeros(_hn, dtype=wp.vec3, device=device)
+        self.tri_sdf_hold_p = wp.zeros(_hn, dtype=wp.vec3, device=device)
+        self.tri_sdf_hold_n = wp.zeros(_hn, dtype=wp.vec3, device=device)
+        if self.tri_sdf_hold and not _exact:
+            print(
+                "[collision] WARNING: T14_SDF_HOLD needs the EXACT backend "
+                "(R16_SDF_EXACT=1); the voxel path has no cached normal. HOLD is "
+                "still applied but the held normal is whatever the exact branch "
+                "would have produced -- do not trust this combination.",
+                flush=True,
+            )
         # --- T14 iteration stride --------------------------------------------
         # The expensive part of this channel is not the pair count, it is that
         # the closest-point search is redone on EVERY Newton iteration: 20 per
