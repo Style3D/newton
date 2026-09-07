@@ -1380,6 +1380,8 @@ class Collision:
                                 self.tri_sdf_hold_diag,
                                 # T15-A nearest-triangle table (inert unless T15_SDF_GRIDEXACT)
                                 self.tri_sdf_gx,
+                                # T16 w/load diagnostic (inert unless T16_W_DIAG)
+                                self.tri_sdf_w_diag,
                             ],
                             outputs=[_out_f, _out_h],
                             device=self.model.device,
@@ -1438,11 +1440,19 @@ class Collision:
             gx.ribase = wp.zeros(1, dtype=wp.int32, device=device)
 
         _tol0 = float(os.environ.get("T16_SDF_ARGMIN_TOL", "0") or 0.0)
-        _tolnote = (
-            f" + T16 ARGMIN_TOL r={_tol0:g} (= {_tol0 * float(self.tri_sdf_h) * 1000.0:g} mm)"
-            if _tol0 != 0.0
-            else ""
-        )
+        _soft0 = float(os.environ.get("T16_SDF_ARGMIN_SOFT", "0") or 0.0)
+        if _soft0 != 0.0:
+            # SOFT and TOL are mutually exclusive; SOFT wins.
+            _tolnote = (
+                f" + T16 ARGMIN_SOFT tau={_soft0:g} "
+                f"(= {_soft0 * float(self.tri_sdf_h) * 1.0e6:g} um; softmin over 4 seeds + "
+                f"refined, re-evaluated at the blend)"
+                + (f" [TOL r={_tol0:g} IGNORED]" if _tol0 != 0.0 else "")
+            )
+        elif _tol0 != 0.0:
+            _tolnote = f" + T16 ARGMIN_TOL r={_tol0:g} (= {_tol0 * float(self.tri_sdf_h) * 1000.0:g} mm)"
+        else:
+            _tolnote = ""
         if os.environ.get("T15_SDF_GRIDEXACT", "0") in ("", "0"):
             _dummy()
             self.tri_sdf_gx = gx
@@ -2172,6 +2182,44 @@ class Collision:
         # search alongside every held evaluation and accumulates the error.
         # Diagnostic only -- the force still uses the held value.
         self.tri_sdf_hold_diag = wp.zeros(10, dtype=float, device=device)
+        # T16 diagnostic accumulator (layout documented on _T16_W_DIAG).  Always
+        # allocated (the kernel takes it either way); with T16_W_DIAG unset
+        # nothing reads or writes it.
+        self.tri_sdf_w_diag = wp.zeros(32, dtype=float, device=device)
+        if _os_t12.environ.get("T16_W_DIAG", "0") not in ("", "0"):
+            import atexit as _atexit
+
+            def _dump_w_diag(_a=self.tri_sdf_w_diag):
+                try:
+                    d = _a.numpy()
+                except Exception:  # noqa: BLE001
+                    return
+                n = max(d[0], 1.0)
+                print(
+                    "\n[T16 w-diag] pairs=%d  centroid=%d (%.2f%%)  vertex=%d (%.2f%%)  "
+                    "edge/interior=%d (%.2f%%)"
+                    % (d[0], d[1], 100 * d[1] / n, d[2], 100 * d[2] / n, d[3], 100 * d[3] / n),
+                    flush=True,
+                )
+                print(
+                    "[T16 w-diag] mean max(w)=%.6f  mean w.w=%.6f  (1/3 = 载荷均摊, 1 = 集中到单顶点)"
+                    % (d[4] / n, d[5] / n),
+                    flush=True,
+                )
+                fn = max(d[6], 1.0e-30)
+                print(
+                    "[T16 w-diag] sum f_n=%.4f N  载荷加权 max(w)=%.6f  载荷加权 w.w=%.6f  "
+                    "max f_n=%.4f N  mean depth=%.6f mm  max max(w)=%.6f"
+                    % (d[6], d[7] / fn, d[8] / fn, d[9], d[10] / n * 1000.0, d[11]),
+                    flush=True,
+                )
+                print(
+                    "[T16 w-diag] max(w) 直方图 [1/3..1] 10 格: "
+                    + " ".join("%d" % x for x in d[12:22]),
+                    flush=True,
+                )
+
+            _atexit.register(_dump_w_diag)
         if self.tri_sdf_hold and not _exact:
             print(
                 "[collision] WARNING: T14_SDF_HOLD needs the EXACT backend "

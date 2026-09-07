@@ -322,6 +322,57 @@ _T15_SDF_GX_RING = wp.constant(int(__import__("os").environ.get("T15_SDF_GX_RING
 # 0 = OFF: the strict ``<`` this file always used, bit-identical.
 _T16_SDF_ARGMIN_TOL = wp.constant(float(__import__("os").environ.get("T16_SDF_ARGMIN_TOL", "0")))
 
+# T16 SOFT: make the choice of contact point CONTINUOUS instead of a switch.
+#
+# ``_T16_SDF_ARGMIN_TOL`` removed the coin flip but replaced it with a THRESHOLD:
+# under load the four candidates' depths hover right around r*h, so the winner
+# still jumps 1-2 mm across the triangle, only now driven by physical noise
+# crossing the threshold rather than by float noise.  Measured on the bench that
+# shows up as same-arm repeat scatter going from bitwise-identical to 12%, the
+# low-load delivery ratio turning NEGATIVE and the first-frame slip changing sign.
+#
+# SOFT replaces the hard pick with a softmin over the candidates:
+#     alpha_i  ~  exp(-(d_i - d_min) / (tau * h))
+#     w_soft   =  sum_i alpha_i * w_i          (already barycentric: sum alpha = 1)
+# and then evaluates the depth AND the normal once more AT w_soft, so the force
+# law and the anchor read a single self-consistent point.  Candidates are the
+# four seeds plus the refinement's winner (the 5th), so nothing about the search
+# itself changes.
+#   flat contact  (spreads << tau*h) -> all candidates equal weight -> w_soft is
+#     the centroid, and the two query backends agree bitwise;
+#   tilted contact (spreads >> tau*h) -> the deepest vertex takes essentially all
+#     the weight -> same answer as today;
+#   in between      -> a continuous interpolation, with no threshold to cross.
+# The depth this reports is at most O(tau*h) shallower than the true minimum
+# (2 um at tau = 4e-3, h = 0.5 mm), i.e. ~1% of the working penetration.
+# Mutually exclusive with the TOL knob: when SOFT is non-zero, TOL is forced to 0.
+# 0 = OFF: every statement below is dead code.
+_T16_SDF_ARGMIN_SOFT = wp.constant(float(__import__("os").environ.get("T16_SDF_ARGMIN_SOFT", "0")))
+
+# T16 SOFT variant: drop the REFINED candidate from the softmin and blend the
+# four SEEDS only.  Measured reason (t16_soft_continuity.py): the four seeds
+# average EXACTLY to the centroid ((wg + wa + wb + wc)/4 = (1/3,1/3,1/3)), and
+# their depths are continuous in the triangle's pose, so a seeds-only softmin is
+# continuous everywhere and lands on the centroid on a flat contact for BOTH
+# backends.  The refined 5th candidate is neither: on a flat contact its w is the
+# arbitrary pick this whole line of work is trying to remove, and at 1/5 of the
+# weight it drags w_soft off the centroid by up to (1/5)(2/3) = 0.133 -- exactly
+# the residual jump the 5-candidate blend still shows.  Default 0 = the
+# 5-candidate blend as originally specified.
+_T16_SDF_SOFT_SEEDS = wp.constant(int(__import__("os").environ.get("T16_SDF_SOFT_SEEDS", "0")))
+
+# T16 diagnostic: where does the contact point sit, and how is the load shared?
+# Pure accumulator, the force law never reads it.  Answers the question the
+# tolerance experiment raised -- is the side effect coming from "the material
+# point sits at the centroid, so the load is split 1/3 each" rather than from the
+# threshold switch itself.  Layout of ``w_diag`` (32 floats, atomically summed
+# over every pair that reaches the force law):
+#   0 n | 1 centroid | 2 vertex | 3 edge/interior
+#   4 sum max(w) | 5 sum (w.w) | 6 sum f_n | 7 sum f_n*max(w) | 8 sum f_n*(w.w)
+#   9 max f_n | 10 sum depth | 11 max max(w)
+#   12..21 histogram of max(w) over [1/3, 1] in 10 equal bins
+_T16_W_DIAG = wp.constant(int(__import__("os").environ.get("T16_W_DIAG", "0")))
+
 
 @wp.struct
 class SdfGridExact:
@@ -2536,6 +2587,7 @@ def tri_sdf_closest(
     bg: float,
     refine_steps: int,
     tol: float,
+    tol_soft: float,
 ):
     """Triangle's minimum-SDF point: 3-vertex + centroid seeding, then projected
     steepest descent in barycentric coordinates. Returns (w, best).
@@ -2609,6 +2661,22 @@ def tri_sdf_closest(
         if _T14_SDF_ALLSEED == 0:
             best = bk
             w = wk
+    if _T16_SDF_ARGMIN_SOFT != 0.0:
+        w5v = w
+        d5v = best
+        if _T16_SDF_SOFT_SEEDS != 0:
+            w5v = wp.vec3(third, third, third)
+            d5v = dg
+        w_s = _t16_softmin_w(
+            wp.vec3(third, third, third), dg,
+            wp.vec3(1.0, 0.0, 0.0), da,
+            wp.vec3(0.0, 1.0, 0.0), db,
+            wp.vec3(0.0, 0.0, 1.0), dc,
+            w5v, d5v,
+            tol_soft,
+        )
+        p_s = a * w_s[0] + b * w_s[1] + c * w_s[2]
+        return w_s, sdf_grid_sample(sdf, base, nx, ny, nz, org, inv_voxel, bg, p_s)
     return w, best
 
 
@@ -2638,6 +2706,43 @@ def sdf_mesh_query(mesh: wp.uint64, max_dist: float, bg: float, p: wp.vec3):
             d = ln * q.sign
             n = delta * (q.sign / ln)
     return d, n
+
+
+@wp.func
+def _t16_soft_weight(d: float, dmin: float, tau: float):
+    """exp(-(d - dmin)/tau), underflowing cleanly to 0 for a candidate that is
+    out of range (d = bg) or simply much shallower."""
+    x = (d - dmin) / tau
+    if x > 60.0:
+        return 0.0
+    return wp.exp(-x)
+
+
+@wp.func
+def _t16_softmin_w(
+    w0: wp.vec3, d0: float,
+    w1: wp.vec3, d1: float,
+    w2: wp.vec3, d2: float,
+    w3: wp.vec3, d3: float,
+    w4: wp.vec3, d4: float,
+    tau: float,
+):
+    """Softmin over five barycentric candidates.  Returns the blended point.
+
+    ``sum_i alpha_i == 1`` and every ``w_i`` sums to 1, so the blend is already a
+    valid barycentric coordinate -- no renormalisation of the point is needed.
+    """
+    dmin = wp.min(d0, wp.min(d1, wp.min(d2, wp.min(d3, d4))))
+    e0 = _t16_soft_weight(d0, dmin, tau)
+    e1 = _t16_soft_weight(d1, dmin, tau)
+    e2 = _t16_soft_weight(d2, dmin, tau)
+    e3 = _t16_soft_weight(d3, dmin, tau)
+    e4 = _t16_soft_weight(d4, dmin, tau)
+    ssum = e0 + e1 + e2 + e3 + e4
+    if ssum < 1.0e-30:
+        return w0
+    inv = 1.0 / ssum
+    return (w0 * e0 + w1 * e1 + w2 * e2 + w3 * e3 + w4 * e4) * inv
 
 
 @wp.func
@@ -2895,9 +3000,14 @@ def tri_sdf_closest_mesh(
     # T16-lite: a candidate must be deeper by more than this to unseat the
     # incumbent.  0 (default) reproduces the strict '<' exactly.
     tol = _T16_SDF_ARGMIN_TOL * cull
+    if _T16_SDF_ARGMIN_SOFT != 0.0:
+        # SOFT and TOL are mutually exclusive; SOFT wins and the seed/refine
+        # comparisons go back to the strict '<' they always were.
+        tol = 0.0
     best, nbest = sdf_query(mesh, gx, slot, cull + reach, bg, g)
     if best >= bg:
         return w, bg, nbest
+    dg = best
     if _T14_SDF_RQ != 0:
         rq = wp.abs(best) + reach + 1.0e-6
     # the point that actually produced ``best`` (see _T14_SDF_SKIPREF)
@@ -2923,9 +3033,31 @@ def tri_sdf_closest_mesh(
         nbest = nc
         if _T14_SDF_SKIPREF != 0:
             p_best = c
-    return tri_sdf_refine_from(
+    w_r, best_r, n_r = tri_sdf_refine_from(
         a, b, c, mesh, gx, slot, bg, tol, rq, w, best, nbest, p_best, refine_steps
     )
+    if _T16_SDF_ARGMIN_SOFT != 0.0:
+        # softmin over {centroid, a, b, c, refined}, then ONE more evaluation at
+        # the blended point so depth and normal are self-consistent with it.
+        w5 = w_r
+        d5 = best_r
+        if _T16_SDF_SOFT_SEEDS != 0:
+            # seeds only: give the 5th slot the centroid again (weight folded
+            # into the centroid seed) so the blend is over the four seeds alone.
+            w5 = wp.vec3(third, third, third)
+            d5 = dg
+        w_s = _t16_softmin_w(
+            wp.vec3(third, third, third), dg,
+            wp.vec3(1.0, 0.0, 0.0), da,
+            wp.vec3(0.0, 1.0, 0.0), db,
+            wp.vec3(0.0, 0.0, 1.0), dc,
+            w5, d5,
+            _T16_SDF_ARGMIN_SOFT * cull,
+        )
+        p_s = a * w_s[0] + b * w_s[1] + c * w_s[2]
+        d_s, n_s = sdf_query(mesh, gx, slot, rq, bg, p_s)
+        return w_s, d_s, n_s
+    return w_r, best_r, n_r
 
 
 @wp.kernel
@@ -3017,6 +3149,8 @@ def eval_tri_sdf_contact_kernel(
     # T15-A: nearest-triangle grid + pseudo-normals for the O(1) exact
     # backend (inert unless _T15_SDF_GRIDEXACT).
     gx: SdfGridExact,
+    # T16 diagnostic accumulator (inert unless _T16_W_DIAG)
+    w_diag: wp.array(dtype=float),
     # outputs
     forces: wp.array(dtype=wp.vec3),
     hessians: wp.array(dtype=wp.mat33),
@@ -3157,14 +3291,16 @@ def eval_tri_sdf_contact_kernel(
     elif _R13G_SDF_FREEZE == 0:
         w, best = tri_sdf_closest(
                 a, b, c, sdf, base, nx, ny, nz, org, inv_voxel, voxel, bg, refine_steps,
-                _T16_SDF_ARGMIN_TOL * half_thickness,
+                wp.where(_T16_SDF_ARGMIN_SOFT != 0.0, 0.0, _T16_SDF_ARGMIN_TOL * half_thickness),
+                _T16_SDF_ARGMIN_SOFT * half_thickness,
             )
     else:
         # Resolve the barycentric contact point once per substep, then hold it.
         if resolve_w != 0:
             w, best = tri_sdf_closest(
                 a, b, c, sdf, base, nx, ny, nz, org, inv_voxel, voxel, bg, refine_steps,
-                _T16_SDF_ARGMIN_TOL * half_thickness,
+                wp.where(_T16_SDF_ARGMIN_SOFT != 0.0, 0.0, _T16_SDF_ARGMIN_TOL * half_thickness),
+                _T16_SDF_ARGMIN_SOFT * half_thickness,
             )
             tri_sdf_w[pair] = w
         else:
@@ -3235,6 +3371,33 @@ def eval_tri_sdf_contact_kernel(
     k = tri_stiffness[t]
     f = n_world * (k * depth)
     nn = wp.outer(n_world, n_world) * k
+    if _T16_W_DIAG != 0:
+        # pure accumulator; nothing below reads it
+        wmax = wp.max(w[0], wp.max(w[1], w[2]))
+        wdot = w[0] * w[0] + w[1] * w[1] + w[2] * w[2]
+        fn_d = k * depth
+        third_d = 1.0 / 3.0
+        wp.atomic_add(w_diag, 0, 1.0)
+        if wp.abs(w[0] - third_d) < 1.0e-6 and wp.abs(w[1] - third_d) < 1.0e-6:
+            wp.atomic_add(w_diag, 1, 1.0)
+        elif wmax > 1.0 - 1.0e-6:
+            wp.atomic_add(w_diag, 2, 1.0)
+        else:
+            wp.atomic_add(w_diag, 3, 1.0)
+        wp.atomic_add(w_diag, 4, wmax)
+        wp.atomic_add(w_diag, 5, wdot)
+        wp.atomic_add(w_diag, 6, fn_d)
+        wp.atomic_add(w_diag, 7, fn_d * wmax)
+        wp.atomic_add(w_diag, 8, fn_d * wdot)
+        wp.atomic_max(w_diag, 9, fn_d)
+        wp.atomic_add(w_diag, 10, depth)
+        wp.atomic_max(w_diag, 11, wmax)
+        bin_i = int((wmax - third_d) * (10.0 / (1.0 - third_d)))
+        if bin_i < 0:
+            bin_i = 0
+        if bin_i > 9:
+            bin_i = 9
+        wp.atomic_add(w_diag, 12 + bin_i, 1.0)
     # R13c: hardening compression law INSIDE the SDF force core.  R9 hung the
     # law on the vertex penalty kernel only; the compliant SDF stack zeroes that
     # channel (shape_contact_ke -> 0), so the law never ran.  Same closed form as
@@ -3688,7 +3851,8 @@ def accumulate_tri_sdf_reaction_kernel(
     elif _R13G_SDF_FREEZE == 0:
         w, best = tri_sdf_closest(
                 a, b, c, sdf, base, nx, ny, nz, org, inv_voxel, voxel, bg, refine_steps,
-                _T16_SDF_ARGMIN_TOL * half_thickness,
+                wp.where(_T16_SDF_ARGMIN_SOFT != 0.0, 0.0, _T16_SDF_ARGMIN_TOL * half_thickness),
+                _T16_SDF_ARGMIN_SOFT * half_thickness,
             )
     else:
         # the point the force kernel actually used this substep.  resolve_w != 0
@@ -3697,7 +3861,8 @@ def accumulate_tri_sdf_reaction_kernel(
         if resolve_w != 0:
             w, best = tri_sdf_closest(
                 a, b, c, sdf, base, nx, ny, nz, org, inv_voxel, voxel, bg, refine_steps,
-                _T16_SDF_ARGMIN_TOL * half_thickness,
+                wp.where(_T16_SDF_ARGMIN_SOFT != 0.0, 0.0, _T16_SDF_ARGMIN_TOL * half_thickness),
+                _T16_SDF_ARGMIN_SOFT * half_thickness,
             )
         else:
             w = tri_sdf_w[pair]
