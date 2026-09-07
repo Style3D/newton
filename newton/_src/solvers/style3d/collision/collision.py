@@ -1105,6 +1105,7 @@ class Collision:
                                 self.tri_sdf_hold_p,
                                 self.tri_sdf_hold_n,
                                 _hold_mode,
+                                self.tri_sdf_hold_diag,
                             ],
                             outputs=[_out_f, _out_h],
                             device=self.model.device,
@@ -1667,6 +1668,10 @@ class Collision:
         self.tri_sdf_hold_w = wp.zeros(_hn, dtype=wp.vec3, device=device)
         self.tri_sdf_hold_p = wp.zeros(_hn, dtype=wp.vec3, device=device)
         self.tri_sdf_hold_n = wp.zeros(_hn, dtype=wp.vec3, device=device)
+        # T14 HOLD falsifier accumulator (T14_SDF_HOLD_DIAG=1): runs the full
+        # search alongside every held evaluation and accumulates the error.
+        # Diagnostic only -- the force still uses the held value.
+        self.tri_sdf_hold_diag = wp.zeros(10, dtype=float, device=device)
         if self.tri_sdf_hold and not _exact:
             print(
                 "[collision] WARNING: T14_SDF_HOLD needs the EXACT backend "

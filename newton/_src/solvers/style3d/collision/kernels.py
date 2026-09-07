@@ -157,6 +157,13 @@ _T14_SDF_BROADPHASE = wp.constant(int(__import__("os").environ.get("T14_SDF_BROA
 # normal and is left alone.
 _T14_SDF_HOLD = wp.constant(int(__import__("os").environ.get("T14_SDF_HOLD", "0")))
 
+# T14 HOLD falsifier: on every HELD evaluation, ALSO run the full search and
+# accumulate how far the held value is from it.  Pure diagnostic -- the force
+# still uses the held value, so the run's physics is the HOLD run's physics; it
+# just costs the search back.  This is what separates "the cache is wired wrong"
+# from "the approximation is not second order in this regime".
+_T14_SDF_HOLD_DIAG = wp.constant(int(__import__("os").environ.get("T14_SDF_HOLD_DIAG", "0")))
+
 
 @wp.func
 def triangle_normal(A: wp.vec3, B: wp.vec3, C: wp.vec3):
@@ -2499,6 +2506,11 @@ def eval_tri_sdf_contact_kernel(
     hold_p: wp.array(dtype=wp.vec3),
     hold_n: wp.array(dtype=wp.vec3),
     hold_mode: int,
+    # T14 HOLD falsifier accumulator (inert unless _T14_SDF_HOLD_DIAG):
+    # [0] n [1] sum|db| [2] max|db| [3] contact-state disagreements
+    # [4] sum|db| in contact [5] n in contact [6] max|db| in contact
+    # [7] signed sum (held - true) in contact [8] sum|dn| [9] sum|dw|
+    hold_diag: wp.array(dtype=float),
     # outputs
     forces: wp.array(dtype=wp.vec3),
     hessians: wp.array(dtype=wp.mat33),
@@ -2586,6 +2598,29 @@ def eval_tri_sdf_contact_kernel(
         else:
             n_exact = hold_n[pair]
             best = wp.dot(n_exact, q_hold - hold_p[pair])
+        if _T14_SDF_HOLD_DIAG != 0:
+            # what the un-held code would have said at this same iterate
+            w_t, best_t, n_t = tri_sdf_closest_mesh(
+                a, b, c, sdf_mesh[slot], bg, half_thickness, refine_steps
+            )
+            if best_t < bg:
+                d = wp.abs(best - best_t)
+                wp.atomic_add(hold_diag, 0, 1.0)
+                wp.atomic_add(hold_diag, 1, d)
+                wp.atomic_max(hold_diag, 2, d)
+                c_hold = wp.where(best < half_thickness, 1.0, 0.0)
+                c_true = wp.where(best_t < half_thickness, 1.0, 0.0)
+                if c_hold != c_true:
+                    wp.atomic_add(hold_diag, 3, 1.0)
+                if best_t < half_thickness:
+                    wp.atomic_add(hold_diag, 4, d)
+                    wp.atomic_add(hold_diag, 5, 1.0)
+                    wp.atomic_max(hold_diag, 6, d)
+                    # depth error signed: held minus true (>0 = held reports
+                    # LESS penetration, i.e. the force is under-reported)
+                    wp.atomic_add(hold_diag, 7, best - best_t)
+                    wp.atomic_add(hold_diag, 8, wp.length(n_exact - n_t))
+                    wp.atomic_add(hold_diag, 9, wp.length(w_t - w))
     elif _R16_SDF_EXACT != 0:
         # R16-A2': same search, exact field.  The freeze switch is a grid-path
         # remedy for the winner-take-all redraw and is not combined with it.
