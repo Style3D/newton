@@ -437,6 +437,20 @@ _T17_SDF_HARDEN_KCAP = wp.constant(int(__import__("os").environ.get("T17_SDF_HAR
 #                          shape_contact_ke 置 0，探针的 fric_n 恒 0，读不到
 #                          摩擦状态）。由 fric_diag_accum 门控。
 _T18_ANCHOR_DBG_TAIL = wp.constant(int(__import__("os").environ.get("T18_ANCHOR_DBG_TAIL", "0")))
+# T18 力律开关（默认 0 ⇒ 逐位不变）。
+# 是**位掩码**，三位彼此独立（0 = 全关 = 逐位不变）：
+#   bit0 (1)  ① 锚的切向 Hessian 行和集总（主修，见散射块的注释）
+#             ② 播种改在当前位姿上做 ⇒ 新接触第一子步 f_t 严格为 0
+#             ③ 迭代 >=1 才进接触的对不再拿零力切向刚度（审计 C-1）
+#   bit1 (2)  塑性拖动量不得超过本 substep 真实相对切向位移（审计 B1 的守卫）
+#   bit2 (4)  法向罚力块同样做行和集总（同一条论证：法向也是三角形级弹簧，
+#             对角块用 w^2 时把「三点一起法向压缩」这个模态的刚度低估 3 倍）
+# 台架实测的推荐值 = 5（bit0 + bit2）。
+_T18_FIX_RAW = int(__import__("os").environ.get("T18_SDF_ANCHOR_FIX", "0"))
+_T18_SDF_ANCHOR_FIX = wp.constant(_T18_FIX_RAW)
+_T18_FIX_TAN = wp.constant(1 if (_T18_FIX_RAW & 1) else 0)
+_T18_FIX_DRAG = wp.constant(1 if (_T18_FIX_RAW & 2) else 0)
+_T18_FIX_NRM = wp.constant(1 if (_T18_FIX_RAW & 4) else 0)
 
 
 @wp.struct
@@ -3227,6 +3241,9 @@ def eval_tri_sdf_contact_kernel(
     # T18 仪器（纯输出）。``anchor_tail`` 在 substep 的最后一次 Newton 迭代上
     # 为 1，其余为 0；``fric_diag`` 是逐 shape 的 12 槽力累加，只在
     # ``fric_diag_accum != 0`` 时写。两者都不进任何力/Hessian 表达式。
+    # T18 模式 2：上一 substep 这一对的材料点（shape 局部系），用来算本
+    # substep 的**真实**相对切向位移。模式 <2 时既不读也不写。
+    anchor_qp: wp.array(dtype=wp.vec3),
     anchor_tail: int,
     fric_diag: wp.array(dtype=float),
     fric_diag_accum: int,
@@ -3632,7 +3649,19 @@ def eval_tri_sdf_contact_kernel(
                 )
                 if seeded == 0:
                     anchor_w[pair] = w
-                    anchor_p[pair] = q_prev_loc
+                    seed_p = q_prev_loc
+                    if _T18_FIX_TAN != 0:
+                        # T18-B2：播种点取**当前位姿**下的材料点，也就是这一
+                        # 迭代的接触判定所用的那个配置，于是 slip(x_prev) == 0、
+                        # 第一子步 f_t 严格为 0。原来播在上一位姿上，slip 恒等于
+                        # 刀自身这一 substep 的位移（合爪 30 mm/s、dt=2 ms 时
+                        # 60 um，而 slip_max 只有 90 um）⇒ 新接触一形成就已经
+                        # 在锥的 2/3 处（FRICTION_AUDIT §C 的播种项）。
+                        # 帧一致性：本 substep 的「当前位姿」正是下一 substep 的
+                        # 「上一位姿」，所以下一次返回映射读到的 q_prev_loc 与
+                        # 这里播下的锚在同一个位姿里，没有引入新的错位。
+                        seed_p = q_loc
+                    anchor_p[pair] = seed_p
                     anchor_valid[pair] = 1
                     seeded = 1
                 else:
@@ -3643,8 +3672,23 @@ def eval_tri_sdf_contact_kernel(
                     if kt * lp > cone and kt > 1.0e-12 and lp > 1.0e-12:
                         # sliding at the end of the previous substep: park the
                         # anchor slip_max behind the material point.
-                        keep = wp.transform_vector(X_sw_p, sp_t * (cone / (kt * lp)))
+                        keep_len = cone / kt
+                        if _T18_FIX_DRAG != 0:
+                            # T18-B1 守卫：塑性流动量 (lp - slip_max) 必须由本
+                            # substep **真实发生过的**相对切向位移解释；解释不了
+                            # 的部分不拖。真滑动时 |du_t| >> 塑性增量，守卫是
+                            # no-op；「没滑却被判在锥外」时锚就不动，不会把一次
+                            # 暂态攒成永久偏移。
+                            du_loc = q_prev_loc - anchor_qp[pair]
+                            du_w = wp.transform_vector(X_ws_p, du_loc)
+                            du_t = du_w - n_world * wp.dot(du_w, n_world)
+                            moved = wp.max(wp.dot(du_t, sp_t) / lp, 0.0)
+                            drag = wp.min(lp - keep_len, moved)
+                            keep_len = lp - drag
+                        keep = wp.transform_vector(X_sw_p, sp_t * (keep_len / lp))
                         anchor_p[pair] = q_prev_loc - keep
+                if _T18_FIX_DRAG != 0:
+                    anchor_qp[pair] = q_prev_loc
             slip_loc = wp.vec3(0.0, 0.0, 0.0)
             if seeded != 0:
                 slip_loc = q_loc - anchor_p[pair]
@@ -3721,6 +3765,12 @@ def eval_tri_sdf_contact_kernel(
                 f_t_a = f_t
                 # sticking: the full tangential spring, projected off the normal.
                 nn_t_a = (wp.identity(n=3, dtype=float) - wp.outer(n_world, n_world)) * kt
+                if _T18_FIX_TAN != 0 and seeded == 0:
+                    # T18-C-1：迭代 0 不接触、迭代 k>=1 才进接触的对没有锚，
+                    # slip 恒 0、f_t 恒 0，却照样拿到一个 kt(=3k) 的切向刚度，
+                    # 而且不受锥约束——合爪把布卷进钳口的那些帧里，它悄悄把布
+                    # 的切向刚化。零力就不该有刚度。
+                    nn_t_a = wp.identity(n=3, dtype=float) * 0.0
             ft_diag = f_t_a
             cone_diag = cone
             slip_diag = wp.length(slip_t)
@@ -3827,11 +3877,33 @@ def eval_tri_sdf_contact_kernel(
     hw = wp.vec3(w[0] * w[0], w[1] * w[1], w[2] * w[2])
     if _R13G_SDF_HESS != 0:
         hw = w
+    if _T18_FIX_NRM != 0:
+        # T18 bit2：法向罚力块与切向块是同一条论证——f = k*depth*n 也按 w_i
+        # 散射、Hessian 按 w_i^2 散射，而只有对角块进求解器，于是「三个顶点
+        # 一起沿法向压缩」这个模态在对角上只剩 k*sum w^2（形心处 = k/3）。
+        # 台架实测：只集总切向时零载残余 |Fz| 从 7.7 N 降到 0.34/0.09 N，
+        # 法向也集总后再降到 0.06/0.03 N（IPC 对照 0.05/0.10 N），
+        # 法向载荷 N 本身不变（11.46 vs 11.44）。
+        hw = w
     # T12-b: anchor tangential half, distributed with the SEEDED weights.
     # aw_out == w whenever the anchor is off, so the OFF path is unchanged
     # (f_t_a and nn_t_a are then identically zero and add nothing).
     haw = wp.vec3(aw_out[0] * aw_out[0], aw_out[1] * aw_out[1], aw_out[2] * aw_out[2])
     if _R13G_SDF_HESS != 0:
+        haw = aw_out
+    if _T18_FIX_TAN != 0:
+        # T18 主修：锚是一个**三角形级**的切向弹簧
+        # E = 1/2 kt |sum_i aw_i x_i - p_anchor|^2。它的精确 Hessian 块是
+        # kt * aw_i * aw_j；求解器只把 i=j 的对角块送进 contact_hessian_diags，
+        # 三个顶点之间的耦合被丢掉。用 aw_i^2 做对角时，这个弹簧真正抵抗的模态
+        # （三点一起切向平移）在对角上只剩 kt*sum aw^2（形心处 = kt/3），比真
+        # 刚度 kt 小 3 倍 ⇒ Newton 每步过冲 3 倍。实测后果：同一 substep 内
+        # 迭代 0 与最后一次迭代的 f_t 逐对反号（96 对里 94 对，cos 中位 -0.9986），
+        # |slip_t| 在 0.99~1.46 倍 slip_max 之间来回，|f_t| 恒等于 0.9 倍满锥，
+        # 与真实切向载荷无关；返回映射每 substep 又把锚重新停回锥面，把这个
+        # 极限环锁死。行和集总 sum_j kt*aw_i*aw_j = kt*aw_i（aw >= 0、sum aw = 1）
+        # 是保 SPD 的标准集总，对角正好复现该模态的真刚度。
+        # 只动切向块：法向的 hw 不碰（法向通道实测对此不敏感，N 变化 <1.5%）。
         haw = aw_out
     if aw_out[0] > 0.0:
         wp.atomic_add(forces, i0, f_t_a * aw_out[0])

@@ -394,6 +394,7 @@ class Collision:
         self.tri_sdf_w = None
         # T8: allocated by enable_triangle_sdf_contacts; None until then.
         self.tri_sdf_anchor_p = None
+        self.tri_sdf_anchor_qp = None
         self.tri_sdf_anchor_valid = None
         self.tri_sdf_anchor_kt_ratio = 0.0
         self.tri_sdf_w_valid = False
@@ -1513,6 +1514,7 @@ class Collision:
                                 self.shape_harden_ksum_lin,
                                 self.shape_harden_kscale,
                                 1 if _iter == 0 else 0,
+                                self.tri_sdf_anchor_qp,
                                 # T18 仪器：``anchor_tail`` 标出这一 substep 的
                                 # 最后一次 Newton 迭代（施加值，而不是试探值）。
                                 1 if _iter == self.nonlinear_iterations - 1 else 0,
@@ -2308,6 +2310,11 @@ class Collision:
         )
         self.tri_sdf_anchor_valid = wp.zeros(
             self.tri_sdf_slots * int(self.model.tri_count), dtype=wp.int32, device=device
+        )
+        # T18 模式 2：上一 substep 的材料点（shape 局部系），用来算真实相对
+        # 切向位移。与 anchor_p 同键同长度；模式 <2 时内核既不读也不写。
+        self.tri_sdf_anchor_qp = wp.zeros(
+            self.tri_sdf_slots * int(self.model.tri_count), dtype=wp.vec3, device=device
         )
         # T12: the barycentric coordinates the anchor was seeded on, so the
         # tangential spring tracks one material point instead of the
