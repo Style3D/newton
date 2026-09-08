@@ -3212,6 +3212,7 @@ def eval_tri_sdf_contact_kernel(
     # ``harden_kscale`` is the scale computed from the PREVIOUS substep's sum by
     # ``update_shape_hardening_kcap_kernel``.
     harden_ksum: wp.array(dtype=float),
+    harden_ksum_lin: wp.array(dtype=float),
     harden_kscale: wp.array(dtype=float),
     kcap_accum: int,
     # outputs
@@ -3502,6 +3503,10 @@ def eval_tri_sdf_contact_kernel(
                 if _T17_SDF_HARDEN_KCAP >= 2:
                     k_tan = k_tan - k       # mode 2: budget the EXCESS only
                 wp.atomic_add(harden_ksum, shape, k_tan)
+                # T17 diagnostic: the LINEAR sum of the SAME contacts, so the
+                # budget can be compared against what the stack carries with the
+                # hardening law switched off.  Never read by the force law.
+                wp.atomic_add(harden_ksum_lin, shape, k)
             inv_den = 1.0 + (inv_den - 1.0) * harden_kscale[shape]
         f = n_world * (k * depth * inv_den)
         nn = wp.outer(n_world, n_world) * (k * inv_den * inv_den)
@@ -4071,6 +4076,7 @@ def accumulate_tri_sdf_reaction_kernel(
 @wp.kernel
 def update_shape_hardening_kcap_kernel(
     harden_ksum: wp.array(dtype=float),
+    harden_ksum_lin: wp.array(dtype=float),
     harden_kmax: wp.array(dtype=float),
     harden_ksum_last: wp.array(dtype=float),
     harden_kdiag: wp.array(dtype=float),
@@ -4088,6 +4094,7 @@ def update_shape_hardening_kcap_kernel(
     """
     i = wp.tid()
     total = harden_ksum[i]
+    lin = harden_ksum_lin[i]
     kmax = harden_kmax[i]
     s = 1.0
     if kmax > 0.0 and total > kmax:
@@ -4095,11 +4102,19 @@ def update_shape_hardening_kcap_kernel(
     harden_kscale[i] = s
     harden_ksum_last[i] = total
     harden_ksum[i] = 0.0
-    # diagnostic, 3 slots per shape: [max Sigma, min s, substeps counted]
+    harden_ksum_lin[i] = 0.0
+    # diagnostic, 8 slots per shape:
+    # 0 max Sigma_hard | 1 min s | 2 substeps | 3 max Sigma_lin
+    # 4 sum Sigma_hard | 5 sum Sigma_lin | 6 loaded substeps | 7 spare
     if kmax > 0.0:
-        wp.atomic_max(harden_kdiag, 3 * i + 0, total)
-        wp.atomic_min(harden_kdiag, 3 * i + 1, s)
-        wp.atomic_add(harden_kdiag, 3 * i + 2, 1.0)
+        wp.atomic_max(harden_kdiag, 8 * i + 0, total)
+        wp.atomic_min(harden_kdiag, 8 * i + 1, s)
+        wp.atomic_add(harden_kdiag, 8 * i + 2, 1.0)
+        wp.atomic_max(harden_kdiag, 8 * i + 3, lin)
+        if total > 0.0:
+            wp.atomic_add(harden_kdiag, 8 * i + 4, total)
+            wp.atomic_add(harden_kdiag, 8 * i + 5, lin)
+            wp.atomic_add(harden_kdiag, 8 * i + 6, 1.0)
 
 
 @wp.kernel

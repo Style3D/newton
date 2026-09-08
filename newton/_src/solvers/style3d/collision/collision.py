@@ -338,14 +338,17 @@ class Collision:
         self.shape_harden_ksum = wp.zeros(
             model.shape_count, dtype=float, device=self.model.device
         )
+        self.shape_harden_ksum_lin = wp.zeros(
+            model.shape_count, dtype=float, device=self.model.device
+        )
         self.shape_harden_ksum_last = wp.zeros(
             model.shape_count, dtype=float, device=self.model.device
         )
         self.shape_harden_kscale = wp.full(
             model.shape_count, 1.0, dtype=float, device=self.model.device
         )
-        _kdiag = np.zeros(3 * model.shape_count, dtype=np.float32)
-        _kdiag[1::3] = 1.0e30          # min-scale slots start at +inf
+        _kdiag = np.zeros(8 * model.shape_count, dtype=np.float32)
+        _kdiag[1::8] = 1.0e30          # min-scale slots start at +inf
         self.shape_harden_kdiag = wp.array(
             _kdiag, dtype=float, device=self.model.device
         )
@@ -499,7 +502,7 @@ class Collision:
         values[np.asarray(shape_ids, dtype=np.int64)] = max(float(eps_max), 0.0)
         self.shape_hardening_eps.assign(values)
         print(f"[collision] contact hardening: shapes={list(np.asarray(shape_ids).ravel())} "
-              f"eps_max={float(eps_max):.3f} (d_max = eps_max x band)", flush=True)
+              f"eps_max={float(eps_max):.3f} (d_max = eps_max x t0, R13)", flush=True)
 
     def set_shape_hardening_kcap(self, shape_ids, k_max):
         """T17: bound the tangent stiffness the hardening law hands each shape.
@@ -549,7 +552,7 @@ class Collision:
             "kmax": self.shape_harden_kmax.numpy().copy(),
             "ksum": self.shape_harden_ksum_last.numpy().copy(),
             "scale": self.shape_harden_kscale.numpy().copy(),
-            "diag": self.shape_harden_kdiag.numpy().copy().reshape(-1, 3),
+            "diag": self.shape_harden_kdiag.numpy().copy().reshape(-1, 8),
         }
 
     def enable_rigid_feature_contacts(
@@ -1388,6 +1391,7 @@ class Collision:
                         dim=int(self.model.shape_count),
                         inputs=[
                             self.shape_harden_ksum,
+                            self.shape_harden_ksum_lin,
                             self.shape_harden_kmax,
                             self.shape_harden_ksum_last,
                             self.shape_harden_kdiag,
@@ -1480,6 +1484,7 @@ class Collision:
                                 # The sum counts each contact once per SUBSTEP, so
                                 # only iteration 0 accumulates.
                                 self.shape_harden_ksum,
+                                self.shape_harden_ksum_lin,
                                 self.shape_harden_kscale,
                                 1 if _iter == 0 else 0,
                             ],
@@ -2331,12 +2336,15 @@ class Collision:
                 except Exception:  # noqa: BLE001
                     return
                 for i in np.nonzero(d["kmax"] > 0.0)[0]:
-                    mx, mn, n = d["diag"][i]
+                    mx, mn, n, mxl, sh, sl, nl = d["diag"][i][:7]
+                    nl = max(float(nl), 1.0)
                     print(
-                        "[T17 kcap] shape %d  k_max=%.4g N/m  max Sigma=%.4g N/m "
-                        "(%.2fx k_max)  min s=%.4g  substeps=%d  last Sigma=%.4g  s=%.4g"
+                        "[T17 kcap] shape %d  k_max=%.4g N/m | Sigma_hard max=%.4g "
+                        "(%.2fx) mean=%.4g | Sigma_lin max=%.4g (%.2fx) mean=%.4g "
+                        "| min s=%.4g | substeps %d 有载 %d"
                         % (int(i), d["kmax"][i], mx, mx / max(d["kmax"][i], 1e-30),
-                           mn, int(n), d["ksum"][i], d["scale"][i]),
+                           sh / nl, mxl, mxl / max(d["kmax"][i], 1e-30), sl / nl,
+                           mn, int(n), int(nl)),
                         flush=True,
                     )
 
