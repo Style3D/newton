@@ -2285,7 +2285,12 @@ class Collision:
                  else "mode%d k_max=%.4g N/m" % (
                      int(__import__("os").environ.get("T17_SDF_HARDEN_KCAP", "0")),
                      float(self.shape_harden_kmax.numpy().max()))),
-            ),
+            )
+            # T18 自证串（后缀式，**mask=0 也打**）：provfile 直接 grep
+            # "+ ANCHOR_FIX=<mask>"。回读的是**内核实际消费的那个 wp.constant**
+            # （kernels._T18_FIX_RAW），不是再读一次 os.environ——环境在
+            # import newton 之后被改掉的话两者会不一致，自证串必须报前者。
+            + " + ANCHOR_FIX=%d" % int(_T18_FIX_RAW_BAKED),
             flush=True,
         )
         pos_rest = self.model.particle_q.numpy().astype(np.float64)
