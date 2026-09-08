@@ -3684,6 +3684,16 @@ def eval_tri_sdf_contact_kernel(
                             du_t = du_w - n_world * wp.dot(du_w, n_world)
                             moved = wp.max(wp.dot(du_t, sp_t) / lp, 0.0)
                             drag = wp.min(lp - keep_len, moved)
+                            if fric_diag.shape[0] > 1:
+                                # T18 仪器：守卫的触发计数。12 = 被抑制的对数
+                                # （真实位移解释不了整个塑性增量的那些），
+                                # 13 = 被抑制掉的塑性位移总量 [m]。
+                                # 只在迭代 0 写，而 fric_diag 正是在迭代 0 的
+                                # 内核发射之前被清零的，所以读到的是这一 substep。
+                                if drag < lp - keep_len - 1.0e-12:
+                                    wp.atomic_add(fric_diag, 14 * shape + 12, 1.0)
+                                    wp.atomic_add(fric_diag, 14 * shape + 13,
+                                                  (lp - keep_len) - drag)
                             keep_len = lp - drag
                         keep = wp.transform_vector(X_sw_p, sp_t * (keep_len / lp))
                         anchor_p[pair] = q_prev_loc - keep
@@ -3853,26 +3863,26 @@ def eval_tri_sdf_contact_kernel(
             ft_diag = f_t
             cone_diag = mu * f_n
     if fric_diag_accum != 0 and fric_diag.shape[0] > 1:
-        # T18 P-9 仪器：逐 shape 12 槽
+        # T18 P-9 仪器：逐 shape 14 槽
         # 0 Sigma|f_t| | 1 Sigma f_n | 2 受载对数 | 3 Sigma cone | 4 在锥上的对数
         # 5 Sigma|slip_t| | 6 Sigma slip_max | 7-9 Sigma f_t（矢量和，世界系）
-        # 10 Sigma depth | 11 max depth
+        # 10 Sigma depth | 11 max depth | 12 B1 守卫触发对数 | 13 被抑制的塑性位移 [m]
         # 由调用侧在每个 substep 的第 0 次迭代清零、最后一次迭代累加，
         # 因此读到的就是「这一 substep 实际施加」的那一份。
-        b12 = 12 * shape
-        wp.atomic_add(fric_diag, b12 + 0, wp.length(ft_diag))
-        wp.atomic_add(fric_diag, b12 + 1, fn_diag)
-        wp.atomic_add(fric_diag, b12 + 2, 1.0)
-        wp.atomic_add(fric_diag, b12 + 3, cone_diag)
-        wp.atomic_add(fric_diag, b12 + 4, oncone_diag)
-        wp.atomic_add(fric_diag, b12 + 5, slip_diag)
+        b14 = 14 * shape
+        wp.atomic_add(fric_diag, b14 + 0, wp.length(ft_diag))
+        wp.atomic_add(fric_diag, b14 + 1, fn_diag)
+        wp.atomic_add(fric_diag, b14 + 2, 1.0)
+        wp.atomic_add(fric_diag, b14 + 3, cone_diag)
+        wp.atomic_add(fric_diag, b14 + 4, oncone_diag)
+        wp.atomic_add(fric_diag, b14 + 5, slip_diag)
         if anchor_kt_ratio > 0.0 and k > 0.0:
-            wp.atomic_add(fric_diag, b12 + 6, cone_diag / (k * anchor_kt_ratio))
-        wp.atomic_add(fric_diag, b12 + 7, ft_diag[0])
-        wp.atomic_add(fric_diag, b12 + 8, ft_diag[1])
-        wp.atomic_add(fric_diag, b12 + 9, ft_diag[2])
-        wp.atomic_add(fric_diag, b12 + 10, depth)
-        wp.atomic_max(fric_diag, b12 + 11, depth)
+            wp.atomic_add(fric_diag, b14 + 6, cone_diag / (k * anchor_kt_ratio))
+        wp.atomic_add(fric_diag, b14 + 7, ft_diag[0])
+        wp.atomic_add(fric_diag, b14 + 8, ft_diag[1])
+        wp.atomic_add(fric_diag, b14 + 9, ft_diag[2])
+        wp.atomic_add(fric_diag, b14 + 10, depth)
+        wp.atomic_max(fric_diag, b14 + 11, depth)
     # R13g: OFF keeps the exact w_i^2 diagonal blocks; ON uses the row-sum lump.
     hw = wp.vec3(w[0] * w[0], w[1] * w[1], w[2] * w[2])
     if _R13G_SDF_HESS != 0:

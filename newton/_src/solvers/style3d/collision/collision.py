@@ -41,6 +41,11 @@ from newton._src.solvers.style3d.collision.kernels import (
     tri_sdf_par_seed_kernel,
     SdfGridExact,
 )
+# T18 自证串用：读**内核里真正烘进 wp.constant 的那个值**，不是再读一次 os.environ
+# （环境在 import newton 之后改掉的话两者会不一致，自证串必须报前者）。
+from newton._src.solvers.style3d.collision.kernels import (  # noqa: E402
+    _T18_FIX_RAW as _T18_FIX_RAW_BAKED,
+)
 from newton._src.solvers.style3d.collision import _t14_prof
 
 
@@ -353,7 +358,7 @@ class Collision:
             _kdiag, dtype=float, device=self.model.device
         )
         self.harden_kcap_enabled = False
-        # T18 P-9 仪器：逐 shape 的 tri-SDF 力累加，12 槽/shape（槽位见力核）。
+        # T18 P-9 仪器：逐 shape 的 tri-SDF 力累加，14 槽/shape（槽位见力核）。
         # 每个 substep 的迭代 0 清零、最后一次迭代累加，所以读到的是「这一
         # substep 实际施加」的那一份。默认不启用（enabled=False ⇒ 传哑数组、
         # accum 恒 0），OFF 路径逐位不变。
@@ -361,7 +366,7 @@ class Collision:
             __import__("os").environ.get("T18_FRIC_DIAG", "0") not in ("", "0")
         )
         self.tri_sdf_fric_diag = wp.zeros(
-            12 * model.shape_count if self.tri_sdf_fric_diag_enabled else 1,
+            14 * model.shape_count if self.tri_sdf_fric_diag_enabled else 1,
             dtype=float,
             device=self.model.device,
         )
@@ -571,14 +576,14 @@ class Collision:
     def read_fric_diag(self):
         """T18 P-9 仪器：这一 substep 每个 shape 的 tri-SDF 力累加。
 
-        返回 shape (shape_count, 12) 的 numpy；未启用（T18_FRIC_DIAG 未设）时
+        返回 shape (shape_count, 14) 的 numpy；未启用（T18_FRIC_DIAG 未设）时
         返回 None。槽位：0 Sigma|f_t| 1 Sigma f_n 2 pairs 3 Sigma cone
         4 on-cone pairs 5 Sigma|slip_t| 6 Sigma slip_max 7-9 Sigma f_t(vec)
-        10 Sigma depth 11 max depth。
+        10 Sigma depth 11 max depth 12 B1 守卫触发对数 13 被抑制的塑性位移 [m]。
         """
         if not self.tri_sdf_fric_diag_enabled:
             return None
-        return self.tri_sdf_fric_diag.numpy().copy().reshape(-1, 12)
+        return self.tri_sdf_fric_diag.numpy().copy().reshape(-1, 14)
 
     def enable_rigid_feature_contacts(
         self,
@@ -2281,6 +2286,17 @@ class Collision:
                      int(__import__("os").environ.get("T17_SDF_HARDEN_KCAP", "0")),
                      float(self.shape_harden_kmax.numpy().max()))),
             ),
+            flush=True,
+        )
+        # T18 自证串（**每跑必打，与开关值无关**，OFF 也打 =0）。
+        # 单独一行、固定前缀，供 `grep -F "[T18] anchor_fix="` 一把抓。
+        _t18_tan = 1 if (_T18_FIX_RAW_BAKED & 1) else 0
+        _t18_drag = 1 if (_T18_FIX_RAW_BAKED & 2) else 0
+        _t18_nrm = 1 if (_T18_FIX_RAW_BAKED & 4) else 0
+        print(
+            "[T18] anchor_fix=%d (tan=%d drag=%d nrm=%d) kt_ratio=%g"
+            % (int(_T18_FIX_RAW_BAKED), _t18_tan, _t18_drag, _t18_nrm,
+               float(self.tri_sdf_anchor_kt_ratio)),
             flush=True,
         )
         pos_rest = self.model.particle_q.numpy().astype(np.float64)
