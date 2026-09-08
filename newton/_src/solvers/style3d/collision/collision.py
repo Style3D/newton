@@ -29,6 +29,7 @@ from newton._src.solvers.style3d.collision.kernels import (
     project_tri_sdf_kernel,
     eval_tri_sdf_contact_kernel,
     accumulate_tri_sdf_reaction_kernel,
+    update_shape_hardening_kcap_kernel,
     solve_untangling_kernel,
     solve_rigid_untangling_kernel,
     summarize_feature_query_kernel,
@@ -323,6 +324,32 @@ class Collision:
         self.shape_hardening_eps = wp.zeros(
             model.shape_count, dtype=float, device=self.model.device
         )
+        # T17 per-shape cap on the tangent stiffness the hardening law adds.
+        # ``shape_harden_kmax`` all zeros = no cap on any shape and the scale
+        # stays 1.0, i.e. the R13c hardening law unchanged; with
+        # ``T17_SDF_HARDEN_KCAP`` unset nothing in the kernels is even reached.
+        # ``ksum`` is the per-substep accumulator, ``ksum_last`` the completed
+        # sum of the previous substep (readable from the host without disturbing
+        # the accumulator), ``kdiag`` a 3-slot-per-shape run summary
+        # [max Sigma, min s, substeps].
+        self.shape_harden_kmax = wp.zeros(
+            model.shape_count, dtype=float, device=self.model.device
+        )
+        self.shape_harden_ksum = wp.zeros(
+            model.shape_count, dtype=float, device=self.model.device
+        )
+        self.shape_harden_ksum_last = wp.zeros(
+            model.shape_count, dtype=float, device=self.model.device
+        )
+        self.shape_harden_kscale = wp.full(
+            model.shape_count, 1.0, dtype=float, device=self.model.device
+        )
+        _kdiag = np.zeros(3 * model.shape_count, dtype=np.float32)
+        _kdiag[1::3] = 1.0e30          # min-scale slots start at +inf
+        self.shape_harden_kdiag = wp.array(
+            _kdiag, dtype=float, device=self.model.device
+        )
+        self.harden_kcap_enabled = False
         # Material-derived contact stiffness (default off: material_ke <= 0 keeps
         # the per-shape constant, and the kernel takes the same branch it always
         # did, so the default path is bit-identical).
@@ -473,6 +500,57 @@ class Collision:
         self.shape_hardening_eps.assign(values)
         print(f"[collision] contact hardening: shapes={list(np.asarray(shape_ids).ravel())} "
               f"eps_max={float(eps_max):.3f} (d_max = eps_max x band)", flush=True)
+
+    def set_shape_hardening_kcap(self, shape_ids, k_max):
+        """T17: bound the tangent stiffness the hardening law hands each shape.
+
+        ``f = k*d/den`` has tangent stiffness ``k/den^2``, up to 400x the linear
+        ``k`` at the incompressible core.  The cloth solver is implicit and does
+        not mind, but the finger is coupled EXPLICITLY (one reaction evaluation
+        per substep, held for the whole 2 ms MuJoCo step), so it is bound by the
+        explicit condition ``K*dt^2/m < 4`` -- 25 kN/m for a 25 g finger at 2 ms,
+        against the ~6.4 MN/m T10-C measured in the wall region, with 85-550 N
+        force spikes on a 6 N effort limit.
+
+        Per substep, for each shape with ``k_max > 0``:
+
+            Sigma = sum over that shape's tri-SDF contacts of k_i/den_i^2
+            s     = min(1, k_max/Sigma_prev)
+            1/den_eff = 1 + (1/den - 1)*s
+
+        The LINEAR part is never scaled, so ``s`` only shrinks what the hardening
+        ADDS, and ``s = 1`` is the stock law bit for bit.  The sum lags one
+        substep (measure now, scale next) so the measurement is not a function of
+        its own output and no host read-back is needed.
+
+        Args:
+            shape_ids: shapes that get the cap (typically the gripper fingers).
+            k_max: scalar or per-shape sequence, N/m.  <= 0 removes the cap.
+        """
+        ids = np.asarray(shape_ids, dtype=np.int64).ravel()
+        vals = np.asarray(k_max, dtype=np.float64).ravel()
+        if vals.size == 1:
+            vals = np.repeat(vals, ids.size)
+        if vals.size != ids.size:
+            raise ValueError(
+                f"set_shape_hardening_kcap: {ids.size} shapes but {vals.size} k_max values")
+        table = self.shape_harden_kmax.numpy()
+        table[ids] = np.maximum(vals, 0.0)
+        self.shape_harden_kmax.assign(table)
+        self.harden_kcap_enabled = bool((table > 0.0).any())
+
+    def read_harden_kcap(self):
+        """T17 diagnostic: per-shape (k_max, last Sigma, current scale).
+
+        ``ksum`` is the PREVIOUS substep's COMPLETED uncapped tangent sum, so it
+        is safe to read at any point in the frame.
+        """
+        return {
+            "kmax": self.shape_harden_kmax.numpy().copy(),
+            "ksum": self.shape_harden_ksum_last.numpy().copy(),
+            "scale": self.shape_harden_kscale.numpy().copy(),
+            "diag": self.shape_harden_kdiag.numpy().copy().reshape(-1, 3),
+        }
 
     def enable_rigid_feature_contacts(
         self,
@@ -1301,6 +1379,22 @@ class Collision:
             if _do_eval:
                 if self.tri_sdf_par and _hold_mode != 2:
                     self._t14_par_search(state_out.particle_q, _tri_sdf_body_q, _n_pairs)
+                if self.harden_kcap_enabled and _iter == 0:
+                    # T17: fold the PREVIOUS substep's tangent sum into this
+                    # substep's scale and re-arm the accumulator.  Fixed dim, no
+                    # host read-back, so the substep stays graph-capturable.
+                    wp.launch(
+                        update_shape_hardening_kcap_kernel,
+                        dim=int(self.model.shape_count),
+                        inputs=[
+                            self.shape_harden_ksum,
+                            self.shape_harden_kmax,
+                            self.shape_harden_ksum_last,
+                            self.shape_harden_kdiag,
+                        ],
+                        outputs=[self.shape_harden_kscale],
+                        device=self.model.device,
+                    )
                 if self.tri_sdf_bp_enabled and _iter == 0:
                     # T14: rebuild the candidate list once per substep.  The blade
                     # pose is fixed inside a substep and the cloth's motion over the
@@ -1382,6 +1476,12 @@ class Collision:
                                 self.tri_sdf_gx,
                                 # T16 w/load diagnostic (inert unless T16_W_DIAG)
                                 self.tri_sdf_w_diag,
+                                # T17 hardening cap (inert unless T17_SDF_HARDEN_KCAP).
+                                # The sum counts each contact once per SUBSTEP, so
+                                # only iteration 0 accumulates.
+                                self.shape_harden_ksum,
+                                self.shape_harden_kscale,
+                                1 if _iter == 0 else 0,
                             ],
                             outputs=[_out_f, _out_h],
                             device=self.model.device,
@@ -1685,6 +1785,8 @@ class Collision:
                         2 if self.tri_sdf_hold else 0,
                         # T15-A nearest-triangle table (inert unless T15_SDF_GRIDEXACT)
                         self.tri_sdf_gx,
+                        # T17 hardening cap scale, read only (inert unless flag)
+                        self.shape_harden_kscale,
                     ],
                     outputs=[body_f],
                     device=self.model.device,
@@ -2129,7 +2231,16 @@ class Collision:
                .get(int(__import__("os").environ.get("T14_SDF_EDGE_EXACT", "0") or 0), ""))
             + _gx_note
             + f": {len(slots)} shape(s), voxel={voxel * 1000:g} mm, h={half_thickness * 1000:g} mm, "
-            + f"grid={total} cells ({total * 4 / 1.0e6:.2f} MB)",
+            + f"grid={total} cells ({total * 4 / 1.0e6:.2f} MB)"
+            # T17 self-certification: the hardening law and its cap, read back
+            # from the very arrays the kernels consume.
+            + " + HARDEN(eps=%.3f,kcap=%s)" % (
+                float(self.shape_hardening_eps.numpy().max()),
+                ("off" if int(__import__("os").environ.get("T17_SDF_HARDEN_KCAP", "0") or 0) == 0
+                 else "mode%d k_max=%.4g N/m" % (
+                     int(__import__("os").environ.get("T17_SDF_HARDEN_KCAP", "0")),
+                     float(self.shape_harden_kmax.numpy().max()))),
+            ),
             flush=True,
         )
         pos_rest = self.model.particle_q.numpy().astype(np.float64)
@@ -2211,6 +2322,25 @@ class Collision:
         # allocated (the kernel takes it either way); with T16_W_DIAG unset
         # nothing reads or writes it.
         self.tri_sdf_w_diag = wp.zeros(32, dtype=float, device=device)
+        if _os_t12.environ.get("T17_KCAP_DIAG", "0") not in ("", "0"):
+            import atexit as _atexit
+
+            def _dump_kcap(_c=self):
+                try:
+                    d = _c.read_harden_kcap()
+                except Exception:  # noqa: BLE001
+                    return
+                for i in np.nonzero(d["kmax"] > 0.0)[0]:
+                    mx, mn, n = d["diag"][i]
+                    print(
+                        "[T17 kcap] shape %d  k_max=%.4g N/m  max Sigma=%.4g N/m "
+                        "(%.2fx k_max)  min s=%.4g  substeps=%d  last Sigma=%.4g  s=%.4g"
+                        % (int(i), d["kmax"][i], mx, mx / max(d["kmax"][i], 1e-30),
+                           mn, int(n), d["ksum"][i], d["scale"][i]),
+                        flush=True,
+                    )
+
+            _atexit.register(_dump_kcap)
         if _os_t12.environ.get("T16_W_DIAG", "0") not in ("", "0"):
             import atexit as _atexit
 

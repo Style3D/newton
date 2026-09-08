@@ -391,6 +391,44 @@ _T16_W_DIAG = wp.constant(int(__import__("os").environ.get("T16_W_DIAG", "0")))
 # rounding.  0 = OFF: the guard is the ``1e-12`` it always was, bit-identical.
 _T16_SDF_SOFT_GATE = wp.constant(int(__import__("os").environ.get("T16_SDF_SOFT_GATE", "0")))
 
+# T17: per-SHAPE CAP on the total tangent stiffness the hardening law hands to
+# the explicitly-coupled rigid side.
+#
+# The hardening law (``contact_hardening_inv_dmax``) multiplies BOTH the load
+# and its slope: f = k*d/den, so the tangent stiffness of one contact is
+#
+#     dF/dd = k / den^2,   den = max(1 - d/d_max, HARDENING_DEN_MIN)
+#
+# i.e. up to 1/0.05^2 = 400x the linear k at the incompressible core.  The cloth
+# solver is implicit and does not care, but the finger is coupled EXPLICITLY:
+# the reaction wrench is evaluated once per substep and held constant inside the
+# 2 ms MuJoCo step, so the finger sees a spring integrated with forward Euler and
+# the stability condition is the explicit one, K*dt^2/m < 4.  With m = 0.025 kg
+# (the MJCF link mass) and dt = 2 ms that is K < 25 kN/m, while T10-C measured
+# the wall region at ~6.4 MN/m -- 250x over -- and the finger force blew up to
+# 85-550 N against a 6 N effort limit (doc GRIPPER-CONTACT.md T10-C).
+#
+# The cap keeps the law but bounds what it can add:
+#
+#     Sigma(shape) = sum_i k_i / den_i^2                  (uncapped, measured)
+#     s            = min(1, k_max(shape) / Sigma_prev)    (one substep of lag)
+#     1/den_eff    = 1 + (1/den - 1) * s
+#
+# so the LINEAR part (1/den = 1) is never scaled -- s only shrinks the EXCESS the
+# hardening adds -- and s = 1 reproduces the stock hardening bit for bit.
+# ``k_max`` is set per shape from the host as c * m_body / dt^2 (see
+# ``set_shape_hardening_kcap``); c = 1 is a quarter of the explicit limit.
+#
+# 1 = cap the TOTAL tangent sum (the literal budget: everything the shape's
+#     contacts hand the rigid side must fit under k_max).
+# 2 = cap the hardening EXCESS only, Sigma_x = sum_i (k_i/den_i^2 - k_i).  Use
+#     when the LINEAR sum alone already exceeds k_max (many contacts): mode 1
+#     then drives s to ~0 and switches the law off, while mode 2 still budgets
+#     the extra stiffness against the same explicit limit.
+# 0 = OFF: not one statement below runs and the hardening law is the R13c one,
+#     bit-identical.
+_T17_SDF_HARDEN_KCAP = wp.constant(int(__import__("os").environ.get("T17_SDF_HARDEN_KCAP", "0")))
+
 
 @wp.struct
 class SdfGridExact:
@@ -3167,6 +3205,15 @@ def eval_tri_sdf_contact_kernel(
     gx: SdfGridExact,
     # T16 diagnostic accumulator (inert unless _T16_W_DIAG)
     w_diag: wp.array(dtype=float),
+    # T17 hardening stiffness cap (inert unless _T17_SDF_HARDEN_KCAP).
+    # ``harden_ksum`` is the per-shape accumulator for THIS substep's uncapped
+    # tangent sum, written only when ``kcap_accum != 0`` (iteration 0, so each
+    # contact counts once per SUBSTEP, not once per Newton iteration);
+    # ``harden_kscale`` is the scale computed from the PREVIOUS substep's sum by
+    # ``update_shape_hardening_kcap_kernel``.
+    harden_ksum: wp.array(dtype=float),
+    harden_kscale: wp.array(dtype=float),
+    kcap_accum: int,
     # outputs
     forces: wp.array(dtype=wp.vec3),
     hessians: wp.array(dtype=wp.mat33),
@@ -3446,6 +3493,16 @@ def eval_tri_sdf_contact_kernel(
     if hardening_inv_dmax > 0.0:
         den = wp.max(1.0 - depth * hardening_inv_dmax, HARDENING_DEN_MIN)
         inv_den = 1.0 / den
+        if _T17_SDF_HARDEN_KCAP != 0:
+            # T17: measure this substep's UNCAPPED tangent sum, then apply the
+            # scale the PREVIOUS substep's sum earned.  Measuring the uncapped
+            # value keeps the loop open (the scale never feeds its own input).
+            if kcap_accum != 0:
+                k_tan = k * inv_den * inv_den
+                if _T17_SDF_HARDEN_KCAP >= 2:
+                    k_tan = k_tan - k       # mode 2: budget the EXCESS only
+                wp.atomic_add(harden_ksum, shape, k_tan)
+            inv_den = 1.0 + (inv_den - 1.0) * harden_kscale[shape]
         f = n_world * (k * depth * inv_den)
         nn = wp.outer(n_world, n_world) * (k * inv_den * inv_den)
     # R13f: Coulomb friction, same law/mixing as the vertex penalty channel.
@@ -3484,6 +3541,12 @@ def eval_tri_sdf_contact_kernel(
             if hardening_inv_dmax > 0.0:
                 den_f = wp.max(1.0 - depth * hardening_inv_dmax, HARDENING_DEN_MIN)
                 f_n = f_n / den_f
+                if _T17_SDF_HARDEN_KCAP != 0:
+                    # T17: the friction cone rides the load the normal law
+                    # actually applied, so it takes the same scaled denominator.
+                    f_n = k * depth * (
+                        1.0 + (1.0 / den_f - 1.0) * harden_kscale[shape]
+                    )
             # T12 fix: the spring must measure the displacement of a MATERIAL
             # point of the cloth, so the barycentric coordinates are seeded WITH
             # the anchor and reused; the closest-point search keeps supplying
@@ -3669,6 +3732,12 @@ def eval_tri_sdf_contact_kernel(
             if hardening_inv_dmax > 0.0:
                 den_f = wp.max(1.0 - depth * hardening_inv_dmax, HARDENING_DEN_MIN)
                 f_n = f_n / den_f
+                if _T17_SDF_HARDEN_KCAP != 0:
+                    # T17: the friction cone rides the load the normal law
+                    # actually applied, so it takes the same scaled denominator.
+                    f_n = k * depth * (
+                        1.0 + (1.0 / den_f - 1.0) * harden_kscale[shape]
+                    )
             a_p = wp.transform_point(X_sw, pos_prev[i0])
             b_p = wp.transform_point(X_sw, pos_prev[i1])
             c_p = wp.transform_point(X_sw, pos_prev[i2])
@@ -3786,6 +3855,10 @@ def accumulate_tri_sdf_reaction_kernel(
     # T15-A: nearest-triangle grid + pseudo-normals for the O(1) exact
     # backend (inert unless _T15_SDF_GRIDEXACT).
     gx: SdfGridExact,
+    # T17 hardening stiffness cap, READ ONLY here (inert unless
+    # _T17_SDF_HARDEN_KCAP): the reaction must ride the same scaled denominator
+    # the force kernel used, or action and reaction disagree.
+    harden_kscale: wp.array(dtype=float),
     # outputs
     body_f: wp.array(dtype=wp.spatial_vector),
 ):
@@ -3949,6 +4022,10 @@ def accumulate_tri_sdf_reaction_kernel(
     if hardening_inv_dmax > 0.0:
         den = wp.max(1.0 - depth * hardening_inv_dmax, HARDENING_DEN_MIN)
         f_n = f_n / den
+        if _T17_SDF_HARDEN_KCAP != 0:
+            f_n = tri_stiffness[t] * depth * (
+                1.0 + (1.0 / den - 1.0) * harden_kscale[shape]
+            )
     reaction = n_world * (-f_n)
     p_world = wp.transform_point(X_ws, p_local)
     # R13f: the tangential half of the same contact, equal and opposite.
@@ -3989,6 +4066,40 @@ def accumulate_tri_sdf_reaction_kernel(
             reaction = reaction - f_t
     com = wp.transform_point(body_q[body], body_com[body])
     wp.atomic_add(body_f, body, wp.spatial_vector(reaction, wp.cross(p_world - com, reaction)))
+
+
+@wp.kernel
+def update_shape_hardening_kcap_kernel(
+    harden_ksum: wp.array(dtype=float),
+    harden_kmax: wp.array(dtype=float),
+    harden_ksum_last: wp.array(dtype=float),
+    harden_kdiag: wp.array(dtype=float),
+    harden_kscale: wp.array(dtype=float),
+):
+    """T17: turn the previous substep's tangent sum into this substep's scale.
+
+    One thread per shape, launched once per substep BEFORE the first force
+    evaluation, so the sum it reads is complete (iteration 0 of the previous
+    substep wrote all of it) and the accumulator starts this substep at zero.
+    Fixed dim, no host read-back: CUDA-graph safe.
+
+    ``harden_kmax[shape] <= 0`` (the default for every shape) leaves the scale at
+    1.0, which reproduces the stock hardening law exactly.
+    """
+    i = wp.tid()
+    total = harden_ksum[i]
+    kmax = harden_kmax[i]
+    s = 1.0
+    if kmax > 0.0 and total > kmax:
+        s = kmax / total
+    harden_kscale[i] = s
+    harden_ksum_last[i] = total
+    harden_ksum[i] = 0.0
+    # diagnostic, 3 slots per shape: [max Sigma, min s, substeps counted]
+    if kmax > 0.0:
+        wp.atomic_max(harden_kdiag, 3 * i + 0, total)
+        wp.atomic_min(harden_kdiag, 3 * i + 1, s)
+        wp.atomic_add(harden_kdiag, 3 * i + 2, 1.0)
 
 
 @wp.kernel
