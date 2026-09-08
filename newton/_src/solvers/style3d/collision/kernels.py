@@ -428,6 +428,15 @@ _T16_SDF_SOFT_GATE = wp.constant(int(__import__("os").environ.get("T16_SDF_SOFT_
 # 0 = OFF: not one statement below runs and the hardening law is the R13c one,
 #     bit-identical.
 _T17_SDF_HARDEN_KCAP = wp.constant(int(__import__("os").environ.get("T17_SDF_HARDEN_KCAP", "0")))
+# T18 诊断开关（力律永不读它们，默认 0 ⇒ 逐位不变）：
+#   T18_ANCHOR_DBG_TAIL=1  anchor_dbg/anchor_dbg2 改写在 substep 的「最后一次
+#                          Newton 迭代」而不是第 0 次，这样读到的是真正被施加
+#                          的力，而不是迭代 0 的试探值（FRICTION_AUDIT §F 的
+#                          两个候选路径要靠它二选一）。
+#   fric_diag              逐 shape 的 tri-SDF 力累加（P-9：compliant 栈把
+#                          shape_contact_ke 置 0，探针的 fric_n 恒 0，读不到
+#                          摩擦状态）。由 fric_diag_accum 门控。
+_T18_ANCHOR_DBG_TAIL = wp.constant(int(__import__("os").environ.get("T18_ANCHOR_DBG_TAIL", "0")))
 
 
 @wp.struct
@@ -3215,6 +3224,12 @@ def eval_tri_sdf_contact_kernel(
     harden_ksum_lin: wp.array(dtype=float),
     harden_kscale: wp.array(dtype=float),
     kcap_accum: int,
+    # T18 仪器（纯输出）。``anchor_tail`` 在 substep 的最后一次 Newton 迭代上
+    # 为 1，其余为 0；``fric_diag`` 是逐 shape 的 12 槽力累加，只在
+    # ``fric_diag_accum != 0`` 时写。两者都不进任何力/Hessian 表达式。
+    anchor_tail: int,
+    fric_diag: wp.array(dtype=float),
+    fric_diag_accum: int,
     # outputs
     forces: wp.array(dtype=wp.vec3),
     hessians: wp.array(dtype=wp.mat33),
@@ -3522,6 +3537,13 @@ def eval_tri_sdf_contact_kernel(
     f_t_a = wp.vec3(0.0, 0.0, 0.0)
     nn_t_a = wp.identity(n=3, dtype=float) * 0.0
     aw_out = w
+    # T18 P-9 仪器：法向力在摩擦律改写 ``f`` 之前先记下来（IPC 分支会把 f_t
+    # 折进 ``f``）。这几个变量只被 fric_diag 的累加块读。
+    fn_diag = wp.length(f)
+    ft_diag = wp.vec3(0.0, 0.0, 0.0)
+    cone_diag = float(0.0)
+    slip_diag = float(0.0)
+    oncone_diag = float(0.0)
     if anchor_kt_ratio > 0.0:
         # T8: Coulomb stick-slip via a tangential anchor, replacing the IPC
         # regularisation on this channel.
@@ -3630,7 +3652,11 @@ def eval_tri_sdf_contact_kernel(
             slip_t = slip_w - n_world * wp.dot(slip_w, n_world)
             f_t = slip_t * (-kt)
             m = wp.length(f_t)
-            if anchor_seed != 0 and anchor_dbg.shape[0] > 1:
+            dbg_when = anchor_seed
+            if _T18_ANCHOR_DBG_TAIL != 0:
+                # T18: 读最后一次迭代（真正被施加的力），而不是迭代 0 的试探值。
+                dbg_when = anchor_tail
+            if dbg_when != 0 and anchor_dbg.shape[0] > 1:
                 q_search = a * w[0] + b * w[1] + c * w[2]
                 anchor_dbg[pair] = wp.vec4(
                     wp.length(slip_t),
@@ -3690,13 +3716,17 @@ def eval_tri_sdf_contact_kernel(
                 if ln_t > 1.0e-12:
                     k_cone = wp.min(kt, 3.0 * cone / ln_t)
                 nn_t_a = (wp.identity(n=3, dtype=float) - wp.outer(n_world, n_world)) * k_cone
+                oncone_diag = 1.0
             else:
                 f_t_a = f_t
                 # sticking: the full tangential spring, projected off the normal.
                 nn_t_a = (wp.identity(n=3, dtype=float) - wp.outer(n_world, n_world)) * kt
+            ft_diag = f_t_a
+            cone_diag = cone
+            slip_diag = wp.length(slip_t)
             # T13 逐对向量诊断（纯输出）。f_t_a 已是钳制后的最终切向力，
             # best_seed 用与内核同一个后端查询函数对播种材料点 q_loc 再查一次。
-            if anchor_seed != 0 and anchor_dbg2.shape[0] > 1:
+            if dbg_when != 0 and anchor_dbg2.shape[0] > 1:
                 q_search_w = wp.transform_point(X_ws, a * w[0] + b * w[1] + c * w[2])
                 q_seed_w = wp.transform_point(X_ws, q_loc)
                 best_seed = float(bg)
@@ -3729,6 +3759,15 @@ def eval_tri_sdf_contact_kernel(
                 anchor_dbg2[pair, 17] = wp.where(seeded == 0, 1.0, 0.0)
                 anchor_dbg2[pair, 18] = float(slot)
                 anchor_dbg2[pair, 19] = cone
+            if anchor_tail != 0 and anchor_dbg2.shape[0] > 1:
+                # T18：同一跑里再记一份「最后一次 Newton 迭代」的切向力与偏移。
+                # 迭代 0 的那一份是试探值（pos 还是 x_prev）；这一份才是这个
+                # substep 真正被施加的力。两份放同一个数组的不同槽位，就能
+                # 逐对相减，不必比两次跑（GPU 原子序不可复现）。
+                anchor_dbg2[pair, 20] = f_t_a[0]
+                anchor_dbg2[pair, 21] = f_t_a[1]
+                anchor_dbg2[pair, 22] = f_t_a[2]
+                anchor_dbg2[pair, 23] = wp.length(slip_t)
             aw_out = aw
     elif _R13F_SDF_FRICTION != 0:
         mu = wp.sqrt(friction_mu * shape_material_mu[shape])
@@ -3761,6 +3800,29 @@ def eval_tri_sdf_contact_kernel(
             f_t, k_t = compute_projected_isotropic_friction(mu, f_n, n_world, u_rel, eps_u)
             f = f + f_t
             nn = nn + k_t
+            ft_diag = f_t
+            cone_diag = mu * f_n
+    if fric_diag_accum != 0 and fric_diag.shape[0] > 1:
+        # T18 P-9 仪器：逐 shape 12 槽
+        # 0 Sigma|f_t| | 1 Sigma f_n | 2 受载对数 | 3 Sigma cone | 4 在锥上的对数
+        # 5 Sigma|slip_t| | 6 Sigma slip_max | 7-9 Sigma f_t（矢量和，世界系）
+        # 10 Sigma depth | 11 max depth
+        # 由调用侧在每个 substep 的第 0 次迭代清零、最后一次迭代累加，
+        # 因此读到的就是「这一 substep 实际施加」的那一份。
+        b12 = 12 * shape
+        wp.atomic_add(fric_diag, b12 + 0, wp.length(ft_diag))
+        wp.atomic_add(fric_diag, b12 + 1, fn_diag)
+        wp.atomic_add(fric_diag, b12 + 2, 1.0)
+        wp.atomic_add(fric_diag, b12 + 3, cone_diag)
+        wp.atomic_add(fric_diag, b12 + 4, oncone_diag)
+        wp.atomic_add(fric_diag, b12 + 5, slip_diag)
+        if anchor_kt_ratio > 0.0 and k > 0.0:
+            wp.atomic_add(fric_diag, b12 + 6, cone_diag / (k * anchor_kt_ratio))
+        wp.atomic_add(fric_diag, b12 + 7, ft_diag[0])
+        wp.atomic_add(fric_diag, b12 + 8, ft_diag[1])
+        wp.atomic_add(fric_diag, b12 + 9, ft_diag[2])
+        wp.atomic_add(fric_diag, b12 + 10, depth)
+        wp.atomic_max(fric_diag, b12 + 11, depth)
     # R13g: OFF keeps the exact w_i^2 diagonal blocks; ON uses the row-sum lump.
     hw = wp.vec3(w[0] * w[0], w[1] * w[1], w[2] * w[2])
     if _R13G_SDF_HESS != 0:

@@ -353,6 +353,18 @@ class Collision:
             _kdiag, dtype=float, device=self.model.device
         )
         self.harden_kcap_enabled = False
+        # T18 P-9 仪器：逐 shape 的 tri-SDF 力累加，12 槽/shape（槽位见力核）。
+        # 每个 substep 的迭代 0 清零、最后一次迭代累加，所以读到的是「这一
+        # substep 实际施加」的那一份。默认不启用（enabled=False ⇒ 传哑数组、
+        # accum 恒 0），OFF 路径逐位不变。
+        self.tri_sdf_fric_diag_enabled = bool(
+            __import__("os").environ.get("T18_FRIC_DIAG", "0") not in ("", "0")
+        )
+        self.tri_sdf_fric_diag = wp.zeros(
+            12 * model.shape_count if self.tri_sdf_fric_diag_enabled else 1,
+            dtype=float,
+            device=self.model.device,
+        )
         # Material-derived contact stiffness (default off: material_ke <= 0 keeps
         # the per-shape constant, and the kernel takes the same branch it always
         # did, so the default path is bit-identical).
@@ -554,6 +566,18 @@ class Collision:
             "scale": self.shape_harden_kscale.numpy().copy(),
             "diag": self.shape_harden_kdiag.numpy().copy().reshape(-1, 8),
         }
+
+    def read_fric_diag(self):
+        """T18 P-9 仪器：这一 substep 每个 shape 的 tri-SDF 力累加。
+
+        返回 shape (shape_count, 12) 的 numpy；未启用（T18_FRIC_DIAG 未设）时
+        返回 None。槽位：0 Sigma|f_t| 1 Sigma f_n 2 pairs 3 Sigma cone
+        4 on-cone pairs 5 Sigma|slip_t| 6 Sigma slip_max 7-9 Sigma f_t(vec)
+        10 Sigma depth 11 max depth。
+        """
+        if not self.tri_sdf_fric_diag_enabled:
+            return None
+        return self.tri_sdf_fric_diag.numpy().copy().reshape(-1, 12)
 
     def enable_rigid_feature_contacts(
         self,
@@ -1399,6 +1423,8 @@ class Collision:
                         outputs=[self.shape_harden_kscale],
                         device=self.model.device,
                     )
+                if self.tri_sdf_fric_diag_enabled and _iter == 0:
+                    self.tri_sdf_fric_diag.zero_()
                 if self.tri_sdf_bp_enabled and _iter == 0:
                     # T14: rebuild the candidate list once per substep.  The blade
                     # pose is fixed inside a substep and the cloth's motion over the
@@ -1487,6 +1513,13 @@ class Collision:
                                 self.shape_harden_ksum_lin,
                                 self.shape_harden_kscale,
                                 1 if _iter == 0 else 0,
+                                # T18 仪器：``anchor_tail`` 标出这一 substep 的
+                                # 最后一次 Newton 迭代（施加值，而不是试探值）。
+                                1 if _iter == self.nonlinear_iterations - 1 else 0,
+                                self.tri_sdf_fric_diag,
+                                (1 if (self.tri_sdf_fric_diag_enabled
+                                       and _iter == self.nonlinear_iterations - 1)
+                                 else 0),
                             ],
                             outputs=[_out_f, _out_h],
                             device=self.model.device,
@@ -2488,8 +2521,9 @@ class Collision:
                 flush=True,
             )
         self.tri_sdf_anchor_dbg = wp.zeros(_dbg_n, dtype=wp.vec4, device=device)
-        # T13 逐对向量诊断：同一开关，形状 [n_pairs, 20]（关闭时 (1, 20) 哑数组）。
-        self.tri_sdf_anchor_dbg2 = wp.zeros((_dbg_n, 20), dtype=float, device=device)
+        # T13 逐对向量诊断：同一开关，形状 [n_pairs, 24]（关闭时 (1, 24) 哑数组）。
+        # T18: 20-23 槽记最后一次 Newton 迭代的 f_t 与 |slip_t|（同一跑内对比）。
+        self.tri_sdf_anchor_dbg2 = wp.zeros((_dbg_n, 24), dtype=float, device=device)
         if self.tri_sdf_anchor_kt_ratio > 0.0:
             print(
                 "[collision] tri-SDF TRUE STATIC friction (T8 anchor, T13 map@prev-pose+blend-tangent): "
