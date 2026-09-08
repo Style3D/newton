@@ -2288,17 +2288,6 @@ class Collision:
             ),
             flush=True,
         )
-        # T18 自证串（**每跑必打，与开关值无关**，OFF 也打 =0）。
-        # 单独一行、固定前缀，供 `grep -F "[T18] anchor_fix="` 一把抓。
-        _t18_tan = 1 if (_T18_FIX_RAW_BAKED & 1) else 0
-        _t18_drag = 1 if (_T18_FIX_RAW_BAKED & 2) else 0
-        _t18_nrm = 1 if (_T18_FIX_RAW_BAKED & 4) else 0
-        print(
-            "[T18] anchor_fix=%d (tan=%d drag=%d nrm=%d) kt_ratio=%g"
-            % (int(_T18_FIX_RAW_BAKED), _t18_tan, _t18_drag, _t18_nrm,
-               float(self.tri_sdf_anchor_kt_ratio)),
-            flush=True,
-        )
         pos_rest = self.model.particle_q.numpy().astype(np.float64)
         tris = self.model.tri_indices.numpy().astype(np.int64)
         e1 = pos_rest[tris[:, 1]] - pos_rest[tris[:, 0]]
@@ -2555,6 +2544,18 @@ class Collision:
                 f"{0.7 * 0.3 / self.tri_sdf_anchor_kt_ratio * 1000:.0f} um)",
                 flush=True,
             )
+        # T18 自证串（**每跑必打，与开关值无关**，OFF 也打 anchor_fix=0）。
+        # 单独一行、固定前缀，供 `grep -F "[T18] anchor_fix="` 一把抓。
+        # 位置必须在 tri_sdf_anchor_kt_ratio 赋值之后，否则 kt_ratio 读到 0。
+        print(
+            "[T18] anchor_fix=%d (tan=%d drag=%d nrm=%d) kt_ratio=%g"
+            % (int(_T18_FIX_RAW_BAKED),
+               1 if (_T18_FIX_RAW_BAKED & 1) else 0,
+               1 if (_T18_FIX_RAW_BAKED & 2) else 0,
+               1 if (_T18_FIX_RAW_BAKED & 4) else 0,
+               float(self.tri_sdf_anchor_kt_ratio)),
+            flush=True,
+        )
         if self.tri_sdf_compliant:
             print(
                 "[collision] triangle SDF contact is COMPLIANT: "
